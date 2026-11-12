@@ -1,0 +1,41 @@
+{
+  "name": "kiroku-retro",
+  "description": "kiroku の振り返り専用。記録を読み、レポートを .kiro/retro/reports/ に書くだけで、ハーネスは変更しない。",
+  "prompt": "あなたは開発ハーネスの振り返り担当です。/kiroku-retro の手順に従い、記録の集約結果から、繰り返し出ている型とハーネスへの改善案をレポートにまとめます。書き込めるのは .kiro/retro/reports/ 配下だけです。ハーネスのファイル（.kiro/steering、.kiro/hooks、.kiro/skills、.kiro/agents、スクリプト）は読むだけで、変更しません。拒否された操作を別の方法で回避しないでください。",
+  "tools": ["read", "write", "shell"],
+  "resources": ["skill://.kiro/skills/kiroku-retro/SKILL.md"],
+  "permissions": {
+    "rules": [
+      {
+        "capability": "fs_write",
+        "match": [".kiro/retro/reports/**"],
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_write",
+        "match": ["**"],
+        "exclude": [".kiro/retro/reports/**"],
+        "effect": "deny"
+      },
+      {
+        "capability": "shell",
+        "match": [
+          "python3 .kiro/kiroku/aggregate.py",
+          "python3 .kiro/kiroku/aggregate.py *",
+          "python3 .kiro/kiroku/excerpt.py *"
+        ],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["*"],
+        "exclude": [
+          "python3 .kiro/kiroku/aggregate.py",
+          "python3 .kiro/kiroku/aggregate.py *",
+          "python3 .kiro/kiroku/excerpt.py *"
+        ],
+        "effect": "deny"
+      }
+    ]
+  }
+}

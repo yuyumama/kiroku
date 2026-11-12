@@ -1,0 +1,6 @@
+{
+  "tests": [],
+  "write_tools": ["fs_write", "str_replace"],
+  "ignore_paths": [".kiro/retro/**", ".git/**"],
+  "output_tail_chars": 2000
+}

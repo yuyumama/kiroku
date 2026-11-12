@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "match": "run_tests\\.py", "report": "reports/junit.xml", "format": "junit" }
+  ]
+}

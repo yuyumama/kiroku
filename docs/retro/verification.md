@@ -7,21 +7,21 @@
 ## 結論
 
 崩れた前提はありません。段階2に進めます。
-残っている未確認は2点で、どちらも段階2の構成を変えません（実装の細部だけが決まります）。
+未確認として残るのは、headless での書き込み制限（段階2では使わない）と、導入先ごとのテスト実行経路（設定で吸収する）です。
 
 | 項目 | 判定 |
 |---|---|
-| 1. セッションログの場所と形式 | 場所は確認済み。行の形式は未確認 |
-| 2. フックに渡る入力 | 確認済み。終了コードの書かれ方だけ未確認 |
+| 1. セッションログの場所と形式 | 確認済み |
+| 2. フックに渡る入力 | 確認済み |
 | 3. 書き込み先の制限 | エージェント定義で確認済み。headless では未確認（使わない方針） |
 | 4. skill をスラッシュコマンドで呼べるか | 確認済み |
 | 5. テストフレームワークと実行経路 | 未確認（対象が社内リポジトリのため。設定で吸収する） |
 
 ## 1. セッションログの場所と形式
 
-**判定：場所は確認済み。行の形式と、時刻やツール呼び出しからの特定は未確認。**
+**判定：確認済み。時刻とツール呼び出しの両方から該当箇所を特定できる。**
 
-確認方法は、`python3 .kiro/kiroku-probe/summarize.py --sessions` の出力です。
+確認方法は、`python3 .kiro/kiroku-probe/summarize.py --sessions` と `python3 .kiro/kiroku-probe/followup.py` の出力です。
 
 - セッションは `~/.kiro/sessions/<16桁の16進数>/<セッションごとのディレクトリ>/` にあります。
   中身は JSON 1個と JSONL 1個です（JSONL は最大で約2MBのものがありました）。
@@ -31,14 +31,21 @@
   「`~/.kiro/sessions/cli/` の JSONL」という当初の情報は、V3 には当てはまりません。
 - `~/.kiro/sessions/dashboard-search.db` は SQLite ですが、検索用の索引です（`marks` 表のみ読めました）。
   公式ドキュメントの「SQLite に保存」という記述は、実態と合っていません。
-- JSONL の各行のキー、時刻の有無、ツール呼び出しの表現は未確認です。
-  `followup.py` で確認します。
+- セッションごとのディレクトリ名は、フックに渡る `session_id` と同じです。
+  中身は `session.json` と `messages.jsonl` です。
+- `messages.jsonl` の各行は `{"id", "timestamp", "payload"}` の形で、`payload.type` が種別です。
+  確認できた種別は `user`、`assistant`、`tool_call`、`tool_result`、`turn_start`、`agent_note`、`ContextualHookInvoked`、`session_metadata` です。
+- `tool_call` には `toolName`、`args`（シェルなら `args.command`）、`toolCallId` があります。
+  `tool_result` には `content`、`success`、`toolCallId` があり、`toolCallId` で対応づけられます。
+- `timestamp` の書式（ISO 形式か数値か）は、値を見ていないため未確認です。
+  `excerpt.py` はどちらでも読めるようにし、コマンド文字列での検索を主にしています。
 
-設計への影響：振り返りの入力は events.jsonl だけで成立させ、セッションログの抜粋は任意の追加入力にします。
+設計への影響：`session_id` から該当のログを開き、コマンド文字列または時刻で前後を抜き出せます（`excerpt.py`）。
+ただしこの形式は公式に文書化されていないため、振り返りは events.jsonl だけでも成立するようにしています。
 
 ## 2. フックに渡る入力
 
-**判定：確認済み。シェル実行の終了コードがどう書かれるかだけ未確認。**
+**判定：確認済み。**
 
 確認方法は、`probe/template/.kiro/hooks/` のダミーフック9本による実機ダンプです。
 `/hooks` で9本すべての読み込みを確認し、`summarize.py` で入力の形を要約しました。
@@ -74,9 +81,10 @@
 
 - **コマンド文字列**：取れます（`tool_input.command`）。
 - **出力**：取れます。ただし `tool_response` は構造化されておらず、1個の文字列です。
-- **終了コード**：独立したキーはありません。
-  `tool_response` の文字列に含まれるかは未確認です（成功時28文字5行、失敗時82文字5行）。
-  `followup.py` で確認します。
+- **終了コード**：取れます。独立したキーは無く、`tool_response` の末尾に書かれます。
+  形は `Output:` の行、出力、空行、`Exit Code: <数値>` の行です。
+  `echo hello` は `Exit Code: 0`、`ls /no/such/dir` は `Exit Code: 2` でした。
+  ツールの承認を人が取り消した場合は `Exit Code: -1` で、出力に取り消された旨が入ります。
 - **書き込んだファイルのパス**：取れます。ファイル系フックの `file_path` が最も素直です。
 - **session_id**：取れます。
 

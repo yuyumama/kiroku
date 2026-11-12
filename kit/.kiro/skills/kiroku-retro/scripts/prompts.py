@@ -1,18 +1,142 @@
-"""対象セッションのユーザー発話を、本文を保存せずページ単位で読む。"""
+"""対象セッションの会話を、本文を保存せずにログから読む。
+
+sessions()  セッションの一覧。発話数、ログの状態、振り返りノートの有無。
+distill()   1セッションの要約表示。ユーザー発話は原文、その後のツール実行は1行、応答は冒頭だけ。
+page()      全セッションのユーザー発話を全文でページ表示する（要約表示で足りないときの予備）。
+"""
+import collections
 import os
 
 import excerpt
 from record import load_config, mask
 
 
-def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=2000):
-    if offset < 0 or size < 1 or chunk_chars < 1:
-        raise ValueError("offset は0以上、size/chunk_chars は1以上が必要です")
+def sessions_dir(root):
     directory = load_config(root).get("sessions_dir")
     if directory:
         directory = os.path.expanduser(directory)
         if not os.path.isabs(directory):
             directory = os.path.join(root, directory)
+    return directory
+
+
+def notes_dir(root):
+    return os.path.join(root, ".kiro", "kiroku", "data", "notes")
+
+
+def _in_period(moment, since, until):
+    return not ((since and moment < since) or (until and moment >= until))
+
+
+def _user_text(payload):
+    text = excerpt.content_text(payload)
+    if not text or not text.strip() or text.lstrip().startswith("/kiroku-retro"):
+        return None
+    return text
+
+
+def sessions(root, events, since=None, until=None):
+    """期間内に記録があるセッションを、新しい順に並べる。"""
+    directory = sessions_dir(root)
+    last_event = {}
+    for event in events:
+        if event.get("session_id"):
+            last_event[event["session_id"]] = event["ts"]
+    rows = []
+    for session, last_ts in last_event.items():
+        row = {"session_id": session, "last_event": last_ts, "log": "ok",
+               "prompts": 0, "prompt_chars": 0, "note": "none"}
+        rows.append(row)
+        path = excerpt.find_log(session, directory)
+        if not path:
+            row["log"] = "missing_log"
+            continue
+        issues = []
+        try:
+            messages = excerpt.load(path, issues)
+        except (OSError, UnicodeError):
+            row["log"] = "unreadable_log"
+            continue
+        latest = None
+        for stamp, payload in messages:
+            moment = excerpt.parse_time(stamp)
+            if payload.get("type") != "user" or moment is None:
+                continue
+            text = _user_text(payload)
+            if text and _in_period(moment, since, until):
+                row["prompts"] += 1
+                row["prompt_chars"] += len(text)
+                latest = moment if latest is None or moment > latest else latest
+        if issues:
+            row["log"] = "partial_log"
+        note = os.path.join(notes_dir(root), session + ".md")
+        if os.path.isfile(note):
+            # ノートを書いた後に発話が増えていれば、読み直しが要る。
+            written = os.path.getmtime(note)
+            row["note"] = "stale" if latest and latest.timestamp() > written else "fresh"
+    return sorted(rows, key=lambda r: r["last_event"], reverse=True)
+
+
+def _clip(text, limit):
+    """長い文を、頭と末尾を残して切る。"""
+    if len(text) <= limit:
+        return text
+    head, tail = limit * 2 // 3, limit // 3
+    return "%s\n…（中略 %d 文字）…\n%s" % (text[:head], len(text) - head - tail, text[-tail:])
+
+
+def distill(root, session, since=None, until=None, user_chars=1500, assistant_chars=300):
+    """1セッションを、ユーザー発話を軸に要約表示する。
+
+    ユーザー発話は原文（長ければ頭と末尾）。次の発話までのツール実行は件数だけ、
+    応答は最後の1件の冒頭だけを添える。全文が要る箇所は excerpt.py --index で読む。
+    """
+    result = {"session_id": session, "status": "ok", "issues": [], "turns": []}
+    path = excerpt.find_log(session, sessions_dir(root))
+    if not path:
+        result["status"] = "missing_log"
+        return result
+    try:
+        rows = excerpt.load(path, result["issues"])
+    except (OSError, UnicodeError):
+        result["status"] = "unreadable_log"
+        return result
+    if result["issues"]:
+        result["status"] = "partial_log"
+    turn = None
+    for index, (stamp, payload) in enumerate(rows):
+        kind = payload.get("type")
+        if kind == "user":
+            turn = None
+            moment = excerpt.parse_time(stamp)
+            text = _user_text(payload)
+            if moment is None or text is None or not _in_period(moment, since, until):
+                continue
+            turn = {"index": index, "ts": stamp, "chars": len(text),
+                    "text": _clip(mask(text), user_chars),
+                    "tools": collections.Counter(), "tool_failures": 0, "reply": None}
+            result["turns"].append(turn)
+        elif turn is None:
+            continue
+        elif kind == "tool_call":
+            turn["tools"][payload.get("toolName") or "unknown"] += 1
+        elif kind == "tool_result" and payload.get("success") is False:
+            turn["tool_failures"] += 1
+        elif kind == "assistant":
+            text = excerpt.content_text(payload)
+            if text.strip():
+                flat = " ".join(mask(text).split())
+                turn["reply"] = {"index": index, "chars": len(text),
+                                 "text": flat[:assistant_chars] + ("…" if len(flat) > assistant_chars else "")}
+    for turn in result["turns"]:
+        turn["tools"] = dict(turn["tools"])
+    return result
+
+
+def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=2000):
+    if offset < 0 or size < 1 or chunk_chars < 1:
+        raise ValueError("offset は0以上、size/chunk_chars は1以上が必要です")
+    directory = sessions_dir(root)
     chunks, coverage = [], []
     session_ids = sorted({e["session_id"] for e in events if e.get("session_id")})
     for session in session_ids:

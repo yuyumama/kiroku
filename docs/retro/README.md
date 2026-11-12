@@ -47,10 +47,11 @@ Windows Python Launcher を使う場合は `-PythonCommand 'py -3'` を指定し
 ├── agents/kiroku-retro.json
 ├── skills/kiroku-retro/
 │   ├── SKILL.md
+│   ├── references/    harness-guide.md（案の形の選び方）
 │   └── scripts/       record.py、aggregate.py、excerpt.py、prompts.py、harness.py
 └── kiroku/
     ├── config.json
-    └── data/          events.jsonl、state.json、record.lock、reports/ など
+    └── data/          events.jsonl、state.json、record.lock、notes/、reports/ など
 ```
 
 `data/` はインストーラーが `.gitignore` に追加します。コード・出力・秘密値が含まれうるため、コミットや PR に含めません。
@@ -109,7 +110,7 @@ CLI と IDE には共通の v1 フック形式を使います。製品上の発�
 
 会話本文を kiroku に複製保存しません。
 
-1. 対象期間のユーザー発話をログからページ単位で読み、改善候補を見つけます。
+1. セッションを1件ずつ要約表示で読み、改善候補を見つけます。
 2. 候補の前後だけ、AI 応答・ツール実行を読みます。
 
 ログの探索対象は、そのプロジェクトの対象期間のイベントに登場する session ID です。
@@ -126,19 +127,28 @@ IDE の内部保存場所は決め打ちしません。Export Chat で保存し�
 対応する配置は `<sessions_dir>/<session_id>/messages.jsonl`、その間に1階層ある配置、または `sessions_dir` 自体がセッション ID のディレクトリである配置です。
 絶対パスも指定できます。ZIP は自動展開しません。本文形式の実機互換性は別途確認が必要です。
 
+発話を全部読むと量が多すぎるため、次の3つで量を抑えます。
+
+- **セッション一覧**：集約結果に、セッションごとの発話数と、振り返りノートの有無が出ます。
+- **1件ずつの要約表示**：ユーザー発話は原文（長ければ頭と末尾）、その後のツール実行は件数、応答は最後の1件の冒頭だけを出します。
+- **振り返りノート**：読み終えたセッションの要点を `data/notes/<session_id>.md` に残します。次回はノートを読み、ログを読み直しません。
+
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --prompts
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d
 ```
 
-ユーザー発話を2000文字ずつに分け、1ページ20部分まで表示します。長文の後半や古い発話も続きのページで読めます。
-出力に `next_offset`／「続きあり」があれば `--prompt-offset` を指定します。
-ページ間は最初に表示された開始・終了日時を `--since`・`--until` に指定し、期間を固定します。
+```bash
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --session <session_id>
+```
+
+1回の振り返りで読むのは、新しい順に10セッションまでです。残りは「未読」としてレポートに書き、次回に回します。
+全発話を全文で読みたいときは、予備として `--prompts` と `--prompt-offset` によるページ表示が使えます。
 
 ```bash
 python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --index <index> --context 3
 ```
 
-`index` は発話一覧に表示されます。実行イベントから探す場合は `--around <時刻>` や `--command "<一部>"` を使います。
+`index` は要約表示に出ます。実行イベントから探す場合は `--around <時刻>` や `--command "<一部>"` を使います。
 長い項目には続きの `--offset` を表示します。中身を保存せず、必要な範囲を出力します。
 旧 `--conversation` は廃止しました。
 
@@ -164,10 +174,13 @@ PowerShell の実行例は、導入時に選んだ `python` または `py -3` �
 記録がない場合も、README・コード・開発設定から必要な初期ハーネスを検討します。
 
 レポートは `data/reports/YYYY-MM-DD-HHMM.md` に保存します。
-既存設定との対応、変更理由、unified diff、期待する効果、検証手順と期待結果を含めます。
-適用・テストを実施していなければ未実施と明記します。必要性がなければ提案は「なし」です。
+改善案は文章で書きます。既存設定との対応、変更の内容、その形を選んだ理由、期待する効果と確かめ方を含めます。
+差分は作らず、ハーネスも変更しません。適用するかどうかは、レポートを読んだ人が決めます。必要性がなければ提案は「なし」です。
 
-専用エージェントの書き込みはレポート配下、シェルは集約・抜粋スクリプトに制限します。
+会話からの型は、原則として2つ以上の別のセッションに根拠があるものだけを挙げます。
+案の形の選び方と、既存の決まりが効かなかった理由の切り分けは、skill の `references/harness-guide.md` にまとめています。Kiro の公式ドキュメントの推奨に基づきます。
+
+専用エージェントの書き込みはレポートと振り返りノートの配下、シェルは集約・抜粋スクリプトに制限します。
 この評価版で人が品質を確認する運用は、将来の自動化を制限するものではありません。
 
 ## 開発・評価

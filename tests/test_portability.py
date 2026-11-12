@@ -1,7 +1,9 @@
 """製品の実機試験ではなく、導入とログアダプターの契約を検証する。"""
+import datetime
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -161,6 +163,66 @@ class AdapterTest(Sandbox):
         talk = aggregate.aggregate(self.root, with_prompts=True)["prompt_page"]
         self.assertEqual(talk["coverage"][0]["status"], "missing_log")
         self.assertEqual(talk["chunks"], [])
+
+    def test_distilled_session_view_and_note_status(self):
+        home = Path(tempfile.mkdtemp(prefix="kiroku-home-"))
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        self.addCleanup(os.environ.pop, "KIRO_HOME", None)
+        os.environ["KIRO_HOME"] = str(home)
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "x"})
+        log_dir = home / "sessions" / "0123456789abcdef" / self.session
+        log_dir.mkdir(parents=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        rows = [
+            {"type": "user", "content": "設定の読み込みを作って。password=hunter2pw"},
+            {"type": "tool_call", "toolName": "fs_write", "args": {"path": "a.py"}},
+            {"type": "tool_result", "success": True, "content": "ok"},
+            {"type": "tool_call", "toolName": "execute_bash", "args": {"command": "pytest"}},
+            {"type": "tool_result", "success": False, "content": "boom"},
+            {"type": "assistant", "content": "途中経過です"},
+            {"type": "assistant", "content": "できました。" + "長" * 900},
+            {"type": "user", "content": "長い。結論から言って。" + "あ" * 4000 + "末尾の指示"},
+            {"type": "assistant", "content": "結論です"},
+        ]
+        with open(log_dir / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, payload in enumerate(rows):
+                stamp = (now + datetime.timedelta(seconds=index)).isoformat()
+                handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload}) + "\n")
+
+        view = aggregate.prompts.distill(self.root, self.session)
+        self.assertEqual([t["index"] for t in view["turns"]], [0, 7])
+        first, second = view["turns"]
+        self.assertEqual(first["tools"], {"fs_write": 1, "execute_bash": 1})
+        self.assertEqual(first["tool_failures"], 1)
+        self.assertEqual(first["reply"]["index"], 6)           # 次の発話の直前の応答
+        self.assertLessEqual(len(first["reply"]["text"]), 301)
+        self.assertNotIn("hunter2pw", first["text"])
+        self.assertIn("長い。結論から言って。", second["text"])   # 頭と
+        self.assertIn("末尾の指示", second["text"])              # 末尾を残す
+        self.assertLess(len(second["text"]), 1600)
+        text = aggregate.render_session(view)
+        self.assertIn("ツール実行：execute_bash×1、fs_write×1、失敗 1 件", text)
+        self.assertNotIn("途中経過です", text)
+
+        row = aggregate.aggregate(self.root)["sessions"][0]
+        self.assertEqual((row["log"], row["prompts"], row["note"]), ("ok", 2, "none"))
+        notes = Path(self.root) / ".kiro" / "kiroku" / "data" / "notes"
+        notes.mkdir(parents=True)
+        note = notes / (self.session + ".md")
+        note.write_text("# note\n", encoding="utf-8")
+        future = (now + datetime.timedelta(hours=1)).timestamp()
+        os.utime(note, (future, future))
+        self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "fresh")
+        os.utime(note, (now.timestamp() - 3600, now.timestamp() - 3600))
+        self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "stale")
+        self.assertIn("ノートの後に発話あり", aggregate.render(aggregate.aggregate(self.root)))
+
+    def test_missing_log_is_reported_in_session_view(self):
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "x"})
+        view = aggregate.prompts.distill(self.root, self.session)
+        self.assertEqual((view["status"], view["turns"]), ("missing_log", []))
+        self.assertIn("会話に基づく判断を保留", aggregate.render_session(view))
+        self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["log"], "missing_log")
 
     def test_session_id_cannot_select_unrelated_logs(self):
         self.assertIsNone(excerpt.find_log("../private", self.root))

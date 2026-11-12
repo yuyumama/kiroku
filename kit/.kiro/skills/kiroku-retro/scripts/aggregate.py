@@ -2,17 +2,19 @@
 """kiroku の集約。.kiro/kiroku/data/events.jsonl を読み、後計算で分類して要約を出す。
 
 使い方:
-  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 14d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 7d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --session <session_id>
 
 テスト失敗の分類（記録時ではなく、ここで計算する）:
-  正常な Red  前回の全テスト成功より後に追加されたテスト、
+  Red 候補    前回の全テスト成功より後に追加されたテスト、
               または前回の全テスト成功以降にテストファイルが変更されたテストの失敗
   回帰        前回の全テスト成功の時点で存在し、通っていて、テストファイルが変わっていないテストの失敗
   その他      基準になる全テスト成功が無い、通った記録が無い、git から状態を復元できない、など
 
-発話:
-  --prompts で対象期間のユーザー発話をログからページ単位で読む。
-  AI 応答は候補を選んだ後に excerpt.py で必要な前後だけを読む。
+会話:
+  集約結果のセッション一覧で、発話数と振り返りノートの有無を示す。
+  --session で1セッションを要約表示する。ユーザー発話は原文、ツール実行は件数、応答は冒頭だけ。
+  全文が要る箇所は excerpt.py で前後を読む。--prompts は全発話を全文でページ表示する予備。
   ログが欠落したセッションでは会話に基づく判断を保留する。
 
 書き直し候補:
@@ -402,6 +404,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit)
         if with_prompts else None,
         "harness": harness.inventory(root),
+        "sessions": prompts.sessions(root, events, since, until),
         "fix_candidates": candidates,
         "fix_excluded": excluded,
     }
@@ -481,6 +484,7 @@ def render(data, show_prompts=False):
             row["path"], row["status"], row["written_at"], row["session_id"]))
     if data["fix_excluded"]:
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
+    lines += render_sessions(data["sessions"])
     page = data.get("prompt_page")
     if page is not None:
         lines += ["", "## ユーザー発話（ログから取得・本文の保存なし）", ""]
@@ -499,8 +503,44 @@ def render(data, show_prompts=False):
                       % page["next_offset"]]
         else:
             lines += ["", "ユーザー発話の最終ページです。"]
-    else:
-        lines += ["", "ユーザー発話は --prompts で取得し、候補の前後だけ excerpt.py で確認します。"]
+    return "\n".join(lines) + "\n"
+
+
+NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり"}
+
+
+def render_sessions(sessions):
+    lines = ["", "## セッション一覧（%d 件、新しい順）" % len(sessions), "",
+             "会話は `--session <session_id>` で1件ずつ読みます。", "",
+             "| session | 最後の記録 | ログ | 発話 | 発話の文字数 | 振り返りノート |",
+             "|---|---|---|---|---|---|"]
+    for row in sessions:
+        lines.append("| `%s` | %s | %s | %d | %d | %s |" % (
+            row["session_id"], row["last_event"], row["log"], row["prompts"],
+            row["prompt_chars"], NOTE_LABELS[row["note"]]))
+    return lines
+
+
+def render_session(view):
+    lines = ["# セッションの要約表示 `%s`" % view["session_id"], "",
+             "- ログの状態：%s" % view["status"],
+             "- ユーザー発話：%d 件" % len(view["turns"]),
+             "- ユーザー発話は原文、ツール実行は件数、応答は最後の1件の冒頭だけです。",
+             "- 全文は `excerpt.py --session %s --index <index> --context 3` で読みます。" % view["session_id"]]
+    if view["status"] != "ok":
+        lines.append("- 会話に基づく判断を保留：%s" % (", ".join(view["issues"]) or view["status"]))
+    for turn in view["turns"]:
+        lines += ["", "## index=%d [%s] ユーザー（%d 文字）" % (turn["index"], turn["ts"], turn["chars"]),
+                  "", turn["text"], ""]
+        if turn["tools"]:
+            tools = "、".join("%s×%d" % item for item in sorted(turn["tools"].items()))
+            failed = "、失敗 %d 件" % turn["tool_failures"] if turn["tool_failures"] else ""
+            lines.append("- ツール実行：%s%s" % (tools, failed))
+        if turn["reply"]:
+            lines.append("- 応答（index=%d、%d 文字）：%s" % (
+                turn["reply"]["index"], turn["reply"]["chars"], turn["reply"]["text"]))
+        else:
+            lines.append("- 応答：なし")
     return "\n".join(lines) + "\n"
 
 
@@ -511,7 +551,10 @@ def main(argv=None):
     parser.add_argument("--until", default=None, help="終了。日数または日付")
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
-    parser.add_argument("--prompts", action="store_true", help="発話の本文も出す")
+    parser.add_argument("--session", help="このセッションだけを要約表示する")
+    parser.add_argument("--user-chars", type=int, default=1500, help="要約表示で、発話1件の最大文字数（既定 1500）")
+    parser.add_argument("--reply-chars", type=int, default=300, help="要約表示で、応答の冒頭の文字数（既定 300）")
+    parser.add_argument("--prompts", action="store_true", help="全発話を全文でページ表示する（予備）")
     parser.add_argument("--prompt-offset", type=int, default=0, help="発話の開始位置（既定 0）")
     parser.add_argument("--prompt-limit", type=int, default=20, help="1ページの発話分割数（既定 20）")
     args = parser.parse_args(argv)
@@ -526,6 +569,16 @@ def main(argv=None):
     now = datetime.datetime.now(datetime.timezone.utc)
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else now
+    if args.session:
+        if args.user_chars < 1 or args.reply_chars < 1:
+            parser.error("user-chars と reply-chars は1以上にしてください")
+        view = prompts.distill(root, args.session, since, until, args.user_chars, args.reply_chars)
+        if args.json:
+            json.dump(view, sys.stdout, ensure_ascii=False, indent=2, default=str)
+            sys.stdout.write("\n")
+        else:
+            sys.stdout.write(render_session(view))
+        return
     data = aggregate(root, since, until, args.by, args.prompts,
                      args.prompt_offset, args.prompt_limit)
     if args.json:

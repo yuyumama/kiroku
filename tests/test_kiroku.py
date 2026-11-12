@@ -182,15 +182,13 @@ class PromptTest(Sandbox):
         self.write(path, text)
         self.saved(path)
 
-    def test_prompt_is_recorded_masked_and_truncated(self):
+    def test_prompt_records_only_timing(self):
         done = self.say("この関数の意味を教えて。token=abcdef123456 " + "あ" * 3000)
         self.assertEqual((done.returncode, done.stdout), (0, ""))
         event = self.events()[0]
         self.assertEqual(event["type"], "prompt")
-        self.assertIn("この関数の意味を教えて", event["text"])
-        self.assertNotIn("abcdef123456", event["text"])
-        self.assertLessEqual(len(event["text"]), 2000)
-        self.assertGreater(event["chars"], 3000)
+        self.assertEqual(set(event), {"type", "ts", "session_id", "v"})
+        self.assertNotIn("abcdef123456", json.dumps(event))
 
     def test_retro_command_and_empty_prompt_are_not_recorded(self):
         self.say("/kiroku-retro 直近30日")
@@ -206,10 +204,10 @@ class PromptTest(Sandbox):
         data = aggregate.aggregate(self.root, by="all")
         self.assertEqual([(r["path"], r["turns"]) for r in data["rework_candidates"]],
                          [("src/login.py", 2)])
-        self.assertIn("違う、エラー表示", data["rework_candidates"][0]["prompts"][0]["text"])
+        self.assertEqual(set(data["rework_candidates"][0]["prompts"][0]), {"ts"})
         self.assertEqual(data["periods"]["全期間"]["prompts"], 2)
         text = aggregate.render(data, show_prompts=True)
-        self.assertIn("ログイン画面を作って", text)
+        self.assertNotIn("ログイン画面を作って", text)
         self.assertIn("書き直し候補（1 件）", text)
         self.assertNotIn("ログイン画面を作って", aggregate.render(data))  # 既定では本文を出さない
 
@@ -236,43 +234,74 @@ class ConversationTest(Sandbox):
                 handle.write(json.dumps({"id": str(index), "payload": payload,
                                          "timestamp": "2026-11-12T00:00:%02dZ" % index}) + "\n")
 
-    def test_conversation_includes_agent_responses_from_session_log(self):
-        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "この処理を説明して"})
+    def test_first_pass_includes_only_user_text(self):
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "hook only"})
         self.write_log([
-            {"type": "user", "content": "この処理を説明して"},
-            {"type": "turn_start"},
-            {"type": "tool_call", "toolName": "fs_read", "args": {"path": "a.py"}},
-            {"type": "assistant", "content": "これは設定を読み込む処理です。password=hunter2pw " + "長" * 900},
-            {"type": "user", "content": "長い。結論から言って"},
-            {"type": "assistant", "content": "設定を読みます。"},
+            {"type": "user", "content": "質問 password=hunter2pw"},
+            {"type": "assistant", "content": "応答はまだ読まない"},
+            {"type": "user", "content": [{"type": "text", "text": "結論から言って"},
+                                          {"type": "image", "data": "PRIVATE_IMAGE"}]},
         ])
-        data = aggregate.aggregate(self.root, by="all", with_conversation=True)
-        talk = data["conversations"][0]
-        self.assertEqual(talk["source"], "session_log")
-        self.assertEqual([m["role"] for m in talk["messages"]],
-                         ["user", "assistant", "user", "assistant"])
-        self.assertLessEqual(len(talk["messages"][1]["text"]), 301)
+        data = aggregate.aggregate(self.root, with_prompts=True)
+        chunks = data["prompt_page"]["chunks"]
+        self.assertEqual([c["index"] for c in chunks], [0, 2])
         text = aggregate.render(data)
-        self.assertIn("エージェント「これは設定を読み込む処理です。", text)
-        self.assertIn("ユーザー「長い。結論から言って」", text)
-        self.assertNotIn("hunter2pw", text)
-        self.assertNotIn("fs_read", text)
+        self.assertIn("結論から言って", text)
+        for omitted in ("hunter2pw", "PRIVATE_IMAGE", "応答はまだ読まない", "hook only"):
+            self.assertNotIn(omitted, text)
 
-    def test_conversation_falls_back_to_recorded_prompts_without_log(self):
-        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "テストを書いて"})
-        data = aggregate.aggregate(self.root, by="all", with_conversation=True)
-        talk = data["conversations"][0]
-        self.assertEqual(talk["source"], "recorded_prompts")
-        self.assertIn("セッションログが見つからない", aggregate.render(data))
-        self.assertIn("テストを書いて", aggregate.render(data))
+    def test_missing_log_never_falls_back_to_old_prompt_body(self):
+        record.append_events(os.path.join(self.root, ".kiro/kiroku/data"), [
+            {"type": "prompt", "ts": "2026-11-12T00:00:00Z", "session_id": self.session,
+             "text": "legacy prompt body", "v": 1}])
+        data = aggregate.aggregate(self.root, with_prompts=True)
+        self.assertEqual(data["prompt_page"]["coverage"][0]["status"], "missing_log")
+        self.assertEqual(data["prompt_page"]["chunks"], [])
+        self.assertNotIn("legacy prompt body", json.dumps(data))
+        self.assertIn("判断を保留", aggregate.render(data))
 
-    def test_long_session_keeps_only_recent_messages(self):
+    def test_pagination_keeps_long_and_early_prompts(self):
         self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "x"})
-        self.write_log([{"type": "assistant", "content": "応答 %d" % i} for i in range(30)])
-        data = aggregate.aggregate(self.root, by="all", with_conversation=True, max_messages=10)
-        talk = data["conversations"][0]
-        self.assertEqual((len(talk["messages"]), talk["omitted"]), (10, 20))
-        self.assertIn("応答 29", talk["messages"][-1]["text"])
+        long_text = "前" * 2100 + "後半の大切な方針"
+        self.write_log([{"type": "user", "content": long_text}] +
+                       [{"type": "user", "content": "発話 %d" % i} for i in range(30)])
+        chunks, offset = [], 0
+        while offset is not None:
+            page = aggregate.aggregate(self.root, with_prompts=True, prompt_offset=offset,
+                                       prompt_limit=5)["prompt_page"]
+            chunks.extend(page["chunks"])
+            offset = page["next_offset"]
+        self.assertEqual("".join(c["text"] for c in chunks if c["index"] == 0), long_text)
+        self.assertEqual(len({c["index"] for c in chunks}), 31)
+
+    def test_time_filter_and_unknown_time_are_explicit(self):
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "x"})
+        self.write_log([{"type": "user", "content": "before"},
+                        {"type": "user", "content": "inside"},
+                        {"type": "user", "content": "until is exclusive"}])
+        # 期間のセッション選択はフックの時刻による。
+        events = [{"session_id": self.session}]
+        page = aggregate.prompts.page(self.root, events,
+                                      excerpt.parse_time("2026-11-12T00:00:01Z"),
+                                      excerpt.parse_time("2026-11-12T00:00:02Z"))
+        self.assertEqual([c["text"] for c in page["chunks"]], ["inside"])
+        path = excerpt.find_log(self.session)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"payload": {"type": "user", "content": "unknown"}}) + "\n")
+        page = aggregate.prompts.page(self.root, events)
+        self.assertEqual(page["coverage"][0]["status"], "partial_log")
+        self.assertNotIn("unknown", [c["text"] for c in page["chunks"]])
+
+    def test_context_fetch_targets_index_and_has_continuation(self):
+        self.write_log([{"type": "assistant", "content": "A" * 2500},
+                        {"type": "user", "content": "説明を短くして"}])
+        command = [sys.executable, os.path.join(KIT, "excerpt.py"), "--session", self.session,
+                   "--index", "1", "--context", "1", "--limit", "100"]
+        done = subprocess.run(command, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("説明を短くして", done.stdout)
+        self.assertIn("--index 0 --context 0 --offset 100", done.stdout)
+
 
 
 class ClassifyTest(Sandbox):

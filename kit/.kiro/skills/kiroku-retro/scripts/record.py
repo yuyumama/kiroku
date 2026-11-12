@@ -4,7 +4,7 @@
 対応するフック:
   PostToolUse   シェル実行の失敗、テスト実行の結果、書き込みツールが触ったファイル
   PostFileSave  エージェントが保存したファイル
-  UserPromptSubmit  ユーザーの発話（質問や指示の本文）
+  UserPromptSubmit  発話のタイミングのみ（本文は保存しない）
 
 守ること:
   - 標準出力には何も書かない（終了コード 0 の標準出力はエージェントの文脈に入る）。
@@ -12,6 +12,7 @@
   - テスト失敗は記録時に分類しない。結果を生のまま残し、分類は aggregate.py が後から計算する。
 """
 import datetime
+from contextlib import contextmanager
 import fnmatch
 import glob
 import json
@@ -26,14 +27,18 @@ try:
 except ImportError:  # Windows
     fcntl = None
 
-SCHEMA_VERSION = 1
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+SCHEMA_VERSION = 2
 DEFAULT_CONFIG = {
     "tests": [],
-    "write_tools": ["fs_write", "str_replace"],
+    "write_tools": ["fs_write", "fs_append", "str_replace"],
     "ignore_paths": [".kiro/kiroku/data/**", ".git/**"],
     "output_tail_chars": 2000,
     "max_dirty_files": 500,
-    "prompt_max_chars": 2000,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 SECRET_PATTERNS = [
@@ -65,7 +70,7 @@ def git(root, *args, stdin=None):
     try:
         done = subprocess.run(
             ["git", "-C", root] + list(args), input=stdin, capture_output=True,
-            text=True, timeout=20)
+            text=True, encoding="utf-8", errors="replace", timeout=20)
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -227,7 +232,11 @@ def shell_events(payload, root, cwd, retro_dir, config):
     output = response[:found.start()] if found else response
     if output.startswith("Output:\n"):
         output = output[len("Output:\n"):]
-    tail = mask(output.rstrip()[-config["output_tail_chars"]:])
+    tail = mask(output.rstrip())[-config["output_tail_chars"]:]
+
+    if exit_code is None:
+        return [{"type": "recording_gap", "tool": payload.get("tool_name"),
+                 "reason": "unknown_shell_response", "command": mask(command)}]
 
     entry = next((t for t in config["tests"] if re.search(t.get("match", "(?!)"), command)), None)
     if entry is not None and exit_code != -1:
@@ -282,6 +291,26 @@ def append_events(retro_dir, events):
         os.close(fd)
 
 
+@contextmanager
+def recording_lock(retro_dir):
+    """同時フックによる state.json と JSONL の競合を POSIX/Windows 両方で防ぐ。"""
+    os.makedirs(retro_dir, exist_ok=True)
+    fd = os.open(os.path.join(retro_dir, "record.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    locked = False
+    try:
+        if fcntl:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        elif msvcrt:
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        locked = True
+        yield
+    finally:
+        if locked and msvcrt and not fcntl:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        os.close(fd)
+
+
 def main():
     payload = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
     cwd = payload.get("cwd") or os.getcwd()
@@ -291,30 +320,30 @@ def main():
     hook = payload.get("hook_event_name")
     tool = payload.get("tool_name")
 
-    events = []
-    if hook in ("PostFileSave", "PostFileCreate"):
-        events = write_event(root, cwd, payload.get("file_path"), hook, config)
-    elif hook == "UserPromptSubmit":
-        text = payload.get("prompt")
-        if not isinstance(text, str):
-            text = os.environ.get("USER_PROMPT") or ""
-        # 振り返りの起動そのものは記録しない。
-        if text.strip() and not text.lstrip().startswith("/kiroku-retro"):
-            limit = config["prompt_max_chars"]
-            events = [{"type": "prompt", "text": mask(text[:limit]), "chars": len(text)}]
-    elif hook == "PostToolUse" and tool == "execute_bash":
-        events = shell_events(payload, root, cwd, retro_dir, config)
-    elif hook == "PostToolUse" and tool in config["write_tools"]:
-        # 整形フックなどが PostFileSave で書き換えた後の内容を、ここで取り直す。
-        tool_input = payload.get("tool_input") or {}
-        events = write_event(root, cwd, tool_input.get("path"), "PostToolUse:%s" % tool, config)
+    with recording_lock(retro_dir):
+        events = []
+        if hook in ("PostFileSave", "PostFileCreate"):
+            events = write_event(root, cwd, payload.get("file_path"), hook, config)
+        elif hook == "UserPromptSubmit":
+            text = payload.get("prompt")
+            if not isinstance(text, str):
+                text = os.environ.get("USER_PROMPT") or ""
+            # 振り返りの起動そのものは記録しない。
+            if text.strip() and not text.lstrip().startswith("/kiroku-retro"):
+                events = [{"type": "prompt"}]
+        elif hook == "PostToolUse" and tool in ("execute_bash", "execute_pwsh"):
+            events = shell_events(payload, root, cwd, retro_dir, config)
+        elif hook == "PostToolUse" and tool in config["write_tools"]:
+            # 整形フックなどが PostFileSave で書き換えた後の内容を、ここで取り直す。
+            tool_input = payload.get("tool_input") or {}
+            events = write_event(root, cwd, tool_input.get("path"), "PostToolUse:%s" % tool, config)
 
-    if events:
-        stamp = now()
-        session_id = payload.get("session_id") or os.environ.get("KIRO_SESSION_ID")
-        for event in events:
-            event.update({"v": SCHEMA_VERSION, "ts": stamp, "session_id": session_id})
-        append_events(retro_dir, events)
+        if events:
+            stamp = now()
+            session_id = payload.get("session_id") or os.environ.get("KIRO_SESSION_ID")
+            for event in events:
+                event.update({"v": SCHEMA_VERSION, "ts": stamp, "session_id": session_id})
+            append_events(retro_dir, events)
     return retro_dir
 
 

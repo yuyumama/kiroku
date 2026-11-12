@@ -23,7 +23,7 @@
     },
     {
       "name": "kiroku-record-prompt",
-      "description": "ユーザーの発話を記録する",
+      "description": "発話のタイミングを記録する（本文は保存しない）",
       "trigger": "UserPromptSubmit",
       "action": {
         "type": "command",

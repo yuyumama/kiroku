@@ -1,275 +1,181 @@
 # kiroku の使い方
 
-kiroku は、Kiro CLI（V3）での開発中に起きた失敗や手直しを記録し、ハーネスの改善案を出すための仕組みです。
-ハーネスとは、`.kiro/steering`、`.kiro/hooks`、`.kiro/skills`、`.kiro/agents`、関連するスクリプトのことです。
+Kiro での開発中の記録と現在のハーネスを比較し、変更差分付きの改善案を作ります。
+目的は、同じ指摘・説明の繰り返しとハーネス整備の負担を減らすことです。不具合・作業失敗も分析します。
 
-いまの版は「記録」と「手動の振り返り」までです。
-分類や PR 作成の自動化は、2週間分の記録を見てから設計します。
-
-## 仕組み
-
-1. **記録**：フックが、ツール実行のたびに `.kiro/kiroku/data/events.jsonl` へ追記します。LLM は使いません。
-2. **集約**：`aggregate.py` が記録を読み、テスト失敗を後から分類し、期間ごとに要約します。
-3. **振り返り**：専用エージェントの新しいセッションで `/kiroku-retro` を呼ぶと、レポートが `.kiro/kiroku/data/reports/` に出ます。
-
-`.kiro/kiroku/data/` は `.gitignore` で除外されます。
-コードや認証情報が混ざりうるので、コミットや PR に載せないでください。
+現在は評価段階です。週次を想定して手動で専用エージェントを呼びます。
+自動起動・自動採否・適用・過去の提案管理は今後の対象です。
+実装の対応範囲と製品上の検証状況は [互換性調査](compatibility.md) と [評価手順](evaluation.md) を参照してください。
 
 ## 必要なもの
 
-- Kiro CLI 3.0 以降（3.2.1 で確認）
-- python3（3.9 以降。追加のパッケージは不要）
-- git
+- Kiro CLI V3 または Kiro IDE 1.x（旧 IDE 0.x は対象外）
+- Python 3.9 以降、Git。Python の追加パッケージは不要
+- Windows の導入は PowerShell、Linux/macOS は POSIX shell
 
-## 導入
+公式の Kiro 導入手順は [Installation](https://kiro.dev/docs/getting-started/installation/) にあります。
+CLI・IDE の認証は利用するアカウントで行います。
+
+## 導入と更新
+
+Linux/macOS:
 
 ```bash
-git clone https://github.com/yuyumama/kiroku ~/kiroku
+sh /path/to/kiroku/install.sh /path/to/project
+sh /path/to/kiroku/install.sh /path/to/project --update
 ```
 
-```bash
-sh ~/kiroku/install.sh <導入先のリポジトリ>
+PowerShell:
+
+```powershell
+& C:\tools\kiroku\install.ps1 -Target 'C:\work\my project'
+& C:\tools\kiroku\install.ps1 -Target 'C:\work\my project' -Update
 ```
 
-導入先に置かれるファイルは次のとおりです。これらはコミットして構いません。
+既定の Python 起動名は POSIX が `python3`、PowerShell が `python` です。
+Windows Python Launcher を使う場合は `-PythonCommand 'py -3'` を指定します。
+選択した起動名を、フック・専用エージェントのシェル許可規則・スキルの実行例に反映します。
+`install.py` は両インストーラーの共通処理です。
 
-| ファイル | 役割 |
-|---|---|
-| `.kiro/hooks/kiroku.json` | 記録フック3本（PostToolUse、PostFileSave、UserPromptSubmit） |
-| `.kiro/skills/kiroku-retro/scripts/record.py` | フックから呼ばれ、イベントを追記する |
-| `.kiro/skills/kiroku-retro/scripts/aggregate.py` | 集約と分類 |
-| `.kiro/skills/kiroku-retro/scripts/excerpt.py` | セッションログの該当箇所を抜き出す |
-| `.kiro/kiroku/config.json` | 導入先ごとの設定 |
-| `.kiro/skills/kiroku-retro/SKILL.md` | 振り返りの手順 |
-| `.kiro/agents/kiroku-retro.json` | 振り返り専用のエージェント定義 |
+既存の同名ファイルが異なる場合、通常導入は変更前に止まります。
+`--update`／`-Update` では配布ファイルを更新しますが、既存の `config.json` は保持します。
+新しい設定を使う場合は既存設定へ追加してください。旧 `prompt_max_chars` は現在使いません。
 
-`.kiro/` の直下に増えるのは `kiroku/` だけです。ほかは Kiro の決まった置き場所（`hooks/`、`skills/`、`agents/`）に1つずつ入ります。
-
-```
+```text
 .kiro/
 ├── hooks/kiroku.json
 ├── agents/kiroku-retro.json
 ├── skills/kiroku-retro/
 │   ├── SKILL.md
-│   └── scripts/         ← record.py、aggregate.py、excerpt.py
+│   └── scripts/       record.py、aggregate.py、excerpt.py、prompts.py、harness.py
 └── kiroku/
     ├── config.json
-    └── data/            ← 記録とレポート。git の対象外
-        ├── events.jsonl
-        └── reports/
+    └── data/          events.jsonl、state.json、record.lock、reports/ など
 ```
 
-既存のファイルは上書きしません。同じ名前で中身の違うファイルがあれば、何も変更せずに止まります。
-kiroku を新しい版にするときは `--update` を付けます。`config.json` は置き換えません。
+`data/` はインストーラーが `.gitignore` に追加します。コード・出力・秘密値が含まれうるため、コミットや PR に含めません。
+更新前に記録したユーザー発話本文は自動削除しませんが、集約には利用しません。
 
-```bash
-sh ~/kiroku/install.sh <導入先のリポジトリ> --update
-```
+導入後、CLI は `/hooks`、IDE は Hooks の画面で3本の記録フックの読み込みを確認します。
+CLI と IDE には共通の v1 フック形式を使います。製品上の発火・入力形式は評価手順で確認してください。
 
-導入後、Kiro を起動して `/hooks` を入力し、`kiroku-record-tool`、`kiroku-record-file`、`kiroku-record-prompt` が出ることを確かめてください。
+## 記録するもの
 
-## 記録されるもの
+| イベント | 内容 |
+|---|---|
+| `tool_failure` | シェル失敗のコマンド、終了コード、出力末尾 |
+| `tool_cancelled` / `tool_denied` | 人による取り消し／権限規則による拒否 |
+| `write` | ファイルのパス、内容ハッシュ、コミット |
+| `prompt` | 発話の時刻と session ID。本文は保存しない |
+| `test_run` | 設定された JUnit レポートと、その時点の Git 状態 |
+| `recording_gap` | 未知のシェル応答など、判定できなかった実行 |
 
-設定なしで記録されるのは次の5種類です。
+通常の成功したシェル実行と kiroku 自身のコマンドは記録しません。
+`execute_bash` と `execute_pwsh`、書き込みは `fs_write`・`fs_append`・`str_replace` とファイル保存フックに対応します。
+シェル応答は既存の `Exit Code:` 形式を解析します。未知の応答を成功扱いにはしません。
 
-| 種類 | 記録する場面 | 主な項目 |
-|---|---|---|
-| `tool_failure` | シェル実行が 0 以外の終了コードで終わった | コマンド、終了コード、出力の末尾 |
-| `tool_cancelled` | 人がツールの実行を取り消した | コマンド |
-| `tool_denied` | 権限の規則でツールの実行が拒否された | コマンド |
-| `write` | エージェントがファイルを保存した | パス、内容ハッシュ |
-| `prompt` | ユーザーが発話を送った | 質問や指示の本文（最大2000文字） |
+コマンド・出力は秘密値らしい文字列をマスクしますが完全ではありません。
+記録処理の異常で本来の開発を止めず、`data/record-errors.log` にエラーを残します。
+同時フックによる記録・JUnit 読込状態の競合は、OS のファイルロックで直列化します。
 
-成功したシェル実行は記録しません。kiroku 自身のスクリプトの実行も記録しません。
-1回の書き込みは、PostFileSave と PostToolUse の両方で記録されます（整形フックが書き換えた後の内容を取り直すため）。
-集約では1回として数えます。
-どのイベントにも、`session_id` と時刻（`ts`）が付きます。
+## テスト結果を取り込む
 
-コマンドと出力は、秘匿情報らしい値（トークン、パスワード、秘密鍵など）を伏せてから保存します。
-伏せ字は完全ではありません。
-
-## テスト結果も記録する
-
-テスト結果を記録するには、`.kiro/kiroku/config.json` の `tests` に、コマンドとレポートの対応を書きます。
+導入先の `.kiro/kiroku/config.json` に設定します。
 
 ```json
 {
   "tests": [
-    { "match": "\\bpytest\\b", "report": "reports/junit.xml", "format": "junit" }
-  ]
+    {"match": "\\bpytest\\b", "report": "reports/junit.xml", "format": "junit"}
+  ],
+  "sessions_dir": null
 }
 ```
 
-- `match`：テスト実行とみなすコマンドの正規表現です。
-- `report`：JUnit XML の場所です。リポジトリのルートからの相対パスで、`**` などの glob が使えます。
-- `format`：いまは `junit` だけです。
+`match` はテストコマンドの正規表現、`report` はプロジェクトルートからの相対パスです。glob が使えます。
+テスト側で毎回 JUnit XML を出す設定が必要です。設定がない場合はテスト結果の取り込みを行いません。
 
-テストツール側で、**毎回 JUnit XML を出す設定**にしておく必要があります。
-エージェントがオプションを付け忘れても記録できるよう、コマンドの引数ではなく設定ファイルで指定するのが確実です。
+分類は記録時ではなく集約時に行います。
 
-| ツール | 設定の例 |
+| 分類 | 根拠 |
 |---|---|
-| pytest | `pytest.ini` の `addopts = --junitxml=reports/junit.xml` |
-| Jest | `jest-junit` をレポーターに追加し、`addFileAttribute` を有効にする |
-| Vitest | `reporters: ['default', 'junit']` と `outputFile` |
-| Go | `gotestsum --junitfile reports/junit.xml` |
-| Maven、Gradle | 既定で出る（`target/surefire-reports/*.xml`、`build/test-results/**/*.xml`） |
+| Red 候補 | 全テスト成功後に新しく観測されたテスト、またはテストファイルの変更 |
+| 回帰候補 | 過去に通っていたテストで、テストファイルの変更を確認できない |
+| その他 | 基準になる成功記録や Git 状態などが不足 |
 
-設定すると、テスト実行ごとに `test_run` が記録されます。
-項目は、テストID単位の成否、その時点のコミットハッシュ、作業ツリーの変更ファイルと内容ハッシュです。
+これは原因や意図の確定ではありません。テスト追加、部分実行、環境要因、flaky test などを会話・差分と照らします。
+ファイルの内容差分も変更者を証明しないため、「人間の手直し候補」は確認材料として扱います。
 
-記録の時点では分類しません。TDD のフェーズ宣言も、テストコマンドのブロックもしません。
+## 会話はログから二段階で読む
 
-## 集約する
+会話本文を kiroku に複製保存しません。
 
-```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py
+1. 対象期間のユーザー発話をログからページ単位で読み、改善候補を見つけます。
+2. 候補の前後だけ、AI 応答・ツール実行を読みます。
+
+ログの探索対象は、そのプロジェクトの対象期間のイベントに登場する session ID です。
+CLI の既定探索先は `~/.kiro/sessions/*/<session_id>/messages.jsonl`（`KIRO_HOME` 指定時はその配下）。
+ログの内容形式は公開された安定 API ではありません。ログがない・読めない・一部壊れている場合は不足を表示し、会話に基づく判断を保留します。
+イベント自体がないセッションやサブエージェントのログは自動収集しません。
+
+IDE の内部保存場所は決め打ちしません。Export Chat で保存した ZIP を、例えば git 対象外の `data/exports/` に展開し、設定します。
+
+```json
+{"sessions_dir": ".kiro/kiroku/data/exports"}
 ```
 
-既定では直近14日を、週ごとに要約します。
-
-| オプション | 意味 |
-|---|---|
-| `--since 30d`、`--since 2026-11-01` | 開始。日数または日付。`all` で全期間 |
-| `--until 2026-12-01` | 終了 |
-| `--by day`、`--by week`、`--by all` | 要約の単位 |
-| `--json` | JSON で出力 |
-
-### テスト失敗の分類
-
-| 分類 | 条件 |
-|---|---|
-| 正常な Red | 前回の全テスト成功より後に追加されたテスト。または、それ以降にテストファイルが変更されたテスト |
-| 回帰 | 前回の全テスト成功の時点で存在し、通っていて、テストファイルが変わっていないテスト |
-| その他 | 基準になる全テスト成功が無い、通った記録が無い、git から当時の状態を復元できない |
-
-テストとファイルの対応は、レポートの `file` 属性があればそれを使います。
-無ければ `classname`（`tests.test_foo.TestBar` など）からパスを推測します。
-対応が分からない場合は、通っていたテストの失敗を回帰として扱い、その旨を根拠に書きます。
-
-### 発話と書き直し候補
-
-発話の本文は、`--prompts` を付けると、セッションごとに時刻順で出ます。
+対応する配置は `<sessions_dir>/<session_id>/messages.jsonl`、その間に1階層ある配置、または `sessions_dir` 自体がセッション ID のディレクトリである配置です。
+絶対パスも指定できます。ZIP は自動展開しません。本文形式の実機互換性は別途確認が必要です。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --prompts
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --prompts
 ```
 
-発話はスクリプトでは分類しません。
-何度も聞かれていること、説明への不満、口頭での指摘は、振り返りの LLM が発話を読んで判断します。
-
-書き直し候補は、同じセッションの中で、複数の発話にまたがって書き直されたファイルです。
-人が口頭で指摘して直させた可能性がある箇所で、書き直しの直前の発話を添えて出します。
-作業の続きで同じファイルを触っただけの場合も含まれるので、振り返りで発話を読んで見分けます。
-
-### エージェントの応答
-
-エージェントの応答は、フックでは取れません（応答の本文がフックに渡されないため）。
-代わりに、集約のときに Kiro のセッションログ（`~/.kiro/sessions/`）から読みます。
+ユーザー発話を2000文字ずつに分け、1ページ20部分まで表示します。長文の後半や古い発話も続きのページで読めます。
+出力に `next_offset`／「続きあり」があれば `--prompt-offset` を指定します。
+ページ間は最初に表示された開始・終了日時を `--since`・`--until` に指定し、期間を固定します。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --conversation
+python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --index <index> --context 3
 ```
 
-発話と応答が、セッションごとに時刻順で出ます。1件は300文字に切り、1セッションは新しい120件までです。
-振り返りはこの一覧を読み、説明のどこが分かりにくかったかを、直前の応答と合わせて見立てます。
+`index` は発話一覧に表示されます。実行イベントから探す場合は `--around <時刻>` や `--command "<一部>"` を使います。
+長い項目には続きの `--offset` を表示します。中身を保存せず、必要な範囲を出力します。
+旧 `--conversation` は廃止しました。
 
-次の点に注意してください。
+## 振り返りを実行する
 
-- セッションログは、記録を取った PC にしかありません。Kiro がログを消すと読めなくなります。
-- ログが見つからないセッションは、記録した発話だけを出します。
-- ログの形式は公式に文書化されていません。Kiro の更新で読めなくなる可能性があります。
-
-### 人間の手直し候補
-
-エージェントが最後に書いた内容と、いまの内容が違うファイルです。
-merge、pull、rebase、checkout、reset などで変わったファイルは除きます。
-
-次の場合は検出できません。
-
-- 人が直した後に、エージェントが同じファイルをもう一度書いた。
-- エージェントがシェル経由（`sed` など）で書いた。
-
-## 振り返る
-
-作業中のセッションとは別に、専用エージェントで新しいセッションを起動します。
+CLI は作業セッションと別に、専用エージェントを起動します。
 
 ```bash
 kiro-cli chat --agent kiroku-retro
 ```
 
-起動したら、次を入力します。
+IDE は専用エージェント `kiroku-retro` を選び、新しいチャットで同じスキルを呼びます。
 
-```
+```text
 /kiroku-retro
 ```
 
-期間を変えるときは、後ろに書きます（例：`/kiroku-retro 直近30日`）。
+既定は直近7日。期間は後ろに指定できます。
+PowerShell の実行例は、導入時に選んだ `python` または `py -3` に読み替えてください。
 
-レポートは `.kiro/kiroku/data/reports/YYYY-MM-DD-HHMM.md` に出ます。
-中身は「繰り返し出ている型」と「ハーネスへの改善案」で、学びがなければ「なし」と書かれます。
+比較するのはプロジェクト内とユーザー共通の steering・hooks・skills・agents・MCP 設定、および関連する開発設定です。
+原則としてプロジェクト内の変更を提案し、共通設定の変更は他プロジェクトへの影響とともに別提案にします。
+記録がない場合も、README・コード・開発設定から必要な初期ハーネスを検討します。
 
-専用エージェントは、次のことしかできません。
+レポートは `data/reports/YYYY-MM-DD-HHMM.md` に保存します。
+既存設定との対応、変更理由、unified diff、期待する効果、検証手順と期待結果を含めます。
+適用・テストを実施していなければ未実施と明記します。必要性がなければ提案は「なし」です。
 
-- 書き込み：`.kiro/kiroku/data/reports/` 配下だけ
-- シェル：`aggregate.py` と `excerpt.py` の実行だけ。ほかのコマンドは、単独でも組み合わせでも拒否される
+専用エージェントの書き込みはレポート配下、シェルは集約・抜粋スクリプトに制限します。
+この評価版で人が品質を確認する運用は、将来の自動化を制限するものではありません。
 
-ハーネスの変更は、レポートを読んだ人が行います。
-
-## 動作確認
-
-実際のリポジトリに入れる前に、付属のサンプルで一通り試せます。追加のパッケージは要りません。
-
-```bash
-mkdir ~/kiroku-demo && cp -R ~/kiroku/examples/demo/. ~/kiroku-demo/ && cd ~/kiroku-demo && git init
-```
-
-```bash
-sh ~/kiroku/install.sh . && git add -A && git commit -m init
-```
-
-```bash
-kiro-cli chat
-```
-
-Kiro に、次の文章を1つずつ順に送ります。
-
-1. `python3 run_tests.py を実行して`（全テスト成功）
-2. `tests/test_calc.py に、add(2, 2) が 5 になることを確かめるテストを追加して、python3 run_tests.py を実行して。失敗してもそのままでよい`（正常な Red）
-3. `いま追加したテストの期待値を 4 に直して、python3 run_tests.py を実行して`（全テスト成功）
-4. `calc.py の add を a - b に書き換えて、python3 run_tests.py を実行して。失敗してもそのままでよい`（回帰）
-5. `シェルで ls /no/such/dir を実行して。失敗してもそのままでよい`（ツール失敗）
-
-`/quit` で終了し、記録と集約を確かめます。
-
-```bash
-python3 -c "import json;[print(e['type'], e.get('exit_code'), e.get('path') or e.get('command')) for e in map(json.loads, open('.kiro/kiroku/data/events.jsonl'))]"
-```
-
-```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --by all
-```
-
-期待する結果は、正常な Red が1回、回帰が2種類、ツール失敗が1種類です。
-続けて、上の「振り返る」の手順でレポートが出ることを確かめます。
-
-## うまくいかないとき
-
-- **何も記録されない**：`/hooks` にフックが出ているか、`python3` が通っているかを確かめます。
-  記録処理のエラーは `.kiro/kiroku/data/record-errors.log` に残ります。
-- **テスト結果が空（`results` が null）**：イベントの `note` を見ます。
-  `report_not_found` はレポートが出ていません。`report_stale` はレポートが前回から更新されていません。
-- **分類が「その他」ばかり**：全テストが通った記録がまだ無いか、テスト結果が記録されていません。
-
-## やめるとき
-
-`.kiro/hooks/kiroku.json`、`.kiro/kiroku/`、`.kiro/skills/kiroku-retro/`、`.kiro/agents/kiroku-retro.json` を削除します。
-記録を消すには `.kiro/kiroku/data/` を削除します。
-
-## 開発
+## 開発・評価
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-検証の経緯は [verification.md](verification.md) にあります。
+テストは一時 Git リポジトリと模擬フック・ログを使います。製品連携や LLM の提案品質を証明するものではありません。
+サンプルは `examples/demo/`、製品での確認手順は [evaluation.md](evaluation.md) にあります。
+過去の CLI 実測は [verification.md](verification.md) に記録されています。

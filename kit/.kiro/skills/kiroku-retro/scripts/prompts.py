@@ -124,7 +124,8 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
             turn["tool_failures"] += 1
         elif kind == "assistant":
             text = excerpt.content_text(payload)
-            if text.strip():
+            # 実機のログでは、各ターンの最後に "..." だけの応答が入る。文字のある応答だけを採る。
+            if any(ch.isalnum() for ch in text):
                 flat = " ".join(mask(text).split())
                 turn["reply"] = {"index": index, "chars": len(text),
                                  "text": flat[:assistant_chars] + ("…" if len(flat) > assistant_chars else "")}

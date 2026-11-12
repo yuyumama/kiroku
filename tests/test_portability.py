@@ -181,6 +181,7 @@ class AdapterTest(Sandbox):
             {"type": "tool_result", "success": False, "content": "boom"},
             {"type": "assistant", "content": "途中経過です"},
             {"type": "assistant", "content": "できました。" + "長" * 900},
+            {"type": "assistant", "content": "..."},  # 実機のログに入る、中身のない応答
             {"type": "user", "content": "長い。結論から言って。" + "あ" * 4000 + "末尾の指示"},
             {"type": "assistant", "content": "結論です"},
         ]
@@ -190,7 +191,7 @@ class AdapterTest(Sandbox):
                 handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload}) + "\n")
 
         view = aggregate.prompts.distill(self.root, self.session)
-        self.assertEqual([t["index"] for t in view["turns"]], [0, 7])
+        self.assertEqual([t["index"] for t in view["turns"]], [0, 8])
         first, second = view["turns"]
         self.assertEqual(first["tools"], {"fs_write": 1, "execute_bash": 1})
         self.assertEqual(first["tool_failures"], 1)

@@ -29,7 +29,8 @@ for p in sorted(glob.glob(".kiro/kiroku-probe/out/*-PostToolUse.json")):
 print("\n## 2. セッションログの行の形")
 home = os.environ.get("KIRO_HOME") or os.path.expanduser("~/.kiro")
 tail = (sid or "")[-36:]
-dirs = [d for d in glob.glob(os.path.join(home, "sessions", "*", "*")) if tail and tail in d]
+dirs = [d for d in glob.glob(os.path.join(home, "sessions", "*", "*"))
+        if tail and tail in d and os.path.isdir(d)]
 print("session_id の形: %s / 一致したディレクトリ: %d 個" % (
     "".join("x" if c.isalnum() else c for c in sid or ""), len(dirs)))
 for d in dirs[:1]:

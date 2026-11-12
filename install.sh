@@ -1,12 +1,12 @@
 #!/bin/sh
 # kiroku を導入先のリポジトリにコピーする。
-#   使い方: ./install.sh <導入先のリポジトリ> [--update]
+#   使い方: sh install.sh <導入先のリポジトリ> [--update]
 # 既存のファイルは上書きしない。同じ名前で中身の違うファイルがあれば、何もせずに止まる。
 # --update を付けると kiroku のファイルを新しい版で置き換える（config.json は置き換えない）。
 set -eu
 
 if [ $# -lt 1 ]; then
-  echo "使い方: $0 <導入先のリポジトリ> [--update]" >&2
+  echo "使い方: sh $0 <導入先のリポジトリ> [--update]" >&2
   exit 2
 fi
 target=$1

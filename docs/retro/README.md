@@ -28,7 +28,7 @@ git clone https://github.com/yuyumama/kiroku ~/kiroku
 ```
 
 ```bash
-~/kiroku/install.sh <導入先のリポジトリ>
+sh ~/kiroku/install.sh <導入先のリポジトリ>
 ```
 
 導入先に置かれるファイルは次のとおりです。これらはコミットして構いません。
@@ -47,7 +47,7 @@ git clone https://github.com/yuyumama/kiroku ~/kiroku
 kiroku を新しい版にするときは `--update` を付けます。`config.json` は置き換えません。
 
 ```bash
-~/kiroku/install.sh <導入先のリポジトリ> --update
+sh ~/kiroku/install.sh <導入先のリポジトリ> --update
 ```
 
 導入後、Kiro を起動して `/hooks` を入力し、`kiroku-record-tool` と `kiroku-record-file` が出ることを確かめてください。
@@ -172,7 +172,7 @@ mkdir ~/kiroku-demo && cp -R ~/kiroku/examples/demo/. ~/kiroku-demo/ && cd ~/kir
 ```
 
 ```bash
-~/kiroku/install.sh . && git add -A && git commit -m init
+sh ~/kiroku/install.sh . && git add -A && git commit -m init
 ```
 
 ```bash

@@ -277,7 +277,9 @@ def aggregate(root, since=None, until=None, by="week"):
     candidates, excluded = fix_candidates(repo, [e for e in events if e.get("type") == "write"])
 
     periods = collections.OrderedDict()
-    columns = ("sessions", "test_runs", RED, REGRESSION, OTHER, "tool_failures", "cancelled", "writes")
+    columns = ("sessions", "test_runs", RED, REGRESSION, OTHER, "tool_failures", "cancelled",
+               "denied", "writes")
+    seen_writes = set()
 
     def bucket(moment):
         return periods.setdefault(period_key(moment, by), {c: 0 for c in columns} | {"_s": set()})
@@ -292,8 +294,14 @@ def aggregate(root, since=None, until=None, by="week"):
             row["tool_failures"] += 1
         elif kind == "tool_cancelled":
             row["cancelled"] += 1
+        elif kind == "tool_denied":
+            row["denied"] += 1
         elif kind == "write":
-            row["writes"] += 1
+            # 1回の書き込みは PostFileSave と PostToolUse の両方で記録されるので、まとめて数える。
+            key = (event.get("session_id"), event.get("path"), event.get("hash"))
+            if key not in seen_writes:
+                seen_writes.add(key)
+                row["writes"] += 1
     for failure in failures:
         bucket(failure["_time"])[failure["class"]] += 1
     for row in periods.values():
@@ -311,7 +319,7 @@ def aggregate(root, since=None, until=None, by="week"):
 
     grouped_tools = {}
     for event in events:
-        if event.get("type") not in ("tool_failure", "tool_cancelled"):
+        if event.get("type") not in ("tool_failure", "tool_cancelled", "tool_denied"):
             continue
         entry = grouped_tools.setdefault((event["type"], command_key(event.get("command"))), {
             "type": event["type"], "command_key": command_key(event.get("command")),
@@ -349,17 +357,19 @@ def render(data):
     lines = ["# kiroku 集約", ""]
     lines.append("- 期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"))
     lines.append("- イベント数：%d" % data["event_count"])
+    lines.append("- レポートの保存先：.kiro/retro/reports/%s.md"
+                 % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
     if not data["event_count"]:
         lines += ["", "この期間の記録はありません。"]
         return "\n".join(lines) + "\n"
 
     lines += ["", "## 期間ごとの要約", "",
-              "| 期間 | セッション | テスト実行 | 正常な Red | 回帰 | その他 | ツール失敗 | 取り消し | 書き込み |",
-              "|---|---|---|---|---|---|---|---|---|"]
+              "| 期間 | セッション | テスト実行 | 正常な Red | 回帰 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for name, row in data["periods"].items():
-        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
             name, row["sessions"], row["test_runs"], row[RED], row[REGRESSION], row[OTHER],
-            row["tool_failures"], row["cancelled"], row["writes"]))
+            row["tool_failures"], row["cancelled"], row["denied"], row["writes"]))
 
     for kind in (REGRESSION, OTHER, RED):
         rows = [r for r in data["test_failures"] if r["class"] == kind]
@@ -371,7 +381,8 @@ def render(data):
                 row["test_id"], row["count"], row["sessions"], row["basis"],
                 row["last_ts"], row["last_session"]))
 
-    for kind, title in (("tool_failure", "ツール失敗"), ("tool_cancelled", "人による取り消し")):
+    for kind, title in (("tool_failure", "ツール失敗"), ("tool_cancelled", "人による取り消し"),
+                        ("tool_denied", "権限の規則による拒否")):
         rows = [r for r in data["tool_failures"] if r["type"] == kind]
         lines += ["", "## %s（%d 種類）" % (title, len(rows)), ""]
         if not rows:

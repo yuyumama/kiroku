@@ -123,6 +123,14 @@ class RecordTest(Sandbox):
         self.shell("rm -rf build", -1, "The tool call was cancelled before it was approved.")
         self.assertEqual(self.events()[0]["type"], "tool_cancelled")
 
+    def test_policy_denial_is_told_apart_from_human_cancel(self):
+        self.shell("date", -1, "Denied by a permission rule. The user did not reject this.")
+        self.assertEqual(self.events()[0]["type"], "tool_denied")
+
+    def test_kiroku_own_commands_are_not_recorded(self):
+        self.shell("python3 .kiro/kiroku/aggregate.py --since 14d", 1, "boom")
+        self.assertEqual(self.events(), [])
+
     def test_secrets_are_masked(self):
         self.shell("curl -H 'Authorization: Bearer abcdef1234567890' https://u:hunter2pw@example.com",
                    7, "API_KEY=supersecretvalue\ntoken: ghp_abcdefghijklmnopqrstuvwxyz0123")
@@ -156,6 +164,8 @@ class RecordTest(Sandbox):
                    "tool_response": "ok"})
         self.saved(".kiro/retro/reports/x.md")  # 記録先そのものは対象外
         events = self.events()
+        row = aggregate.aggregate(self.root, by="all")["periods"]["全期間"]
+        self.assertEqual(row["writes"], 1)  # 同じ書き込みの2件は、要約では1回と数える
         self.assertEqual([e["type"] for e in events], ["write", "write"])
         self.assertEqual(events[0]["path"], "src/app.py")
         self.assertEqual(events[0]["hash"], self.git("hash-object", "src/app.py").strip())
@@ -302,7 +312,7 @@ class SummaryTest(Sandbox):
         for _ in range(3):
             self.shell("npm run build", 1, "error TS2304: Cannot find name")
         self.shell("make lint", 2, "lint failed")
-        self.shell("rm -rf dist", -1, "cancelled")
+        self.shell("rm -rf dist", -1, "The tool call was cancelled before it was approved.")
         data = aggregate.aggregate(self.root, by="all")
         top = data["tool_failures"][0]
         self.assertEqual((top["command_key"], top["count"]), ("npm run build", 3))

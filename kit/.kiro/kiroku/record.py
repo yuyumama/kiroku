@@ -8,7 +8,7 @@
 守ること:
   - 標準出力には何も書かない（終了コード 0 の標準出力はエージェントの文脈に入る）。
   - 何が起きても終了コード 0 で終わる（記録の失敗で本来の作業を止めない）。
-  - 記録時には分類しない。結果を生のまま残し、分類は aggregate.py が後から計算する。
+  - テスト失敗は記録時に分類しない。結果を生のまま残し、分類は aggregate.py が後から計算する。
 """
 import datetime
 import fnmatch
@@ -216,8 +216,8 @@ def read_test_report(root, cwd, retro_dir, entry):
 def shell_events(payload, root, cwd, retro_dir, config):
     tool_input = payload.get("tool_input") or {}
     command = tool_input.get("command")
-    if not isinstance(command, str):
-        return []
+    if not isinstance(command, str) or ".kiro/kiroku/" in command:
+        return []  # kiroku 自身のスクリプト（振り返り中の集約など）は記録しない
     response = payload.get("tool_response")
     response = response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)
     found = EXIT_CODE_RE.search(response)
@@ -243,7 +243,10 @@ def shell_events(payload, root, cwd, retro_dir, config):
             event["output_tail"] = tail
         return [event]
     if exit_code == -1:
-        return [{"type": "tool_cancelled", "tool": payload.get("tool_name"),
+        # 実行されなかった呼び出し。人が止めたものと、権限の規則で拒否されたものを分ける。
+        by_human = "cancelled before it was approved" in output
+        return [{"type": "tool_cancelled" if by_human else "tool_denied",
+                 "tool": payload.get("tool_name"),
                  "command": mask(command), "output_tail": tail}]
     if exit_code not in (0, None):
         head = git(root, "rev-parse", "HEAD")

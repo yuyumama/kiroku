@@ -168,7 +168,7 @@ kiro-cli chat --agent kiroku-retro
 
 ## 動作確認
 
-社内リポジトリに入れる前に、付属のサンプルで一通り試せます。追加のパッケージは要りません。
+実際のリポジトリに入れる前に、付属のサンプルで一通り試せます。追加のパッケージは要りません。
 
 ```bash
 mkdir ~/kiroku-demo && cp -R ~/kiroku/examples/demo/. ~/kiroku-demo/ && cd ~/kiroku-demo && git init

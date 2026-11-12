@@ -2,26 +2,23 @@
 """kiroku の集約。.kiro/kiroku/data/events.jsonl を読み、後計算で分類して要約を出す。
 
 使い方:
-  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 14d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 7d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --session <session_id>
 
 テスト失敗の分類（記録時ではなく、ここで計算する）:
-  正常な Red  前回の全テスト成功より後に追加されたテスト、
+  Red 候補    前回の全テスト成功より後に追加されたテスト、
               または前回の全テスト成功以降にテストファイルが変更されたテストの失敗
   回帰        前回の全テスト成功の時点で存在し、通っていて、テストファイルが変わっていないテストの失敗
   その他      基準になる全テスト成功が無い、通った記録が無い、git から状態を復元できない、など
 
-発話:
-  ユーザーの質問や指示の本文。--prompts を付けると、セッションごとに時刻順で出す。
-  何度も聞かれていること、説明への不満、口頭での指摘を、振り返りの LLM が読み取るための材料。
-
 会話:
-  --conversation を付けると、発話に加えてエージェントの応答も、セッションごとに時刻順で出す。
-  応答はフックでは取れないため、Kiro のセッションログ（~/.kiro/sessions/）から読む。
-  ログが見つからないセッションは、記録した発話だけを出す。
+  集約結果のセッション一覧で、発話数と振り返りノートの有無を示す。
+  --session で1セッションを要約表示する。ユーザー発話は原文、ツール実行は件数、応答は冒頭だけ。
+  全文が要る箇所は excerpt.py で前後を読む。--prompts は全発話を全文でページ表示する予備。
+  ログが欠落したセッションでは会話に基づく判断を保留する。
 
 書き直し候補:
-  同じセッションの中で、複数の発話にまたがって書き直されたファイル。
-  人が口頭で指摘して直させた可能性がある箇所。直前の発話を添えて出す。
+  発話タイミングをまたぐファイルの書き直し。本文は保存せず時刻でログと照合する。
 
 人間の手直し候補:
   エージェントが最後に書いた内容と、いまの内容が違うファイル。
@@ -37,11 +34,12 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import excerpt  # noqa: E402
+import prompts  # noqa: E402
+import harness  # noqa: E402
 from record import mask  # noqa: E402
 
 RED, REGRESSION, OTHER = "red", "regression", "other"
-LABELS = {RED: "正常な Red", REGRESSION: "回帰", OTHER: "その他"}
+LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", OTHER: "その他"}
 VCS_ACTIONS = ("merge", "pull", "rebase", "checkout", "reset", "cherry-pick", "revert",
                "commit (merge)", "am", "switch", "restore")
 
@@ -57,7 +55,7 @@ class Repo:
     def git(self, *args, stdin=None):
         try:
             done = subprocess.run(["git", "-C", self.root] + list(args), input=stdin,
-                                  capture_output=True, text=True, timeout=60)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         except (OSError, subprocess.SubprocessError):
             return None
         return done.stdout if done.returncode == 0 else None
@@ -290,62 +288,10 @@ def rework_candidates(events):
             continue
         rows.append({
             "path": path, "session_id": session, "turns": len(turns),
-            "prompts": [{"ts": prompt_of[(session, n)]["ts"],
-                         "text": shorten(prompt_of[(session, n)].get("text"), 200)}
+            "prompts": [{"ts": prompt_of[(session, n)]["ts"]}
                         for n in turns[1:]],
         })
     return sorted(rows, key=lambda r: (-r["turns"], r["path"]))
-
-
-def prompts_by_session(events, limit):
-    """発話をセッションごとにまとめる。"""
-    sessions = collections.OrderedDict()
-    for event in events:
-        if event.get("type") == "prompt":
-            sessions.setdefault(event.get("session_id"), []).append(
-                {"ts": event["ts"], "text": shorten(event.get("text"), limit),
-                 "chars": event.get("chars")})
-    return [{"session_id": key, "prompts": value} for key, value in sessions.items()]
-
-
-def conversations(events, since, until, limit, max_messages):
-    """記録のあるセッションについて、発話と応答をセッションログから読む。"""
-    recorded = {s["session_id"]: s["prompts"] for s in prompts_by_session(events, limit)}
-    order = []
-    for event in events:
-        if event.get("session_id") not in order:
-            order.append(event.get("session_id"))
-    sessions = []
-    for session_id in order:
-        path = excerpt.find_log(session_id) if session_id else None
-        messages = []
-        if path:
-            try:
-                rows = excerpt.load(path)
-            except OSError:
-                rows = []
-            for stamp, payload in rows:
-                if payload.get("type") not in ("user", "assistant"):
-                    continue
-                text = payload.get("content")
-                if not isinstance(text, str):
-                    text = json.dumps(text, ensure_ascii=False)
-                if not text.strip() or text.lstrip().startswith("/kiroku-retro"):
-                    continue
-                moment = excerpt.parse_time(stamp)
-                if moment and ((since and moment < since) or (until and moment >= until)):
-                    continue
-                messages.append({"ts": stamp, "role": payload["type"],
-                                 "text": shorten(mask(text), limit), "chars": len(text)})
-        source = "session_log"
-        if not messages:
-            source = "recorded_prompts"
-            messages = [dict(p, role="user") for p in recorded.get(session_id, [])]
-        if messages:
-            omitted = max(0, len(messages) - max_messages)
-            sessions.append({"session_id": session_id, "source": source,
-                             "omitted": omitted, "messages": messages[-max_messages:]})
-    return sessions
 
 
 def command_key(command):
@@ -363,8 +309,8 @@ def period_key(moment, by):
     return "全期間"
 
 
-def aggregate(root, since=None, until=None, by="week", prompt_chars=300,
-              with_conversation=False, max_messages=120):
+def aggregate(root, since=None, until=None, by="week", with_prompts=False,
+              prompt_offset=0, prompt_limit=20):
     repo = Repo(root)
     events = load_events(os.path.join(root, ".kiro", "kiroku", "data", "events.jsonl"))
     runs = [e for e in events if e.get("type") == "test_run"]
@@ -451,10 +397,14 @@ def aggregate(root, since=None, until=None, by="week", prompt_chars=300,
         "periods": periods,
         "test_failures": finish(grouped_tests.values()),
         "tool_failures": finish(grouped_tools.values()),
+        "recording_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
+                            "reason": e.get("reason"), "tool": e.get("tool")}
+                           for e in events if e.get("type") == "recording_gap"],
         "rework_candidates": rework_candidates(events),
-        "prompts": prompts_by_session(events, prompt_chars),
-        "conversations": conversations(events, since, until, prompt_chars, max_messages)
-        if with_conversation else None,
+        "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit)
+        if with_prompts else None,
+        "harness": harness.inventory(root),
+        "sessions": prompts.sessions(root, events, since, until),
         "fix_candidates": candidates,
         "fix_excluded": excluded,
     }
@@ -466,12 +416,22 @@ def render(data, show_prompts=False):
     lines.append("- イベント数：%d" % data["event_count"])
     lines.append("- レポートの保存先：.kiro/kiroku/data/reports/%s.md"
                  % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
+    lines += ["", "## 比較対象の所在（本文は未確認）", ""]
+    for entry in data["harness"]:
+        lines.append("- %s `%s`: %s" % (entry["scope"], entry["path"], entry["status"]))
+        lines.extend("  - `%s`" % path for path in entry["files"])
     if not data["event_count"]:
         lines += ["", "この期間の記録はありません。"]
         return "\n".join(lines) + "\n"
 
+    if data["recording_gaps"]:
+        lines += ["", "## 記録の不足（成功・失敗を判定できない実行）", ""]
+        for gap in data["recording_gaps"]:
+            lines.append("- %s session `%s` tool `%s`: %s" % (
+                gap["ts"], gap["session_id"], gap["tool"], gap["reason"]))
+
     lines += ["", "## 期間ごとの要約", "",
-              "| 期間 | セッション | 発話 | テスト実行 | 正常な Red | 回帰 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
+              "| 期間 | セッション | 発話 | テスト実行 | Red 候補 | 回帰候補 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for name, row in data["periods"].items():
         lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
@@ -507,14 +467,14 @@ def render(data, show_prompts=False):
     rework = data["rework_candidates"]
     lines += ["", "## 書き直し候補（%d 件）" % len(rework), "",
               "同じセッションの中で、複数の発話にまたがって書き直されたファイルです。"
-              "書き直しの直前の発話を添えています。", ""]
+              "発話の時刻からセッションログを確認してください。", ""]
     if not rework:
         lines.append("なし")
     for row in rework[:30]:
         lines.append("- `%s`：%d 回の発話で書き込み（session `%s`）" % (
             row["path"], row["turns"], row["session_id"]))
         for prompt in row["prompts"][:5]:
-            lines.append("  - %s 「%s」" % (prompt["ts"], prompt["text"]))
+            lines.append("  - 発話の時刻：%s" % prompt["ts"])
 
     lines += ["", "## 人間の手直し候補（%d 件）" % len(data["fix_candidates"]), ""]
     if not data["fix_candidates"]:
@@ -524,51 +484,83 @@ def render(data, show_prompts=False):
             row["path"], row["status"], row["written_at"], row["session_id"]))
     if data["fix_excluded"]:
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
-    total = sum(len(s["prompts"]) for s in data["prompts"])
-    if data.get("conversations") is not None:
-        talks = data["conversations"]
-        lines += ["", "## 会話の一覧（%d セッション）" % len(talks), ""]
-        if not talks:
-            lines.append("なし")
-        for talk in talks:
-            lines += ["### session `%s`" % talk["session_id"], ""]
-            if talk["source"] == "recorded_prompts":
-                lines += ["セッションログが見つからないため、記録した発話だけを出しています。", ""]
-            if talk["omitted"]:
-                lines += ["古い %d 件は省いています。" % talk["omitted"], ""]
-            for message in talk["messages"]:
-                who = "ユーザー" if message["role"] == "user" else "エージェント"
-                lines.append("- %s %s「%s」" % (message["ts"], who, message["text"]))
-            lines.append("")
-    elif show_prompts:
-        lines += ["", "## 発話の一覧（%d 件、%d セッション）" % (total, len(data["prompts"])), ""]
-        if not total:
-            lines.append("なし")
-        for session in data["prompts"]:
-            lines += ["### session `%s`" % session["session_id"], ""]
-            for prompt in session["prompts"]:
-                lines.append("- %s 「%s」" % (prompt["ts"], prompt["text"]))
-            lines.append("")
-    elif total:
-        lines += ["", "発話は %d 件あります。本文は `--prompts`、応答も含めるなら `--conversation` を付けると出ます。" % total]
+    lines += render_sessions(data["sessions"])
+    page = data.get("prompt_page")
+    if page is not None:
+        lines += ["", "## ユーザー発話（ログから取得・本文の保存なし）", ""]
+        for entry in page["coverage"]:
+            lines.append("- session `%s`: %s、対象発話 %d 件" % (
+                entry["session_id"], entry["status"], entry["prompts"]))
+            if entry["status"] != "ok":
+                lines.append("  - 会話に基づく判断を保留：%s" % ", ".join(entry["issues"]))
+        lines.append("- 分割数 %d、今回の開始位置 %d" % (page["total_chunks"], page["offset"]))
+        for chunk in page["chunks"]:
+            lines += ["", "### session `%s` index=%d [%s] 部分 %d/%d" % (
+                chunk["session_id"], chunk["index"], chunk["ts"], chunk["part"], chunk["parts"]),
+                "", chunk["text"]]
+        if page["next_offset"] is not None:
+            lines += ["", "続きあり：同じ期間で --prompts --prompt-offset %d を指定してください。"
+                      % page["next_offset"]]
+        else:
+            lines += ["", "ユーザー発話の最終ページです。"]
+    return "\n".join(lines) + "\n"
+
+
+NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり"}
+
+
+def render_sessions(sessions):
+    lines = ["", "## セッション一覧（%d 件、新しい順）" % len(sessions), "",
+             "会話は `--session <session_id>` で1件ずつ読みます。", "",
+             "| session | 最後の記録 | ログ | 発話 | 発話の文字数 | 振り返りノート |",
+             "|---|---|---|---|---|---|"]
+    for row in sessions:
+        lines.append("| `%s` | %s | %s | %d | %d | %s |" % (
+            row["session_id"], row["last_event"], row["log"], row["prompts"],
+            row["prompt_chars"], NOTE_LABELS[row["note"]]))
+    return lines
+
+
+def render_session(view):
+    lines = ["# セッションの要約表示 `%s`" % view["session_id"], "",
+             "- ログの状態：%s" % view["status"],
+             "- ユーザー発話：%d 件" % len(view["turns"]),
+             "- ユーザー発話は原文、ツール実行は件数、応答は最後の1件の冒頭だけです。",
+             "- 全文は `excerpt.py --session %s --index <index> --context 3` で読みます。" % view["session_id"]]
+    if view["status"] != "ok":
+        lines.append("- 会話に基づく判断を保留：%s" % (", ".join(view["issues"]) or view["status"]))
+    for turn in view["turns"]:
+        lines += ["", "## index=%d [%s] ユーザー（%d 文字）" % (turn["index"], turn["ts"], turn["chars"]),
+                  "", turn["text"], ""]
+        if turn["tools"]:
+            tools = "、".join("%s×%d" % item for item in sorted(turn["tools"].items()))
+            failed = "、失敗 %d 件" % turn["tool_failures"] if turn["tool_failures"] else ""
+            lines.append("- ツール実行：%s%s" % (tools, failed))
+        if turn["reply"]:
+            lines.append("- 応答（index=%d、%d 文字）：%s" % (
+                turn["reply"]["index"], turn["reply"]["chars"], turn["reply"]["text"]))
+        else:
+            lines.append("- 応答：なし")
     return "\n".join(lines) + "\n"
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="kiroku の記録を集約する")
     parser.add_argument("--root", default=None, help="リポジトリのルート（既定は現在の git リポジトリ）")
-    parser.add_argument("--since", default="14d", help="開始。14d のような日数、または日付（既定 14d）")
+    parser.add_argument("--since", default="7d", help="開始。14d のような日数、または日付（既定 7d）")
     parser.add_argument("--until", default=None, help="終了。日数または日付")
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
-    parser.add_argument("--prompts", action="store_true", help="発話の本文も出す")
-    parser.add_argument("--conversation", action="store_true",
-                        help="発話に加えて、エージェントの応答もセッションログから読んで出す")
-    parser.add_argument("--prompt-chars", type=int, default=300,
-                        help="発話や応答1件の最大文字数（既定 300）")
-    parser.add_argument("--max-messages", type=int, default=120,
-                        help="会話の一覧で、1セッションに出す最大件数（既定 120）")
+    parser.add_argument("--session", help="このセッションだけを要約表示する")
+    parser.add_argument("--user-chars", type=int, default=1500, help="要約表示で、発話1件の最大文字数（既定 1500）")
+    parser.add_argument("--reply-chars", type=int, default=300, help="要約表示で、応答の冒頭の文字数（既定 300）")
+    parser.add_argument("--prompts", action="store_true", help="全発話を全文でページ表示する（予備）")
+    parser.add_argument("--prompt-offset", type=int, default=0, help="発話の開始位置（既定 0）")
+    parser.add_argument("--prompt-limit", type=int, default=20, help="1ページの発話分割数（既定 20）")
     args = parser.parse_args(argv)
+
+    if args.prompt_offset < 0 or args.prompt_limit < 1:
+        parser.error("prompt-offset は0以上、prompt-limit は1以上にしてください")
 
     root = args.root
     if root is None:
@@ -576,9 +568,19 @@ def main(argv=None):
         root = top.strip() if top else os.getcwd()
     now = datetime.datetime.now(datetime.timezone.utc)
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
-    until = parse_bound(args.until, now) if args.until else None
-    data = aggregate(root, since, until, args.by, args.prompt_chars,
-                     args.conversation, args.max_messages)
+    until = parse_bound(args.until, now) if args.until else now
+    if args.session:
+        if args.user_chars < 1 or args.reply_chars < 1:
+            parser.error("user-chars と reply-chars は1以上にしてください")
+        view = prompts.distill(root, args.session, since, until, args.user_chars, args.reply_chars)
+        if args.json:
+            json.dump(view, sys.stdout, ensure_ascii=False, indent=2, default=str)
+            sys.stdout.write("\n")
+        else:
+            sys.stdout.write(render_session(view))
+        return
+    data = aggregate(root, since, until, args.by, args.prompts,
+                     args.prompt_offset, args.prompt_limit)
     if args.json:
         json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")

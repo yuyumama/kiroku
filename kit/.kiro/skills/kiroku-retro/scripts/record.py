@@ -4,6 +4,7 @@
 対応するフック:
   PostToolUse   シェル実行の失敗、テスト実行の結果、書き込みツールが触ったファイル
   PostFileSave  エージェントが保存したファイル
+  UserPromptSubmit  ユーザーの発話（質問や指示の本文）
 
 守ること:
   - 標準出力には何も書かない（終了コード 0 の標準出力はエージェントの文脈に入る）。
@@ -32,6 +33,7 @@ DEFAULT_CONFIG = {
     "ignore_paths": [".kiro/kiroku/data/**", ".git/**"],
     "output_tail_chars": 2000,
     "max_dirty_files": 500,
+    "prompt_max_chars": 2000,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 SECRET_PATTERNS = [
@@ -292,6 +294,14 @@ def main():
     events = []
     if hook in ("PostFileSave", "PostFileCreate"):
         events = write_event(root, cwd, payload.get("file_path"), hook, config)
+    elif hook == "UserPromptSubmit":
+        text = payload.get("prompt")
+        if not isinstance(text, str):
+            text = os.environ.get("USER_PROMPT") or ""
+        # 振り返りの起動そのものは記録しない。
+        if text.strip() and not text.lstrip().startswith("/kiroku-retro"):
+            limit = config["prompt_max_chars"]
+            events = [{"type": "prompt", "text": mask(text[:limit]), "chars": len(text)}]
     elif hook == "PostToolUse" and tool == "execute_bash":
         events = shell_events(payload, root, cwd, retro_dir, config)
     elif hook == "PostToolUse" and tool in config["write_tools"]:

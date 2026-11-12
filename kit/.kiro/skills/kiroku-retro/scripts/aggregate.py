@@ -10,6 +10,14 @@
   回帰        前回の全テスト成功の時点で存在し、通っていて、テストファイルが変わっていないテストの失敗
   その他      基準になる全テスト成功が無い、通った記録が無い、git から状態を復元できない、など
 
+発話:
+  ユーザーの質問や指示の本文。--prompts を付けると、セッションごとに時刻順で出す。
+  何度も聞かれていること、説明への不満、口頭での指摘を、振り返りの LLM が読み取るための材料。
+
+書き直し候補:
+  同じセッションの中で、複数の発話にまたがって書き直されたファイル。
+  人が口頭で指摘して直させた可能性がある箇所。直前の発話を添えて出す。
+
 人間の手直し候補:
   エージェントが最後に書いた内容と、いまの内容が違うファイル。
   merge、pull、rebase、checkout、reset などによる変更は除く。
@@ -248,6 +256,49 @@ def fix_candidates(repo, writes):
     return candidates, excluded
 
 
+def shorten(text, limit):
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def rework_candidates(events):
+    """同じセッションで、複数の発話にまたがって書き直されたファイルを探す。"""
+    turn = {}          # session_id -> いま何番目の発話か
+    prompt_of = {}     # (session_id, 発話の番号) -> 発話
+    touched = {}       # (session_id, path) -> 書き込みがあった発話の番号
+    for event in events:
+        session = event.get("session_id")
+        if event.get("type") == "prompt":
+            turn[session] = turn.get(session, 0) + 1
+            prompt_of[(session, turn[session])] = event
+        elif event.get("type") == "write" and turn.get(session):
+            turns = touched.setdefault((session, event["path"]), [])
+            if turn[session] not in turns:
+                turns.append(turn[session])
+    rows = []
+    for (session, path), turns in touched.items():
+        if len(turns) < 2:
+            continue
+        rows.append({
+            "path": path, "session_id": session, "turns": len(turns),
+            "prompts": [{"ts": prompt_of[(session, n)]["ts"],
+                         "text": shorten(prompt_of[(session, n)].get("text"), 200)}
+                        for n in turns[1:]],
+        })
+    return sorted(rows, key=lambda r: (-r["turns"], r["path"]))
+
+
+def prompts_by_session(events, limit):
+    """発話をセッションごとにまとめる。"""
+    sessions = collections.OrderedDict()
+    for event in events:
+        if event.get("type") == "prompt":
+            sessions.setdefault(event.get("session_id"), []).append(
+                {"ts": event["ts"], "text": shorten(event.get("text"), limit),
+                 "chars": event.get("chars")})
+    return [{"session_id": key, "prompts": value} for key, value in sessions.items()]
+
+
 def command_key(command):
     """似たコマンドをまとめるための見出し。先頭の3語まで。"""
     return " ".join((command or "").split()[:3])[:60]
@@ -263,7 +314,7 @@ def period_key(moment, by):
     return "全期間"
 
 
-def aggregate(root, since=None, until=None, by="week"):
+def aggregate(root, since=None, until=None, by="week", prompt_chars=300):
     repo = Repo(root)
     events = load_events(os.path.join(root, ".kiro", "kiroku", "data", "events.jsonl"))
     runs = [e for e in events if e.get("type") == "test_run"]
@@ -278,7 +329,7 @@ def aggregate(root, since=None, until=None, by="week"):
 
     periods = collections.OrderedDict()
     columns = ("sessions", "test_runs", RED, REGRESSION, OTHER, "tool_failures", "cancelled",
-               "denied", "writes")
+               "denied", "writes", "prompts")
     seen_writes = set()
 
     def bucket(moment):
@@ -290,6 +341,8 @@ def aggregate(root, since=None, until=None, by="week"):
         kind = event.get("type")
         if kind == "test_run":
             row["test_runs"] += 1
+        elif kind == "prompt":
+            row["prompts"] += 1
         elif kind == "tool_failure":
             row["tool_failures"] += 1
         elif kind == "tool_cancelled":
@@ -348,12 +401,14 @@ def aggregate(root, since=None, until=None, by="week"):
         "periods": periods,
         "test_failures": finish(grouped_tests.values()),
         "tool_failures": finish(grouped_tools.values()),
+        "rework_candidates": rework_candidates(events),
+        "prompts": prompts_by_session(events, prompt_chars),
         "fix_candidates": candidates,
         "fix_excluded": excluded,
     }
 
 
-def render(data):
+def render(data, show_prompts=False):
     lines = ["# kiroku 集約", ""]
     lines.append("- 期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"))
     lines.append("- イベント数：%d" % data["event_count"])
@@ -364,11 +419,11 @@ def render(data):
         return "\n".join(lines) + "\n"
 
     lines += ["", "## 期間ごとの要約", "",
-              "| 期間 | セッション | テスト実行 | 正常な Red | 回帰 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+              "| 期間 | セッション | 発話 | テスト実行 | 正常な Red | 回帰 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for name, row in data["periods"].items():
-        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
-            name, row["sessions"], row["test_runs"], row[RED], row[REGRESSION], row[OTHER],
+        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+            name, row["sessions"], row["prompts"], row["test_runs"], row[RED], row[REGRESSION], row[OTHER],
             row["tool_failures"], row["cancelled"], row["denied"], row["writes"]))
 
     for kind in (REGRESSION, OTHER, RED):
@@ -397,6 +452,18 @@ def render(data):
                 lines.append("  - 出力の末尾：")
                 lines += ["    > " + text for text in row["last_output_tail"].splitlines()[-8:]]
 
+    rework = data["rework_candidates"]
+    lines += ["", "## 書き直し候補（%d 件）" % len(rework), "",
+              "同じセッションの中で、複数の発話にまたがって書き直されたファイルです。"
+              "書き直しの直前の発話を添えています。", ""]
+    if not rework:
+        lines.append("なし")
+    for row in rework[:30]:
+        lines.append("- `%s`：%d 回の発話で書き込み（session `%s`）" % (
+            row["path"], row["turns"], row["session_id"]))
+        for prompt in row["prompts"][:5]:
+            lines.append("  - %s 「%s」" % (prompt["ts"], prompt["text"]))
+
     lines += ["", "## 人間の手直し候補（%d 件）" % len(data["fix_candidates"]), ""]
     if not data["fix_candidates"]:
         lines.append("なし")
@@ -405,6 +472,18 @@ def render(data):
             row["path"], row["status"], row["written_at"], row["session_id"]))
     if data["fix_excluded"]:
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
+    total = sum(len(s["prompts"]) for s in data["prompts"])
+    if show_prompts:
+        lines += ["", "## 発話の一覧（%d 件、%d セッション）" % (total, len(data["prompts"])), ""]
+        if not total:
+            lines.append("なし")
+        for session in data["prompts"]:
+            lines += ["### session `%s`" % session["session_id"], ""]
+            for prompt in session["prompts"]:
+                lines.append("- %s 「%s」" % (prompt["ts"], prompt["text"]))
+            lines.append("")
+    elif total:
+        lines += ["", "発話は %d 件あります。本文は `--prompts` を付けると出ます。" % total]
     return "\n".join(lines) + "\n"
 
 
@@ -415,6 +494,8 @@ def main(argv=None):
     parser.add_argument("--until", default=None, help="終了。日数または日付")
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
+    parser.add_argument("--prompts", action="store_true", help="発話の本文も出す")
+    parser.add_argument("--prompt-chars", type=int, default=300, help="発話1件の最大文字数（既定 300）")
     args = parser.parse_args(argv)
 
     root = args.root
@@ -424,12 +505,12 @@ def main(argv=None):
     now = datetime.datetime.now(datetime.timezone.utc)
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else None
-    data = aggregate(root, since, until, args.by)
+    data = aggregate(root, since, until, args.by, args.prompt_chars)
     if args.json:
         json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")
     else:
-        sys.stdout.write(render(data))
+        sys.stdout.write(render(data, args.prompts))
 
 
 if __name__ == "__main__":

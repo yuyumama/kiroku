@@ -174,6 +174,52 @@ class RecordTest(Sandbox):
         self.assertEqual(events[0]["hash"], self.git("hash-object", "src/app.py").strip())
 
 
+class PromptTest(Sandbox):
+    def say(self, text):
+        return self.hook({"hook_event_name": "UserPromptSubmit", "prompt": text})
+
+    def agent_writes(self, path, text):
+        self.write(path, text)
+        self.saved(path)
+
+    def test_prompt_is_recorded_masked_and_truncated(self):
+        done = self.say("この関数の意味を教えて。token=abcdef123456 " + "あ" * 3000)
+        self.assertEqual((done.returncode, done.stdout), (0, ""))
+        event = self.events()[0]
+        self.assertEqual(event["type"], "prompt")
+        self.assertIn("この関数の意味を教えて", event["text"])
+        self.assertNotIn("abcdef123456", event["text"])
+        self.assertLessEqual(len(event["text"]), 2000)
+        self.assertGreater(event["chars"], 3000)
+
+    def test_retro_command_and_empty_prompt_are_not_recorded(self):
+        self.say("/kiroku-retro 直近30日")
+        self.say("   ")
+        self.assertEqual(self.events(), [])
+
+    def test_rework_across_prompts_is_reported_with_the_prompt(self):
+        self.say("ログイン画面を作って")
+        self.agent_writes("src/login.py", "v1\n")
+        self.agent_writes("src/util.py", "u\n")
+        self.say("違う、エラー表示は画面の上に出して")
+        self.agent_writes("src/login.py", "v2\n")
+        data = aggregate.aggregate(self.root, by="all")
+        self.assertEqual([(r["path"], r["turns"]) for r in data["rework_candidates"]],
+                         [("src/login.py", 2)])
+        self.assertIn("違う、エラー表示", data["rework_candidates"][0]["prompts"][0]["text"])
+        self.assertEqual(data["periods"]["全期間"]["prompts"], 2)
+        text = aggregate.render(data, show_prompts=True)
+        self.assertIn("ログイン画面を作って", text)
+        self.assertIn("書き直し候補（1 件）", text)
+        self.assertNotIn("ログイン画面を作って", aggregate.render(data))  # 既定では本文を出さない
+
+    def test_several_writes_within_one_prompt_are_not_rework(self):
+        self.say("作って")
+        self.agent_writes("src/a.py", "1\n")
+        self.agent_writes("src/a.py", "2\n")
+        self.assertEqual(aggregate.aggregate(self.root, by="all")["rework_candidates"], [])
+
+
 class ClassifyTest(Sandbox):
     A = ("tests.test_a", "test_a")
     B = ("tests.test_b", "test_b")

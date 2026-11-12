@@ -5,14 +5,30 @@
       "name": "kiroku-record-tool",
       "description": "シェル実行の失敗、テスト結果、書き込みを .kiro/kiroku/data/events.jsonl に記録する",
       "trigger": "PostToolUse",
-      "action": { "type": "command", "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py" },
+      "action": {
+        "type": "command",
+        "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py"
+      },
       "timeout": 30
     },
     {
       "name": "kiroku-record-file",
       "description": "エージェントが保存したファイルのパスと内容ハッシュを記録する",
       "trigger": "PostFileSave",
-      "action": { "type": "command", "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py" },
+      "action": {
+        "type": "command",
+        "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py"
+      },
+      "timeout": 30
+    },
+    {
+      "name": "kiroku-record-prompt",
+      "description": "ユーザーの発話を記録する",
+      "trigger": "UserPromptSubmit",
+      "action": {
+        "type": "command",
+        "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py"
+      },
       "timeout": 30
     }
   ]

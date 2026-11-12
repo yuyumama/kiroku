@@ -1,6 +1,13 @@
 {
   "tests": [],
-  "write_tools": ["fs_write", "str_replace"],
-  "ignore_paths": [".kiro/kiroku/data/**", ".git/**"],
-  "output_tail_chars": 2000
+  "write_tools": [
+    "fs_write",
+    "str_replace"
+  ],
+  "ignore_paths": [
+    ".kiro/kiroku/data/**",
+    ".git/**"
+  ],
+  "output_tail_chars": 2000,
+  "prompt_max_chars": 2000
 }

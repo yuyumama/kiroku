@@ -35,7 +35,7 @@ sh ~/kiroku/install.sh <導入先のリポジトリ>
 
 | ファイル | 役割 |
 |---|---|
-| `.kiro/hooks/kiroku.json` | 記録フック2本（PostToolUse、PostFileSave） |
+| `.kiro/hooks/kiroku.json` | 記録フック3本（PostToolUse、PostFileSave、UserPromptSubmit） |
 | `.kiro/skills/kiroku-retro/scripts/record.py` | フックから呼ばれ、イベントを追記する |
 | `.kiro/skills/kiroku-retro/scripts/aggregate.py` | 集約と分類 |
 | `.kiro/skills/kiroku-retro/scripts/excerpt.py` | セッションログの該当箇所を抜き出す |
@@ -66,11 +66,11 @@ kiroku を新しい版にするときは `--update` を付けます。`config.js
 sh ~/kiroku/install.sh <導入先のリポジトリ> --update
 ```
 
-導入後、Kiro を起動して `/hooks` を入力し、`kiroku-record-tool` と `kiroku-record-file` が出ることを確かめてください。
+導入後、Kiro を起動して `/hooks` を入力し、`kiroku-record-tool`、`kiroku-record-file`、`kiroku-record-prompt` が出ることを確かめてください。
 
 ## 記録されるもの
 
-設定なしで記録されるのは次の3種類です。
+設定なしで記録されるのは次の5種類です。
 
 | 種類 | 記録する場面 | 主な項目 |
 |---|---|---|
@@ -78,6 +78,7 @@ sh ~/kiroku/install.sh <導入先のリポジトリ> --update
 | `tool_cancelled` | 人がツールの実行を取り消した | コマンド |
 | `tool_denied` | 権限の規則でツールの実行が拒否された | コマンド |
 | `write` | エージェントがファイルを保存した | パス、内容ハッシュ |
+| `prompt` | ユーザーが発話を送った | 質問や指示の本文（最大2000文字） |
 
 成功したシェル実行は記録しません。kiroku 自身のスクリプトの実行も記録しません。
 1回の書き込みは、PostFileSave と PostToolUse の両方で記録されます（整形フックが書き換えた後の内容を取り直すため）。
@@ -145,6 +146,24 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py
 テストとファイルの対応は、レポートの `file` 属性があればそれを使います。
 無ければ `classname`（`tests.test_foo.TestBar` など）からパスを推測します。
 対応が分からない場合は、通っていたテストの失敗を回帰として扱い、その旨を根拠に書きます。
+
+### 発話と書き直し候補
+
+発話の本文は、`--prompts` を付けると、セッションごとに時刻順で出ます。
+
+```bash
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --prompts
+```
+
+発話はスクリプトでは分類しません。
+何度も聞かれていること、説明への不満、口頭での指摘は、振り返りの LLM が発話を読んで判断します。
+
+書き直し候補は、同じセッションの中で、複数の発話にまたがって書き直されたファイルです。
+人が口頭で指摘して直させた可能性がある箇所で、書き直しの直前の発話を添えて出します。
+作業の続きで同じファイルを触っただけの場合も含まれるので、振り返りで発話を読んで見分けます。
+
+エージェントの応答は記録しません。
+説明の中身まで確かめたいときは、振り返りの中でセッションログの該当箇所を読みます。
 
 ### 人間の手直し候補
 

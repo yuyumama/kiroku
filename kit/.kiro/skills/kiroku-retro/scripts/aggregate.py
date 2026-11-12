@@ -2,7 +2,7 @@
 """kiroku の集約。.kiro/kiroku/data/events.jsonl を読み、後計算で分類して要約を出す。
 
 使い方:
-  python3 .kiro/kiroku/aggregate.py [--since 14d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 14d] [--until 2026-12-01] [--by week] [--json]
 
 テスト失敗の分類（記録時ではなく、ここで計算する）:
   正常な Red  前回の全テスト成功より後に追加されたテスト、

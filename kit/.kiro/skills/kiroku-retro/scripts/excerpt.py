@@ -2,8 +2,8 @@
 """Kiro CLI（V3）のセッションログから、該当箇所の前後を抜き出す。
 
 使い方:
-  python3 .kiro/kiroku/excerpt.py --session <session_id> --command "<コマンドの一部>"
-  python3 .kiro/kiroku/excerpt.py --session <session_id> --around 2026-11-12T03:04:05Z
+  python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --command "<コマンドの一部>"
+  python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --around 2026-11-12T03:04:05Z
 
 ログの場所は ~/.kiro/sessions/<作業場所ごとの識別子>/<session_id>/messages.jsonl
 （KIRO_HOME があればその下）。各行は {"id", "timestamp", "payload": {"type", ...}} の形。

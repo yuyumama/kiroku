@@ -58,6 +58,16 @@ if [ -d "$target/.kiro/retro" ] && [ ! -e "$target/.kiro/kiroku/data" ]; then
   echo "移動      .kiro/retro/ → .kiro/kiroku/data/"
 fi
 
+# 旧版ではスクリプトが .kiro/kiroku/ にあった。更新のときは古いものを消す。
+if [ "$update" = "--update" ]; then
+  for old in record.py aggregate.py excerpt.py; do
+    if [ -f "$target/.kiro/kiroku/$old" ]; then
+      rm "$target/.kiro/kiroku/$old"
+      echo "削除      .kiro/kiroku/$old（skill のフォルダへ移動）"
+    fi
+  done
+fi
+
 ignore="$target/.gitignore"
 if grep -qxF '.kiro/retro/' "$ignore" 2>/dev/null; then
   sed 's#^\.kiro/retro/$#.kiro/kiroku/data/#' "$ignore" > "$ignore.kiroku-tmp"

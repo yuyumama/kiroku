@@ -216,7 +216,7 @@ def read_test_report(root, cwd, retro_dir, entry):
 def shell_events(payload, root, cwd, retro_dir, config):
     tool_input = payload.get("tool_input") or {}
     command = tool_input.get("command")
-    if not isinstance(command, str) or ".kiro/kiroku/" in command:
+    if not isinstance(command, str) or ".kiro/skills/kiroku-retro/" in command:
         return []  # kiroku 自身のスクリプト（振り返り中の集約など）は記録しない
     response = payload.get("tool_response")
     response = response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)

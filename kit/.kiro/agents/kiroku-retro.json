@@ -32,9 +32,9 @@
       {
         "capability": "shell",
         "match": [
-          "python3 .kiro/kiroku/aggregate.py",
-          "python3 .kiro/kiroku/aggregate.py *",
-          "python3 .kiro/kiroku/excerpt.py *"
+          "python3 .kiro/skills/kiroku-retro/scripts/aggregate.py",
+          "python3 .kiro/skills/kiroku-retro/scripts/aggregate.py *",
+          "python3 .kiro/skills/kiroku-retro/scripts/excerpt.py *"
         ],
         "effect": "allow"
       },
@@ -44,9 +44,9 @@
           "*"
         ],
         "exclude": [
-          "python3 .kiro/kiroku/aggregate.py",
-          "python3 .kiro/kiroku/aggregate.py *",
-          "python3 .kiro/kiroku/excerpt.py *"
+          "python3 .kiro/skills/kiroku-retro/scripts/aggregate.py",
+          "python3 .kiro/skills/kiroku-retro/scripts/aggregate.py *",
+          "python3 .kiro/skills/kiroku-retro/scripts/excerpt.py *"
         ],
         "effect": "deny"
       }

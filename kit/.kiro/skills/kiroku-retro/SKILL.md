@@ -23,7 +23,7 @@ description: kiroku の記録を集約し、繰り返し出ている型とハー
 `/kiroku-retro` の後ろに期間の指定があればそれを使い、無ければ直近14日にします。
 
 ```bash
-python3 .kiro/kiroku/aggregate.py --since 14d
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 14d
 ```
 
 出力の先頭にある「レポートの保存先」を、手順6の保存先として使います。
@@ -48,11 +48,11 @@ python3 .kiro/kiroku/aggregate.py --since 14d
 多くても5箇所までにします。
 
 ```bash
-python3 .kiro/kiroku/excerpt.py --session <session_id> --command "<コマンドの一部>"
+python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --command "<コマンドの一部>"
 ```
 
 ```bash
-python3 .kiro/kiroku/excerpt.py --session <session_id> --around <集約結果の時刻>
+python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --around <集約結果の時刻>
 ```
 
 ログが見つからない場合は、集約結果だけで判断し、レポートにその旨を書きます。

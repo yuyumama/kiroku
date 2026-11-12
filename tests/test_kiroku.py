@@ -12,7 +12,7 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KIT = os.path.join(HERE, "..", "kit", ".kiro", "kiroku")
+KIT = os.path.join(HERE, "..", "kit", ".kiro", "skills", "kiroku-retro", "scripts")
 RECORD = os.path.join(KIT, "record.py")
 sys.path.insert(0, KIT)
 import aggregate  # noqa: E402
@@ -131,7 +131,7 @@ class RecordTest(Sandbox):
         self.assertEqual(self.events()[0]["type"], "tool_denied")
 
     def test_kiroku_own_commands_are_not_recorded(self):
-        self.shell("python3 .kiro/kiroku/aggregate.py --since 14d", 1, "boom")
+        self.shell("python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 14d", 1, "boom")
         self.assertEqual(self.events(), [])
 
     def test_secrets_are_masked(self):

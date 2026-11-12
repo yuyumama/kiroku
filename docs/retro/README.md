@@ -36,9 +36,9 @@ sh ~/kiroku/install.sh <導入先のリポジトリ>
 | ファイル | 役割 |
 |---|---|
 | `.kiro/hooks/kiroku.json` | 記録フック2本（PostToolUse、PostFileSave） |
-| `.kiro/kiroku/record.py` | フックから呼ばれ、イベントを追記する |
-| `.kiro/kiroku/aggregate.py` | 集約と分類 |
-| `.kiro/kiroku/excerpt.py` | セッションログの該当箇所を抜き出す |
+| `.kiro/skills/kiroku-retro/scripts/record.py` | フックから呼ばれ、イベントを追記する |
+| `.kiro/skills/kiroku-retro/scripts/aggregate.py` | 集約と分類 |
+| `.kiro/skills/kiroku-retro/scripts/excerpt.py` | セッションログの該当箇所を抜き出す |
 | `.kiro/kiroku/config.json` | 導入先ごとの設定 |
 | `.kiro/skills/kiroku-retro/SKILL.md` | 振り返りの手順 |
 | `.kiro/agents/kiroku-retro.json` | 振り返り専用のエージェント定義 |
@@ -48,10 +48,11 @@ sh ~/kiroku/install.sh <導入先のリポジトリ>
 ```
 .kiro/
 ├── hooks/kiroku.json
-├── skills/kiroku-retro/SKILL.md
 ├── agents/kiroku-retro.json
+├── skills/kiroku-retro/
+│   ├── SKILL.md
+│   └── scripts/         ← record.py、aggregate.py、excerpt.py
 └── kiroku/
-    ├── record.py、aggregate.py、excerpt.py
     ├── config.json
     └── data/            ← 記録とレポート。git の対象外
         ├── events.jsonl
@@ -121,7 +122,7 @@ sh ~/kiroku/install.sh <導入先のリポジトリ> --update
 ## 集約する
 
 ```bash
-python3 .kiro/kiroku/aggregate.py
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py
 ```
 
 既定では直近14日を、週ごとに要約します。
@@ -212,7 +213,7 @@ python3 -c "import json;[print(e['type'], e.get('exit_code'), e.get('path') or e
 ```
 
 ```bash
-python3 .kiro/kiroku/aggregate.py --by all
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --by all
 ```
 
 期待する結果は、正常な Red が1回、回帰が2種類、ツール失敗が1種類です。

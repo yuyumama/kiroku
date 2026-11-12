@@ -41,7 +41,7 @@ class Sandbox(unittest.TestCase):
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "test@example.com")
         self.git("config", "user.name", "test")
-        self.write(".gitignore", ".kiro/retro/\nreports/\n")
+        self.write(".gitignore", ".kiro/kiroku/data/\nreports/\n")
         self.write(".kiro/kiroku/config.json", json.dumps(
             {"tests": [{"match": r"\bpytest\b", "report": REPORT, "format": "junit"}]}))
         self.commit("init")
@@ -86,7 +86,7 @@ class Sandbox(unittest.TestCase):
                    "file_path": os.path.join(self.root, path)})
 
     def events(self):
-        path = os.path.join(self.root, ".kiro", "retro", "events.jsonl")
+        path = os.path.join(self.root, ".kiro", "kiroku", "data", "events.jsonl")
         if not os.path.exists(path):
             return []
         with open(path, encoding="utf-8") as handle:
@@ -165,7 +165,7 @@ class RecordTest(Sandbox):
         self.hook({"hook_event_name": "PostToolUse", "tool_name": "str_replace",
                    "tool_input": {"path": os.path.join(self.root, "src/app.py")},
                    "tool_response": "ok"})
-        self.saved(".kiro/retro/reports/x.md")  # 記録先そのものは対象外
+        self.saved(".kiro/kiroku/data/reports/x.md")  # 記録先そのものは対象外
         events = self.events()
         row = aggregate.aggregate(self.root, by="all")["periods"]["全期間"]
         self.assertEqual(row["writes"], 1)  # 同じ書き込みの2件は、要約では1回と数える
@@ -334,7 +334,7 @@ class SummaryTest(Sandbox):
 
     def test_broken_line_is_skipped(self):
         self.shell("make lint", 2)
-        with open(os.path.join(self.root, ".kiro/retro/events.jsonl"), "a") as handle:
+        with open(os.path.join(self.root, ".kiro/kiroku/data/events.jsonl"), "a") as handle:
             handle.write("{broken\n")
         self.assertEqual(aggregate.aggregate(self.root, by="all")["event_count"], 1)
 

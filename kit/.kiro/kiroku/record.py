@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kiroku の記録フック。Kiro CLI（V3）のフックから呼ばれ、.kiro/retro/events.jsonl に追記する。
+"""kiroku の記録フック。Kiro CLI（V3）のフックから呼ばれ、.kiro/kiroku/data/events.jsonl に追記する。
 
 対応するフック:
   PostToolUse   シェル実行の失敗、テスト実行の結果、書き込みツールが触ったファイル
@@ -29,7 +29,7 @@ SCHEMA_VERSION = 1
 DEFAULT_CONFIG = {
     "tests": [],
     "write_tools": ["fs_write", "str_replace"],
-    "ignore_paths": [".kiro/retro/**", ".git/**"],
+    "ignore_paths": [".kiro/kiroku/data/**", ".git/**"],
     "output_tail_chars": 2000,
     "max_dirty_files": 500,
 }
@@ -285,7 +285,7 @@ def main():
     cwd = payload.get("cwd") or os.getcwd()
     root = find_root(cwd)
     config = load_config(root)
-    retro_dir = os.path.join(root, ".kiro", "retro")
+    retro_dir = os.path.join(root, ".kiro", "kiroku", "data")
     hook = payload.get("hook_event_name")
     tool = payload.get("tool_name")
 
@@ -313,7 +313,7 @@ if __name__ == "__main__":
         main()
     except Exception as exc:  # 記録の失敗で本来の作業を止めない
         try:
-            log_dir = os.path.join(find_root(os.getcwd()), ".kiro", "retro")
+            log_dir = os.path.join(find_root(os.getcwd()), ".kiro", "kiroku", "data")
             os.makedirs(log_dir, exist_ok=True)
             with open(os.path.join(log_dir, "record-errors.log"), "a", encoding="utf-8") as log:
                 log.write("%s %s: %s\n" % (now(), type(exc).__name__, exc))

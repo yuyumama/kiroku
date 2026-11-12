@@ -1,5 +1,5 @@
 # 検証キットと記録の生データ。コードや認証情報が混ざりうるためコミットしない。
 .kiro/kiroku-probe/out/
-.kiro/retro/
+.kiro/kiroku/data/
 __pycache__/
 *.pyc

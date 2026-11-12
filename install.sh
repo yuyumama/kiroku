@@ -52,11 +52,22 @@ for file in $files; do
   echo "コピー    $file"
 done
 
+# 旧版の記録先（.kiro/retro/）が残っていれば、新しい場所へ移す。
+if [ -d "$target/.kiro/retro" ] && [ ! -e "$target/.kiro/kiroku/data" ]; then
+  mv "$target/.kiro/retro" "$target/.kiro/kiroku/data"
+  echo "移動      .kiro/retro/ → .kiro/kiroku/data/"
+fi
+
 ignore="$target/.gitignore"
-if ! grep -qxF '.kiro/retro/' "$ignore" 2>/dev/null; then
+if grep -qxF '.kiro/retro/' "$ignore" 2>/dev/null; then
+  sed 's#^\.kiro/retro/$#.kiro/kiroku/data/#' "$ignore" > "$ignore.kiroku-tmp"
+  mv "$ignore.kiroku-tmp" "$ignore"
+  echo "書き換え  .gitignore（.kiro/retro/ → .kiro/kiroku/data/）"
+fi
+if ! grep -qxF '.kiro/kiroku/data/' "$ignore" 2>/dev/null; then
   if [ -s "$ignore" ] && [ -n "$(tail -c 1 "$ignore")" ]; then echo >> "$ignore"; fi
-  printf '%s\n' '# kiroku の生データ。コードや認証情報が混ざりうるためコミットしない。' '.kiro/retro/' >> "$ignore"
-  echo "追記      .gitignore（.kiro/retro/）"
+  printf '%s\n' '# kiroku の生データ。コードや認証情報が混ざりうるためコミットしない。' '.kiro/kiroku/data/' >> "$ignore"
+  echo "追記      .gitignore（.kiro/kiroku/data/）"
 fi
 
 echo "完了。テスト結果も記録するには .kiro/kiroku/config.json の tests を設定してください。"

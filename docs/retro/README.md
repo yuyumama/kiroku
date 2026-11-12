@@ -8,11 +8,11 @@ kiroku は、Kiro CLI（V3）での開発中に起きた失敗や手直しを記
 
 ## 仕組み
 
-1. **記録**：フックが、ツール実行のたびに `.kiro/retro/events.jsonl` へ追記します。LLM は使いません。
+1. **記録**：フックが、ツール実行のたびに `.kiro/kiroku/data/events.jsonl` へ追記します。LLM は使いません。
 2. **集約**：`aggregate.py` が記録を読み、テスト失敗を後から分類し、期間ごとに要約します。
-3. **振り返り**：専用エージェントの新しいセッションで `/kiroku-retro` を呼ぶと、レポートが `.kiro/retro/reports/` に出ます。
+3. **振り返り**：専用エージェントの新しいセッションで `/kiroku-retro` を呼ぶと、レポートが `.kiro/kiroku/data/reports/` に出ます。
 
-`.kiro/retro/` は `.gitignore` で除外されます。
+`.kiro/kiroku/data/` は `.gitignore` で除外されます。
 コードや認証情報が混ざりうるので、コミットや PR に載せないでください。
 
 ## 必要なもの
@@ -42,6 +42,21 @@ sh ~/kiroku/install.sh <導入先のリポジトリ>
 | `.kiro/kiroku/config.json` | 導入先ごとの設定 |
 | `.kiro/skills/kiroku-retro/SKILL.md` | 振り返りの手順 |
 | `.kiro/agents/kiroku-retro.json` | 振り返り専用のエージェント定義 |
+
+`.kiro/` の直下に増えるのは `kiroku/` だけです。ほかは Kiro の決まった置き場所（`hooks/`、`skills/`、`agents/`）に1つずつ入ります。
+
+```
+.kiro/
+├── hooks/kiroku.json
+├── skills/kiroku-retro/SKILL.md
+├── agents/kiroku-retro.json
+└── kiroku/
+    ├── record.py、aggregate.py、excerpt.py
+    ├── config.json
+    └── data/            ← 記録とレポート。git の対象外
+        ├── events.jsonl
+        └── reports/
+```
 
 既存のファイルは上書きしません。同じ名前で中身の違うファイルがあれば、何も変更せずに止まります。
 kiroku を新しい版にするときは `--update` を付けます。`config.json` は置き換えません。
@@ -156,12 +171,12 @@ kiro-cli chat --agent kiroku-retro
 
 期間を変えるときは、後ろに書きます（例：`/kiroku-retro 直近30日`）。
 
-レポートは `.kiro/retro/reports/YYYY-MM-DD-HHMM.md` に出ます。
+レポートは `.kiro/kiroku/data/reports/YYYY-MM-DD-HHMM.md` に出ます。
 中身は「繰り返し出ている型」と「ハーネスへの改善案」で、学びがなければ「なし」と書かれます。
 
 専用エージェントは、次のことしかできません。
 
-- 書き込み：`.kiro/retro/reports/` 配下だけ
+- 書き込み：`.kiro/kiroku/data/reports/` 配下だけ
 - シェル：`aggregate.py` と `excerpt.py` の実行だけ。ほかのコマンドは、単独でも組み合わせでも拒否される
 
 ハーネスの変更は、レポートを読んだ人が行います。
@@ -193,7 +208,7 @@ Kiro に、次の文章を1つずつ順に送ります。
 `/quit` で終了し、記録と集約を確かめます。
 
 ```bash
-python3 -c "import json;[print(e['type'], e.get('exit_code'), e.get('path') or e.get('command')) for e in map(json.loads, open('.kiro/retro/events.jsonl'))]"
+python3 -c "import json;[print(e['type'], e.get('exit_code'), e.get('path') or e.get('command')) for e in map(json.loads, open('.kiro/kiroku/data/events.jsonl'))]"
 ```
 
 ```bash
@@ -206,7 +221,7 @@ python3 .kiro/kiroku/aggregate.py --by all
 ## うまくいかないとき
 
 - **何も記録されない**：`/hooks` にフックが出ているか、`python3` が通っているかを確かめます。
-  記録処理のエラーは `.kiro/retro/record-errors.log` に残ります。
+  記録処理のエラーは `.kiro/kiroku/data/record-errors.log` に残ります。
 - **テスト結果が空（`results` が null）**：イベントの `note` を見ます。
   `report_not_found` はレポートが出ていません。`report_stale` はレポートが前回から更新されていません。
 - **分類が「その他」ばかり**：全テストが通った記録がまだ無いか、テスト結果が記録されていません。
@@ -214,7 +229,7 @@ python3 .kiro/kiroku/aggregate.py --by all
 ## やめるとき
 
 `.kiro/hooks/kiroku.json`、`.kiro/kiroku/`、`.kiro/skills/kiroku-retro/`、`.kiro/agents/kiroku-retro.json` を削除します。
-記録を消すには `.kiro/retro/` を削除します。
+記録を消すには `.kiro/kiroku/data/` を削除します。
 
 ## 開発
 

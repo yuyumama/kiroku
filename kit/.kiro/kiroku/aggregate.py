@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kiroku の集約。.kiro/retro/events.jsonl を読み、後計算で分類して要約を出す。
+"""kiroku の集約。.kiro/kiroku/data/events.jsonl を読み、後計算で分類して要約を出す。
 
 使い方:
   python3 .kiro/kiroku/aggregate.py [--since 14d] [--until 2026-12-01] [--by week] [--json]
@@ -265,7 +265,7 @@ def period_key(moment, by):
 
 def aggregate(root, since=None, until=None, by="week"):
     repo = Repo(root)
-    events = load_events(os.path.join(root, ".kiro", "retro", "events.jsonl"))
+    events = load_events(os.path.join(root, ".kiro", "kiroku", "data", "events.jsonl"))
     runs = [e for e in events if e.get("type") == "test_run"]
     failures = classify_failures(repo, runs)  # 基準が要るので、分類は全期間で行う
 
@@ -357,7 +357,7 @@ def render(data):
     lines = ["# kiroku 集約", ""]
     lines.append("- 期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"))
     lines.append("- イベント数：%d" % data["event_count"])
-    lines.append("- レポートの保存先：.kiro/retro/reports/%s.md"
+    lines.append("- レポートの保存先：.kiro/kiroku/data/reports/%s.md"
                  % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
     if not data["event_count"]:
         lines += ["", "この期間の記録はありません。"]

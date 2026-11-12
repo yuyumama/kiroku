@@ -14,6 +14,11 @@
   ユーザーの質問や指示の本文。--prompts を付けると、セッションごとに時刻順で出す。
   何度も聞かれていること、説明への不満、口頭での指摘を、振り返りの LLM が読み取るための材料。
 
+会話:
+  --conversation を付けると、発話に加えてエージェントの応答も、セッションごとに時刻順で出す。
+  応答はフックでは取れないため、Kiro のセッションログ（~/.kiro/sessions/）から読む。
+  ログが見つからないセッションは、記録した発話だけを出す。
+
 書き直し候補:
   同じセッションの中で、複数の発話にまたがって書き直されたファイル。
   人が口頭で指摘して直させた可能性がある箇所。直前の発話を添えて出す。
@@ -30,6 +35,10 @@ import os
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import excerpt  # noqa: E402
+from record import mask  # noqa: E402
 
 RED, REGRESSION, OTHER = "red", "regression", "other"
 LABELS = {RED: "正常な Red", REGRESSION: "回帰", OTHER: "その他"}
@@ -299,6 +308,46 @@ def prompts_by_session(events, limit):
     return [{"session_id": key, "prompts": value} for key, value in sessions.items()]
 
 
+def conversations(events, since, until, limit, max_messages):
+    """記録のあるセッションについて、発話と応答をセッションログから読む。"""
+    recorded = {s["session_id"]: s["prompts"] for s in prompts_by_session(events, limit)}
+    order = []
+    for event in events:
+        if event.get("session_id") not in order:
+            order.append(event.get("session_id"))
+    sessions = []
+    for session_id in order:
+        path = excerpt.find_log(session_id) if session_id else None
+        messages = []
+        if path:
+            try:
+                rows = excerpt.load(path)
+            except OSError:
+                rows = []
+            for stamp, payload in rows:
+                if payload.get("type") not in ("user", "assistant"):
+                    continue
+                text = payload.get("content")
+                if not isinstance(text, str):
+                    text = json.dumps(text, ensure_ascii=False)
+                if not text.strip() or text.lstrip().startswith("/kiroku-retro"):
+                    continue
+                moment = excerpt.parse_time(stamp)
+                if moment and ((since and moment < since) or (until and moment >= until)):
+                    continue
+                messages.append({"ts": stamp, "role": payload["type"],
+                                 "text": shorten(mask(text), limit), "chars": len(text)})
+        source = "session_log"
+        if not messages:
+            source = "recorded_prompts"
+            messages = [dict(p, role="user") for p in recorded.get(session_id, [])]
+        if messages:
+            omitted = max(0, len(messages) - max_messages)
+            sessions.append({"session_id": session_id, "source": source,
+                             "omitted": omitted, "messages": messages[-max_messages:]})
+    return sessions
+
+
 def command_key(command):
     """似たコマンドをまとめるための見出し。先頭の3語まで。"""
     return " ".join((command or "").split()[:3])[:60]
@@ -314,7 +363,8 @@ def period_key(moment, by):
     return "全期間"
 
 
-def aggregate(root, since=None, until=None, by="week", prompt_chars=300):
+def aggregate(root, since=None, until=None, by="week", prompt_chars=300,
+              with_conversation=False, max_messages=120):
     repo = Repo(root)
     events = load_events(os.path.join(root, ".kiro", "kiroku", "data", "events.jsonl"))
     runs = [e for e in events if e.get("type") == "test_run"]
@@ -403,6 +453,8 @@ def aggregate(root, since=None, until=None, by="week", prompt_chars=300):
         "tool_failures": finish(grouped_tools.values()),
         "rework_candidates": rework_candidates(events),
         "prompts": prompts_by_session(events, prompt_chars),
+        "conversations": conversations(events, since, until, prompt_chars, max_messages)
+        if with_conversation else None,
         "fix_candidates": candidates,
         "fix_excluded": excluded,
     }
@@ -473,7 +525,22 @@ def render(data, show_prompts=False):
     if data["fix_excluded"]:
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
     total = sum(len(s["prompts"]) for s in data["prompts"])
-    if show_prompts:
+    if data.get("conversations") is not None:
+        talks = data["conversations"]
+        lines += ["", "## 会話の一覧（%d セッション）" % len(talks), ""]
+        if not talks:
+            lines.append("なし")
+        for talk in talks:
+            lines += ["### session `%s`" % talk["session_id"], ""]
+            if talk["source"] == "recorded_prompts":
+                lines += ["セッションログが見つからないため、記録した発話だけを出しています。", ""]
+            if talk["omitted"]:
+                lines += ["古い %d 件は省いています。" % talk["omitted"], ""]
+            for message in talk["messages"]:
+                who = "ユーザー" if message["role"] == "user" else "エージェント"
+                lines.append("- %s %s「%s」" % (message["ts"], who, message["text"]))
+            lines.append("")
+    elif show_prompts:
         lines += ["", "## 発話の一覧（%d 件、%d セッション）" % (total, len(data["prompts"])), ""]
         if not total:
             lines.append("なし")
@@ -483,7 +550,7 @@ def render(data, show_prompts=False):
                 lines.append("- %s 「%s」" % (prompt["ts"], prompt["text"]))
             lines.append("")
     elif total:
-        lines += ["", "発話は %d 件あります。本文は `--prompts` を付けると出ます。" % total]
+        lines += ["", "発話は %d 件あります。本文は `--prompts`、応答も含めるなら `--conversation` を付けると出ます。" % total]
     return "\n".join(lines) + "\n"
 
 
@@ -495,7 +562,12 @@ def main(argv=None):
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
     parser.add_argument("--prompts", action="store_true", help="発話の本文も出す")
-    parser.add_argument("--prompt-chars", type=int, default=300, help="発話1件の最大文字数（既定 300）")
+    parser.add_argument("--conversation", action="store_true",
+                        help="発話に加えて、エージェントの応答もセッションログから読んで出す")
+    parser.add_argument("--prompt-chars", type=int, default=300,
+                        help="発話や応答1件の最大文字数（既定 300）")
+    parser.add_argument("--max-messages", type=int, default=120,
+                        help="会話の一覧で、1セッションに出す最大件数（既定 120）")
     args = parser.parse_args(argv)
 
     root = args.root
@@ -505,7 +577,8 @@ def main(argv=None):
     now = datetime.datetime.now(datetime.timezone.utc)
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else None
-    data = aggregate(root, since, until, args.by, args.prompt_chars)
+    data = aggregate(root, since, until, args.by, args.prompt_chars,
+                     args.conversation, args.max_messages)
     if args.json:
         json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")

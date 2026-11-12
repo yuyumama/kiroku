@@ -220,6 +220,61 @@ class PromptTest(Sandbox):
         self.assertEqual(aggregate.aggregate(self.root, by="all")["rework_candidates"], [])
 
 
+class ConversationTest(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.home = tempfile.mkdtemp(prefix="kiroku-home-")
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.addCleanup(os.environ.pop, "KIRO_HOME", None)
+        os.environ["KIRO_HOME"] = self.home
+
+    def write_log(self, rows):
+        log_dir = os.path.join(self.home, "sessions", "0123456789abcdef", self.session)
+        os.makedirs(log_dir)
+        with open(os.path.join(log_dir, "messages.jsonl"), "w", encoding="utf-8") as handle:
+            for index, payload in enumerate(rows):
+                handle.write(json.dumps({"id": str(index), "payload": payload,
+                                         "timestamp": "2026-11-12T00:00:%02dZ" % index}) + "\n")
+
+    def test_conversation_includes_agent_responses_from_session_log(self):
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "この処理を説明して"})
+        self.write_log([
+            {"type": "user", "content": "この処理を説明して"},
+            {"type": "turn_start"},
+            {"type": "tool_call", "toolName": "fs_read", "args": {"path": "a.py"}},
+            {"type": "assistant", "content": "これは設定を読み込む処理です。password=hunter2pw " + "長" * 900},
+            {"type": "user", "content": "長い。結論から言って"},
+            {"type": "assistant", "content": "設定を読みます。"},
+        ])
+        data = aggregate.aggregate(self.root, by="all", with_conversation=True)
+        talk = data["conversations"][0]
+        self.assertEqual(talk["source"], "session_log")
+        self.assertEqual([m["role"] for m in talk["messages"]],
+                         ["user", "assistant", "user", "assistant"])
+        self.assertLessEqual(len(talk["messages"][1]["text"]), 301)
+        text = aggregate.render(data)
+        self.assertIn("エージェント「これは設定を読み込む処理です。", text)
+        self.assertIn("ユーザー「長い。結論から言って」", text)
+        self.assertNotIn("hunter2pw", text)
+        self.assertNotIn("fs_read", text)
+
+    def test_conversation_falls_back_to_recorded_prompts_without_log(self):
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "テストを書いて"})
+        data = aggregate.aggregate(self.root, by="all", with_conversation=True)
+        talk = data["conversations"][0]
+        self.assertEqual(talk["source"], "recorded_prompts")
+        self.assertIn("セッションログが見つからない", aggregate.render(data))
+        self.assertIn("テストを書いて", aggregate.render(data))
+
+    def test_long_session_keeps_only_recent_messages(self):
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "x"})
+        self.write_log([{"type": "assistant", "content": "応答 %d" % i} for i in range(30)])
+        data = aggregate.aggregate(self.root, by="all", with_conversation=True, max_messages=10)
+        talk = data["conversations"][0]
+        self.assertEqual((len(talk["messages"]), talk["omitted"]), (10, 20))
+        self.assertIn("応答 29", talk["messages"][-1]["text"])
+
+
 class ClassifyTest(Sandbox):
     A = ("tests.test_a", "test_a")
     B = ("tests.test_b", "test_b")

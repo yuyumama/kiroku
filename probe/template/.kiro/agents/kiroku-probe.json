@@ -1,0 +1,27 @@
+{
+  "name": "kiroku-probe",
+  "description": "kiroku の検証用。書き込みを allowed/ 配下だけに制限できるかを確かめる。",
+  "prompt": "あなたは検証用のエージェントです。ユーザーに頼まれたファイル操作を、頼まれたとおりに1回ずつ試してください。拒否された操作は別の方法で回避せず、拒否されたと報告してください。",
+  "tools": ["read", "write"],
+  "resources": ["skill://.kiro/skills/**/SKILL.md"],
+  "permissions": {
+    "rules": [
+      {
+        "capability": "fs_write",
+        "match": ["allowed/**"],
+        "effect": "allow"
+      },
+      {
+        "capability": "fs_write",
+        "match": ["**"],
+        "exclude": ["allowed/**"],
+        "effect": "deny"
+      },
+      {
+        "capability": "shell",
+        "match": ["*"],
+        "effect": "deny"
+      }
+    ]
+  }
+}

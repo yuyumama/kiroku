@@ -124,7 +124,10 @@ class RecordTest(Sandbox):
         self.assertEqual(self.events()[0]["type"], "tool_cancelled")
 
     def test_policy_denial_is_told_apart_from_human_cancel(self):
-        self.shell("date", -1, "Denied by a permission rule. The user did not reject this.")
+        # 文面は kiro-cli 3.2.1 の実物
+        self.shell("date +%Y-%m-%d-%H%M", -1,
+                   'Blocked by a permission rule (deny shell matching "*"); the user did not '
+                   'reject it. Source: agent-profile. Triggered by: "date +%Y-%m-%d-%H%M".')
         self.assertEqual(self.events()[0]["type"], "tool_denied")
 
     def test_kiroku_own_commands_are_not_recorded(self):

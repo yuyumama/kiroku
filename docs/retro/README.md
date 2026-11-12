@@ -162,7 +162,7 @@ kiro-cli chat --agent kiroku-retro
 専用エージェントは、次のことしかできません。
 
 - 書き込み：`.kiro/retro/reports/` 配下だけ
-- シェル：`aggregate.py` と `excerpt.py` は確認なしで実行でき、それ以外は実行のたびに人の確認が要る
+- シェル：`aggregate.py` と `excerpt.py` の実行だけ。ほかのコマンドは、単独でも組み合わせでも拒否される
 
 ハーネスの変更は、レポートを読んだ人が行います。
 

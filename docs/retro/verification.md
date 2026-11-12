@@ -120,6 +120,13 @@
 - headless では `--trust-tools=<ツールID>` でツール単位の許可ができます。
   認証には `KIRO_API_KEY` が必要で、ハーネス無指定では V2 で動くため `--v3` の明示が要ります。
 
+シェルの規則についても、実機で次を確認しました（kiro-cli 3.2.1）。
+
+- `deny` の規則に `exclude` を書くと、除外したコマンドは拒否されません。
+- `;` でつないだコマンドは分割して1つずつ判定され、1つでも拒否に当たると全体が実行されません。
+  拒否されると、`tool_response` は `Exit Code: -1` になり、出力に
+  `Blocked by a permission rule (...); the user did not reject it. Source: agent-profile. Triggered by: "<該当のコマンド>".` と入ります。
+
 段階2では headless を使わず、専用エージェントの対話セッションで振り返ります。
 headless での制限は、段階3で自動化するときに確認します。
 

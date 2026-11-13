@@ -347,3 +347,32 @@ class ReadingPlanTest(ReviewSandbox):
         data = aggregate.aggregate(self.root)
         self.assertEqual(data["reading_plan"]["read"], [])
         self.assertIn("未読のセッションはありません", aggregate.render(data))
+
+
+class ConfigTest(ReviewSandbox):
+    def test_stale_defaults_in_config_do_not_hide_new_defaults(self):
+        """古い版の既定値が config.json に残っていても、新しい既定値が効く。"""
+        from test_kiroku import record
+        self.write(".kiro/kiroku/config.json", json.dumps({
+            "tests": [{"match": "pytest", "report": "r.xml"}],
+            "write_tools": ["fs_write", "str_replace", "my_tool"],
+            "ignore_paths": [".kiro/kiroku/data/**", "vendor/**"],
+            "output_tail_chars": 500, "sessions_dir": None}))
+        config = record.load_config(self.root)
+        self.assertEqual(config["write_tools"], ["fs_write", "fs_append", "str_replace", "my_tool"])
+        self.assertEqual(config["ignore_paths"], [".kiro/kiroku/data/**", ".git/**", "vendor/**"])
+        self.assertEqual(config["output_tail_chars"], 500)          # 上書きする項目はそのまま
+        self.assertEqual(config["retro_read_chars"], 50000)         # 無い項目は既定値
+        self.assertEqual(config["tests"][0]["match"], "pytest")
+
+    def test_installer_explains_missing_config_keys(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "installer_cfg", os.path.join(os.path.dirname(KIT), "..", "..", "..", "..", "install.py"))
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        self.write(".kiro/kiroku/config.json", json.dumps({"tests": [], "write_tools": ["fs_write"]}))
+        text = "\n".join(installer.config_notes(self.root))
+        self.assertIn("retro_read_chars = 50000", text)
+        self.assertIn("write_tools は、既定値に足して使います", text)
+        self.assertNotIn("tests =", text)

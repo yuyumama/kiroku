@@ -35,6 +35,7 @@ except ImportError:
 SCHEMA_VERSION = 2
 DEFAULT_CONFIG = {
     "tests": [],
+    "sessions_dir": None,
     "write_tools": ["fs_write", "fs_append", "str_replace"],
     "ignore_paths": [".kiro/kiroku/data/**", ".git/**"],
     "output_tail_chars": 2000,
@@ -82,13 +83,26 @@ def find_root(cwd):
     return top.strip() if top and top.strip() else cwd
 
 
+# 導入先の設定に「足す」項目。既定の値は常に効き、設定に書いた値はそこに加わる。
+# 古い版の既定値が設定ファイルに残っていても、新しい既定値が隠れないようにするため。
+ADDITIVE_KEYS = ("write_tools", "ignore_paths")
+
+
 def load_config(root):
+    """既定値に、導入先の config.json を重ねる。config.json に無い項目は既定値で動く。"""
     config = dict(DEFAULT_CONFIG)
     try:
         with open(os.path.join(root, ".kiro", "kiroku", "config.json"), encoding="utf-8") as handle:
-            config.update(json.load(handle))
+            custom = json.load(handle)
     except (OSError, ValueError):
-        pass
+        return config
+    if not isinstance(custom, dict):
+        return config
+    for key, value in custom.items():
+        if key in ADDITIVE_KEYS and isinstance(value, list):
+            config[key] = list(DEFAULT_CONFIG[key]) + [v for v in value if v not in DEFAULT_CONFIG[key]]
+        elif value is not None or key not in DEFAULT_CONFIG:
+            config[key] = value
     return config
 
 

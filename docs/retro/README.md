@@ -38,8 +38,22 @@ Windows Python Launcher を使う場合は `-PythonCommand 'py -3'` を指定し
 `install.py` は両インストーラーの共通処理です。
 
 既存の同名ファイルが異なる場合、通常導入は変更前に止まります。
-`--update`／`-Update` では配布ファイルを更新しますが、既存の `config.json` は保持します。
-新しい設定を使う場合は既存設定へ追加してください。旧 `prompt_max_chars` は現在使いません。
+`--update`／`-Update` では配布ファイルを更新しますが、既存の `config.json` は書き換えません。導入先で書いた設定を消さないためです。
+
+`config.json` に書くのは、変えたい項目だけです。書いていない項目は、スクリプトが持つ既定値で動きます。
+kiroku の更新で設定項目が増えても、`config.json` に書き足す必要はありません。更新のときに、既定値で動く項目が表示されます。
+
+| 項目 | 既定値 | 意味 |
+|---|---|---|
+| `tests` | `[]` | テスト実行とみなすコマンドと、JUnit XML の場所 |
+| `sessions_dir` | なし | セッションログの場所。IDE のエクスポートを使うときに指定する |
+| `write_tools` | `fs_write`、`fs_append`、`str_replace` | 書き込みとして記録するツール。書いた値は既定値に足される |
+| `ignore_paths` | `.kiro/kiroku/data/**`、`.git/**` | 記録しないパス。書いた値は既定値に足される |
+| `output_tail_chars` | 2000 | 失敗時に残す出力の末尾の文字数 |
+| `retro_read_chars` | 50000 | 1回の振り返りで読む量の上限（文字数の見積もり） |
+
+`write_tools` と `ignore_paths` は、既定値を置き換えずに足します。古い版の値が `config.json` に残っていても、新しい既定値は有効です。
+旧 `prompt_max_chars` は現在使いません。
 
 ```text
 .kiro/

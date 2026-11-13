@@ -1,8 +1,39 @@
 #!/usr/bin/env python3
 """共通インストーラー。POSIX shell と PowerShell から同じ処理を呼ぶ。"""
 import argparse
+import importlib.util
+import json
 from pathlib import Path
 import shutil
+
+
+def default_config():
+    """スクリプトが持つ設定の既定値。config.json に無い項目は、この値で動く。"""
+    path = Path(__file__).resolve().parent / "kit/.kiro/skills/kiroku-retro/scripts/record.py"
+    spec = importlib.util.spec_from_file_location("kiroku_record", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.DEFAULT_CONFIG, module.ADDITIVE_KEYS
+
+
+def config_notes(target):
+    """導入先の config.json について、知らせておくことを返す。"""
+    defaults, additive = default_config()
+    try:
+        custom = json.loads((Path(target) / ".kiro/kiroku/config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["config.json を読めません。既定値で動きます。"]
+    if not isinstance(custom, dict):
+        return ["config.json の形が不正です。既定値で動きます。"]
+    notes = []
+    missing = [k for k in defaults if k not in custom]
+    if missing:
+        notes.append("config.json に無い項目は、既定値で動きます（書き足す必要はありません）：")
+        notes += ["  %s = %s" % (k, json.dumps(defaults[k], ensure_ascii=False)) for k in missing]
+    for key in additive:
+        if key in custom:
+            notes.append("config.json の %s は、既定値に足して使います。既定値は常に有効です。" % key)
+    return notes
 
 
 def install(target, update=False, python_command="python3"):
@@ -78,6 +109,9 @@ def main():
         len(changes["新規"]), len(changes["更新"]), len(changes["変更なし"])))
     if not changes["新規"] and not changes["更新"]:
         print("導入先は、この kiroku と同じ内容です。")
+    if changes["そのまま（導入先の設定）"]:
+        for line in config_notes(args.target):
+            print(line)
     print("完了。テスト結果の記録は .kiro/kiroku/config.json の tests を設定してください。")
 
 

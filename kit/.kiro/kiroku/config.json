@@ -1,15 +1,3 @@
 {
-  "tests": [],
-  "sessions_dir": null,
-  "write_tools": [
-    "fs_write",
-    "fs_append",
-    "str_replace"
-  ],
-  "ignore_paths": [
-    ".kiro/kiroku/data/**",
-    ".git/**"
-  ],
-  "output_tail_chars": 2000,
-  "retro_read_chars": 50000
+  "tests": []
 }

@@ -9,6 +9,7 @@ Kiro CLI V3／IDE 1.xでの開発中に起きた失敗や手直しを記録し�
 
 | 場所 | 中身 |
 |---|---|
+| `AGENTS.md` | このリポジトリを変更するエージェント向けの決まり |
 | `kit/` | 導入先のリポジトリにコピーするファイル |
 | `install.sh`、`install.ps1`、`install.py` | POSIX／PowerShell の導入スクリプトと共通処理 |
 | `uninstall.sh`、`uninstall.ps1`、`uninstall.py` | 取り除くスクリプトと共通処理 |

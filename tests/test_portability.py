@@ -209,8 +209,8 @@ class AdapterTest(Sandbox):
         self.assertEqual((row["log"], row["prompts"], row["note"]), ("ok", 2, "none"))
         notes = Path(self.root) / ".kiro" / "kiroku" / "data" / "notes"
         notes.mkdir(parents=True)
-        note = notes / (self.session + ".md")
-        note.write_text("# note\n", encoding="utf-8")
+        note = notes / (self.session + ".json")
+        note.write_text('{"findings": []}', encoding="utf-8")
         future = (now + datetime.timedelta(hours=1)).timestamp()
         os.utime(note, (future, future))
         self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "fresh")

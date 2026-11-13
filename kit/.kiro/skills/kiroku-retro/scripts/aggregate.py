@@ -33,9 +33,13 @@ import re
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True  # 導入先に __pycache__ を作らない
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import prompts  # noqa: E402
 import harness  # noqa: E402
+import notes  # noqa: E402
+import ledger  # noqa: E402
+import excerpt  # noqa: E402
 from record import mask  # noqa: E402
 
 RED, REGRESSION, OTHER = "red", "regression", "other"
@@ -319,6 +323,27 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     def inside(item):
         return (since is None or item["_time"] >= since) and (until is None or item["_time"] < until)
 
+    all_events, all_failures = events, failures
+    findings, note_problems = notes.verify(root)
+
+    def occurrences(target):
+        """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。"""
+        kind, _, name = (target or "").partition(":")
+        if kind == "topic":
+            return [f["_time"] for f in findings
+                    if f["status"] == "verified" and f["topic"] == name and f["_time"]]
+        if kind in ("tool", "denied", "cancelled"):
+            wanted = {"tool": "tool_failure", "denied": "tool_denied", "cancelled": "tool_cancelled"}[kind]
+            return [e["_time"] for e in all_events
+                    if e.get("type") == wanted and command_key(e.get("command")) == name]
+        if kind == "test":
+            return [f["_time"] for f in all_failures if f["class"] == REGRESSION and f["test_id"] == name]
+        return None
+
+    starts = [e["_time"] for e in all_events[:1]] + [f["_time"] for f in findings if f["_time"]]
+    adopted, rejected = ledger.tracking(root, occurrences, min(starts) if starts else None,
+                                        datetime.datetime.now(datetime.timezone.utc))
+
     events = [e for e in events if inside(e)]
     failures = [f for f in failures if inside(f)]
     candidates, excluded = fix_candidates(repo, [e for e in events if e.get("type") == "write"])
@@ -404,6 +429,11 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit)
         if with_prompts else None,
         "harness": harness.inventory(root),
+        "steering": harness.steering_weight(root),
+        "topics": notes.topics(findings, since, until),
+        "note_problems": note_problems,
+        "adopted": adopted,
+        "rejected": rejected,
         "sessions": prompts.sessions(root, events, since, until),
         "fix_candidates": candidates,
         "fix_excluded": excluded,
@@ -420,8 +450,11 @@ def render(data, show_prompts=False):
     for entry in data["harness"]:
         lines.append("- %s `%s`: %s" % (entry["scope"], entry["path"], entry["status"]))
         lines.extend("  - `%s`" % path for path in entry["files"])
+    lines += render_steering(data["steering"])
     if not data["event_count"]:
         lines += ["", "この期間の記録はありません。"]
+        lines += render_review(data)
+        lines += render_sessions(data["sessions"])
         return "\n".join(lines) + "\n"
 
     if data["recording_gaps"]:
@@ -447,6 +480,8 @@ def render(data, show_prompts=False):
             lines.append("- `%s`：%d 回、%d セッション。%s。最後は %s（session `%s`）" % (
                 row["test_id"], row["count"], row["sessions"], row["basis"],
                 row["last_ts"], row["last_session"]))
+            if kind == REGRESSION:
+                lines.append("  - 対象の型：`test:%s`" % row["test_id"])
 
     for kind, title in (("tool_failure", "ツール失敗"), ("tool_cancelled", "人による取り消し"),
                         ("tool_denied", "権限の規則による拒否")):
@@ -459,6 +494,9 @@ def render(data, show_prompts=False):
             lines.append("- `%s`：%d 回、%d セッション%s。最後は %s（session `%s`）" % (
                 row["command_key"], row["count"], row["sessions"], codes,
                 row["last_ts"], row["last_session"]))
+            lines.append("  - 対象の型：`%s:%s`" % (
+                {"tool_failure": "tool", "tool_cancelled": "cancelled", "tool_denied": "denied"}[kind],
+                row["command_key"]))
             lines.append("  - コマンド：`%s`" % row["last_command"])
             if row["last_output_tail"]:
                 lines.append("  - 出力の末尾：")
@@ -484,6 +522,7 @@ def render(data, show_prompts=False):
             row["path"], row["status"], row["written_at"], row["session_id"]))
     if data["fix_excluded"]:
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
+    lines += render_review(data)
     lines += render_sessions(data["sessions"])
     page = data.get("prompt_page")
     if page is not None:
@@ -507,17 +546,83 @@ def render(data, show_prompts=False):
 
 
 NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり"}
+STEERING_GUIDE_CHARS = 8000  # 常時読み込みの目安。超えたら、足す前に分割や条件付きを検討する
+
+
+def render_steering(weight):
+    lines = ["", "## steering の重さ", ""]
+    if not weight["files"]:
+        lines.append("steering と AGENTS.md はありません。")
+        return lines
+    lines += ["| 範囲 | パス | 読み込みの条件 | 文字数 |", "|---|---|---|---|"]
+    for row in weight["files"]:
+        lines.append("| %s | `%s` | %s | %d |" % (row["scope"], row["display"], row["inclusion"], row["chars"]))
+    note = "。目安の %d 文字を超えています" % STEERING_GUIDE_CHARS \
+        if weight["always_total"] > STEERING_GUIDE_CHARS else ""
+    lines += ["", "常時読み込みの合計：%d 文字（プロジェクト内 %d、ユーザー共通 %d）%s" % (
+        weight["always_total"], weight["always_chars"]["project"], weight["always_chars"]["user"], note)]
+    return lines
+
+
+def render_review(data):
+    """ノートと台帳から求めたもの。会話からの型の候補、ノートの検査、案の追跡。"""
+    topics = data["topics"]
+    candidates = [t for t in topics if t["candidate"]]
+    lines = ["", "## 会話からの型の候補（%d 件）" % len(candidates), "",
+             "振り返りノートの引用をログと照合し、%d つ以上の別のセッションに出たトピックです。"
+             "継続的な方針は1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
+    if not candidates:
+        lines.append("なし")
+    for topic in candidates:
+        lines.append("- `topic:%s`：%d セッション、%d 回（%s）。%s" % (
+            topic["topic"], topic["sessions"], topic["count"],
+            "、".join(notes.KINDS[k] for k in topic["kinds"]), topic["summary"]))
+        for example in topic["examples"]:
+            lines.append("  - session `%s` index=%s 「%s」" % (
+                example["session_id"], example["index"], shorten(example["quote"], 120)))
+    others = [t for t in topics if not t["candidate"]]
+    if others:
+        lines += ["", "### まだ型ではないトピック（同じ話題には、この名前を使う）", ""]
+        for topic in others:
+            lines.append("- `topic:%s`：期間内 %d セッション、全期間 %d セッション。%s" % (
+                topic["topic"], topic["sessions"], topic["all_sessions"], topic["summary"]))
+    if data["note_problems"]:
+        lines += ["", "## ノートの検査で外したもの（%d 件）" % len(data["note_problems"]), ""]
+        for problem in data["note_problems"]:
+            lines.append("- session `%s`：%s" % (problem["session_id"], problem["problem"]))
+
+    lines += ["", "## 採用した案の追跡（%d 件）" % len(data["adopted"]), ""]
+    if not data["adopted"]:
+        lines.append("なし")
+    for row in data["adopted"]:
+        if row["before"] is None:
+            counts = row["verdict"]
+        elif row["verdict"] == "まだ日が浅い":
+            counts = "採用から %s 日。まだ日が浅い（%d 日後から判定）" % (row["after_days"], ledger.YOUNG_DAYS)
+        else:
+            counts = "採用前 %d 回／%s 日、採用後 %d 回／%s 日。%s" % (
+                row["before"], row["before_days"], row["after"], row["after_days"], row["verdict"])
+        lines.append("- `%s` %s（対象の型 `%s`、採用 %s）：%s" % (
+            row["id"], row["title"], row["target"], row["decided_at"], counts))
+    if data["rejected"]:
+        lines += ["", "## 見送った案（%d 件）" % len(data["rejected"]), "",
+                  "同じ対象の型への案は、見送りの後に新しい発生がある場合だけ出します。", ""]
+        for row in data["rejected"]:
+            after = "数えられない" if row["after"] is None else "%d 回" % row["after"]
+            lines.append("- `%s` %s（対象の型 `%s`、見送り %s）：その後の発生 %s。理由：%s" % (
+                row["id"], row["title"], row["target"], row["decided_at"], after, row["reason"] or "記載なし"))
+    return lines
 
 
 def render_sessions(sessions):
     lines = ["", "## セッション一覧（%d 件、新しい順）" % len(sessions), "",
              "会話は `--session <session_id>` で1件ずつ読みます。", "",
-             "| session | 最後の記録 | ログ | 発話 | 発話の文字数 | 振り返りノート |",
-             "|---|---|---|---|---|---|"]
+             "| session | 最後の活動 | 記録 | ログ | 発話 | 発話の文字数 | 振り返りノート |",
+             "|---|---|---|---|---|---|---|"]
     for row in sessions:
-        lines.append("| `%s` | %s | %s | %d | %d | %s |" % (
-            row["session_id"], row["last_event"], row["log"], row["prompts"],
-            row["prompt_chars"], NOTE_LABELS[row["note"]]))
+        lines.append("| `%s` | %s | %s | %s | %d | %d | %s |" % (
+            row["session_id"], row["last_activity"], "あり" if row["recorded"] else "ログのみ",
+            row["log"], row["prompts"], row["prompt_chars"], NOTE_LABELS[row["note"]]))
     return lines
 
 

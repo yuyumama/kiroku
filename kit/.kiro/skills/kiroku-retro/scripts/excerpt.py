@@ -18,6 +18,7 @@ import json
 import os
 import sys
 
+sys.dont_write_bytecode = True  # 導入先に __pycache__ を作らない
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from record import mask, find_root, load_config  # noqa: E402
 

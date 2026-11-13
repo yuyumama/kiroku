@@ -312,3 +312,38 @@ class AgentPermissionTest(unittest.TestCase):
         self.assertEqual(deny["match"], ["*"])
         scripts = {m.split("/")[-1].split(" ")[0] for m in allow["match"]}
         self.assertEqual(scripts, {"aggregate.py", "excerpt.py", "ledger.py"})
+
+
+class ReadingPlanTest(ReviewSandbox):
+    def test_plan_is_bounded_by_volume_not_by_count(self):
+        for number in range(25):                       # 短いセッションが25件
+            self.log("sess_short_%02d" % number, ["短い依頼"], days_ago=0)
+        plan = aggregate.aggregate(self.root)["reading_plan"]
+        self.assertEqual((len(plan["read"]), plan["rest"]), (25, 0))
+
+        (Path(self.root) / ".kiro" / "kiroku" / "config.json").write_text(
+            json.dumps({"retro_read_chars": 3000}), encoding="utf-8")
+        self.log("sess_long", ["長い依頼" * 600], days_ago=0)   # 1件で上限に近い
+        data = aggregate.aggregate(self.root)
+        plan = data["reading_plan"]
+        self.assertLess(len(plan["read"]), 26)
+        self.assertEqual(len(plan["read"]) + plan["rest"], 26)
+        self.assertLessEqual(plan["read_chars"], 3000 + 2800)   # 最初の1件は上限を超えても読む
+        text = aggregate.render(data)
+        self.assertIn("今回読むセッション", text)
+        self.assertIn("もう一度 /kiroku-retro を実行すると続きを読みます", text)
+
+    def test_sessions_with_notes_are_not_read_again(self):
+        self.log("sess_a", ["依頼その1"])
+        self.log("sess_b", ["依頼その2"])
+        self.assertEqual(len(aggregate.aggregate(self.root)["reading_plan"]["read"]), 2)
+        self.note("sess_a", [])
+        future = (NOW + datetime.timedelta(hours=1)).timestamp()
+        os.utime(self.data / "notes" / "sess_a.json", (future, future))
+        plan = aggregate.aggregate(self.root)["reading_plan"]
+        self.assertEqual(plan["read"], ["sess_b"])
+        self.note("sess_b", [])
+        os.utime(self.data / "notes" / "sess_b.json", (future, future))
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["reading_plan"]["read"], [])
+        self.assertIn("未読のセッションはありません", aggregate.render(data))

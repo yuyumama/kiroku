@@ -142,7 +142,10 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d
 python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --session <session_id>
 ```
 
-1回の振り返りで読むのは、新しい順に10セッションまでです。残りは「未読」としてレポートに書き、次回に回します。
+1回の振り返りで読む量は、件数ではなく文字数の見積もりで区切ります。集約の「今回読むセッション」に、未読のものが新しい順に、上限に収まるところまで並びます。
+短いセッションなら数十件、長いセッションなら数件になります。上限は `config.json` の `retro_read_chars`（既定 50,000 文字）で変えられます。
+
+未読が残った場合は、集約とレポートに件数が出ます。もう一度 `/kiroku-retro` を実行すると、続きから読みます。ノートがあるセッションは読み直さないので、何度実行しても重複しません。
 全発話を全文で読みたいときは、予備として `--prompts` と `--prompt-offset` によるページ表示が使えます。
 
 ```bash

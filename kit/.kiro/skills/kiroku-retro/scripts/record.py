@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
     "ignore_paths": [".kiro/kiroku/data/**", ".git/**"],
     "output_tail_chars": 2000,
     "max_dirty_files": 500,
+    "retro_read_chars": 50000,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 SECRET_PATTERNS = [

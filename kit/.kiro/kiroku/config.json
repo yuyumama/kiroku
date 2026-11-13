@@ -10,5 +10,6 @@
     ".kiro/kiroku/data/**",
     ".git/**"
   ],
-  "output_tail_chars": 2000
+  "output_tail_chars": 2000,
+  "retro_read_chars": 50000
 }

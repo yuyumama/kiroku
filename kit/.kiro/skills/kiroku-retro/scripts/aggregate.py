@@ -40,7 +40,7 @@ import harness  # noqa: E402
 import notes  # noqa: E402
 import ledger  # noqa: E402
 import excerpt  # noqa: E402
-from record import mask  # noqa: E402
+from record import load_config, mask  # noqa: E402
 
 RED, REGRESSION, OTHER = "red", "regression", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", OTHER: "その他"}
@@ -415,6 +415,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             rows.append(entry)
         return sorted(rows, key=lambda r: (-r["count"], r.get("test_id") or r.get("command_key")))
 
+    session_rows = prompts.sessions(root, events, since, until)
     return {
         "since": since.isoformat() if since else None,
         "until": until.isoformat() if until else None,
@@ -434,7 +435,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "note_problems": note_problems,
         "adopted": adopted,
         "rejected": rejected,
-        "sessions": prompts.sessions(root, events, since, until),
+        "sessions": session_rows,
+        "reading_plan": reading_plan(session_rows, load_config(root)["retro_read_chars"]),
         "fix_candidates": candidates,
         "fix_excluded": excluded,
     }
@@ -455,6 +457,7 @@ def render(data, show_prompts=False):
         lines += ["", "この期間の記録はありません。"]
         lines += render_review(data)
         lines += render_sessions(data["sessions"])
+        lines += render_plan(data["reading_plan"])
         return "\n".join(lines) + "\n"
 
     if data["recording_gaps"]:
@@ -524,6 +527,7 @@ def render(data, show_prompts=False):
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
     lines += render_review(data)
     lines += render_sessions(data["sessions"])
+    lines += render_plan(data["reading_plan"])
     page = data.get("prompt_page")
     if page is not None:
         lines += ["", "## ユーザー発話（ログから取得・本文の保存なし）", ""]
@@ -561,6 +565,47 @@ def render_steering(weight):
         if weight["always_total"] > STEERING_GUIDE_CHARS else ""
     lines += ["", "常時読み込みの合計：%d 文字（プロジェクト内 %d、ユーザー共通 %d）%s" % (
         weight["always_total"], weight["always_chars"]["project"], weight["always_chars"]["user"], note)]
+    return lines
+
+
+REPLY_ESTIMATE_CHARS = 350  # 要約表示で、発話1件に添えられる応答とツール実行の行の見積もり
+
+
+def reading_plan(sessions, budget):
+    """今回の振り返りで読むセッションを決める。
+
+    件数ではなく、読む量（文字数の見積もり）で区切る。短いセッションは多く、長いセッションは少なく読む。
+    未読が残っても、もう一度振り返れば続きから読める。
+    """
+    unread = [s for s in sessions if s["note"] != "fresh" and s["prompts"] and s["log"] in ("ok", "partial_log")]
+    for row in unread:
+        row["estimate"] = row["prompt_chars"] + REPLY_ESTIMATE_CHARS * row["prompts"]
+    chosen, total = [], 0
+    for row in unread:  # 新しい順
+        if chosen and total + row["estimate"] > budget:
+            break
+        chosen.append(row)
+        total += row["estimate"]
+    rest = unread[len(chosen):]
+    return {"budget": budget, "read": [r["session_id"] for r in chosen], "read_chars": total,
+            "rest": len(rest), "rest_chars": sum(r["estimate"] for r in rest),
+            "unreadable": sum(1 for s in sessions if s["note"] != "fresh" and s["prompts"] == 0
+                              and s["log"] not in ("ok", "partial_log"))}
+
+
+def render_plan(plan):
+    lines = ["", "## 今回読むセッション（%d 件、見積もり %d 文字）" % (len(plan["read"]), plan["read_chars"]), ""]
+    if not plan["read"]:
+        lines.append("未読のセッションはありません。")
+    for session in plan["read"]:
+        lines.append("- `%s`" % session)
+    if plan["rest"]:
+        lines += ["", "未読があと %d 件（見積もり %d 文字）残ります。1回に読む量の上限（%d 文字）を超えるためです。"
+                  "今回の分を読み終えたら、もう一度 /kiroku-retro を実行すると続きを読みます。" % (
+                      plan["rest"], plan["rest_chars"], plan["budget"])]
+    if plan["unreadable"]:
+        lines += ["", "ログが無い、または読めないセッションが %d 件あります。会話に基づく判断はできません。"
+                  % plan["unreadable"]]
     return lines
 
 

@@ -32,6 +32,17 @@ def data_dir(root):
     return os.path.join(root, ".kiro", "kiroku", "data")
 
 
+def latest_report(root):
+    """案が0件のファイルも含む、最新のレポート名。"""
+    directory = os.path.join(data_dir(root), "reports")
+    try:
+        names = [n[:-3] for n in os.listdir(directory)
+                 if n.endswith(".md") and os.path.isfile(os.path.join(directory, n))]
+    except OSError:
+        return None
+    return max(names) if names else None
+
+
 def proposals(root):
     """レポートから案を読む。新しいレポートが先。"""
     directory = os.path.join(data_dir(root), "reports")
@@ -88,7 +99,8 @@ def pending(root):
     if not found:
         return []
     known = decisions(root)
-    return [p for p in found if p["report"] == found[0]["report"] and p["id"] not in known]
+    latest = latest_report(root)
+    return [p for p in found if p["report"] == latest and p["id"] not in known]
 
 
 def resolve(root, name):
@@ -96,7 +108,7 @@ def resolve(root, name):
     if "#" not in name:
         if not found:
             return None
-        name = "%s#%s" % (found[0]["report"], name.upper())
+        name = "%s#%s" % (latest_report(root), name.upper())
     return next((p for p in found if p["id"] == name), None)
 
 
@@ -172,7 +184,7 @@ def main(argv=None):
             print("レポートに案がありません。")
             return 0
         labels = {"adopted": "採用", "rejected": "見送り"}
-        latest = found[0]["report"]
+        latest = latest_report(root)
         for proposal in found:
             # 古いレポートの未判断の案は、その後の振り返りが引き継ぐか外すかを決めている。
             undecided = "未判断" if proposal["report"] == latest else "古いレポート。最新を見てください"

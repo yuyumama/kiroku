@@ -8,6 +8,10 @@ kiroku を入れて数回やり取りし、振り返りが既存のハーネス�
 
 ## サンプルの中身
 
+テスト結果の記録まで検証する回では、`python3 run_tests.py` を実行するよう依頼します。`make test` の失敗はハーネスの不整合を見つける材料ですが、代わりにJUnitを生成しない `python3 -m unittest` を使うだけでは、kirokuのテスト分類を確認したことにはなりません。
+
+導入後、`doctor.py --command "python3 run_tests.py"` で設定を診断し、Kiroの `/hooks` で実行前フックを含む4本を確認します。振り返りは `kiro-cli --agent kiroku-retro` で別セッションを起動します。レポート保存後はskillの `--check-report` が成功したことと、本文の根拠を確認します。
+
 Python の標準ライブラリだけで動きます。追加のパッケージは要りません。
 
 | 種類 | ファイル | 役割 |
@@ -78,7 +82,7 @@ kiro-cli chat --agent kiroku-retro
 |---|---|---|---|
 | 1 | 実行できない決まり。`make test` と書いてあるが、Makefile が無い。README は `python3 run_tests.py` | `steering/testing.md` | `make test` の失敗が記録に出れば、ツール失敗の型として挙がる。新しい決まりを足すのではなく、既存の文面を直す案になる |
 | 2 | 読み込まれない決まり。対象が `src/**/*.py` だが、コードは `kakeibo/` にある | `steering/python-style.md` | 型ヒントや書式の指摘が出たとき、「決まりはあるが読み込まれていない」と切り分け、読み込みの条件を直す案になる |
-| 3 | エージェントに渡っていない決まり。`resources` が無い | `agents/reviewer.json` | レビュー担当が決まりを知らなかった原因として、`resources` に steering を足す案になる |
+| 3 | エージェントの `resources` が無い | `agents/reviewer.json` | 現行CLIは既定で決まりを継承するため、未記載だけを欠陥としない。継承の無効化や読み込み条件の不一致を確認できた場合だけ案を出す |
 | 4 | 書かれていない決まり。コミットメッセージの言語、説明の仕方 | どこにも無い | 2つのセッションで繰り返した発話が、会話からの型の候補になる。steering に書く案になる |
 | 5 | 常時読み込みにする必要がない資料。リリースの手順 | `steering/release.md` | 「steering の重さ」に出る。足す案を出すときに、手順を手動の読み込みに移す案が添えられる可能性がある |
 

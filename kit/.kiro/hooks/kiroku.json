@@ -2,6 +2,17 @@
   "version": "v1",
   "hooks": [
     {
+      "name": "kiroku-record-test-start",
+      "description": "テスト実行前のレポート状態を控え、古い結果の取り込みを防ぐ",
+      "trigger": "PreToolUse",
+      "matcher": "^(execute_bash|execute_pwsh)$",
+      "action": {
+        "type": "command",
+        "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py"
+      },
+      "timeout": 30
+    },
+    {
       "name": "kiroku-record-tool",
       "description": "シェル実行の失敗、テスト結果、書き込みを .kiro/kiroku/data/events.jsonl に記録する",
       "trigger": "PostToolUse",

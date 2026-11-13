@@ -76,6 +76,8 @@ class Sandbox(unittest.TestCase):
 
     def run_tests(self, cases):
         """テストを実行したことにする。レポートを書き、シェル実行のフックを流す。"""
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",
+                   "tool_input": {"command": "pytest -q --junitxml=%s" % REPORT}})
         time.sleep(0.02)  # レポートの更新時刻が前回と変わるようにする
         self.write(REPORT, junit(cases))
         failed = any(status in ("failed", "error") for _, _, status in cases)
@@ -99,6 +101,37 @@ class Sandbox(unittest.TestCase):
 
 
 class RecordTest(Sandbox):
+    def test_result_without_start_and_overlapping_runs_are_explicit_gaps(self):
+        self.write(REPORT, junit([('Old', 'old', 'passed')]))
+        self.shell('pytest', 0)
+        self.assertIsNone(self.events()[-1]['results'])
+        self.assertEqual(self.events()[-1]['note'], 'missing_test_start')
+        for command in ('pytest -q', 'pytest -v'):
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': command}})
+        self.write(REPORT, junit([('New', 'new', 'passed')]))
+        self.shell('pytest -q', 0)
+        self.shell('pytest -v', 0)
+        for event in self.events()[-2:]:
+            self.assertIsNone(event['results'])
+            self.assertEqual(event['note'], 'ambiguous_test_run')
+
+    def test_first_old_report_is_not_attributed_to_failed_runner(self):
+        self.write(REPORT, junit([('Old', 'old', 'passed')]))
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})
+        self.shell('pytest', 2, 'runner did not start')
+        event = self.events()[0]
+        self.assertIsNone(event['results'])
+        self.assertEqual(event['note'], 'report_stale')
+
+    def test_mentioning_a_runner_in_data_is_not_a_test_execution(self):
+        commands = ["echo pytest", "printf '%s' pytest", "cat > report.md <<'EOF'\npytest\nEOF",
+                    "rg pytest README.md", "python3 -c 'print(\"pytest\")'"]
+        for command in commands:
+            self.shell(command, 0)
+        self.assertEqual(self.events(), [])
+
     def test_hook_is_silent_and_never_fails(self):
         done = self.shell("ls /no/such/dir", 2, "ls: cannot access")
         self.assertEqual((done.returncode, done.stdout), (0, ""))
@@ -424,10 +457,14 @@ class ClassifyTest(Sandbox):
         xml = ('<testsuites><testsuite name="s" file="spec/login.spec.ts">'
                '<testcase classname="Login page" name="logs in">%s</testcase>'
                '</testsuite></testsuites>')
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})
         self.write(REPORT, xml % "")
         self.shell("pytest", 0)
         self.write("spec/login.spec.ts", "it('logs in', () => { expect(1).toBe(2) })\n")
         time.sleep(0.02)
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})
         self.write(REPORT, xml % "<failure/>")
         self.shell("pytest", 1)
         classes, _ = self.classes()
@@ -491,6 +528,35 @@ class FixCandidateTest(Sandbox):
 
 
 class SummaryTest(Sandbox):
+    def test_redirects_preserve_numeric_arguments_and_quoted_operators(self):
+        for command in ('echo 2 > output.txt', 'echo 2 2>error.txt', "echo '&&'"):
+            self.shell(command, 1)
+        groups = {r['command_key']: r['count'] for r in aggregate.aggregate(self.root)['tool_failures']}
+        self.assertEqual(groups['echo 2'], 2)
+        self.assertEqual(groups["echo '&&'"], 1)
+
+    def test_restored_content_counts_again_after_an_intervening_write(self):
+        for content in ('A', 'B', 'A'):
+            self.write('src/app.py', content)
+            self.saved('src/app.py')
+            self.hook({'hook_event_name': 'PostToolUse', 'tool_name': 'str_replace',
+                       'tool_input': {'path': 'src/app.py'}})
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['periods']['全期間']['writes'], 3)
+
+    def test_directory_wrapper_preserves_failure_identity_and_tracking(self):
+        self.shell("make test", 2)
+        self.session = "sess_other"
+        self.shell('cd "%s" && make test' % self.root, 2)
+        self.shell('cd "%s" && python -m unittest' % self.root, 127)
+        self.write(".kiro/kiroku/data/reports/2026-11-14-0100.md",
+                   "### P1. テスト実行\n- 対象の型：`tool:make test`\n")
+        data = aggregate.aggregate(self.root)
+        groups = {r["command_key"]: (r["count"], r["sessions"]) for r in data["tool_failures"]}
+        self.assertEqual(groups["make test"], (2, 2))
+        self.assertEqual(groups["python -m unittest"], (1, 1))
+        self.assertEqual(data["pending"][0]["recent"], 2)
+
     def test_summary_groups_repeated_tool_failures(self):
         for _ in range(3):
             self.shell("npm run build", 1, "error TS2304: Cannot find name")

@@ -82,6 +82,8 @@ class InstallerTest(unittest.TestCase):
 
 class AdapterTest(Sandbox):
     def test_concurrent_hooks_consume_junit_once_without_corrupting_events(self):
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",
+                   "tool_input": {"command": "pytest"}})
         self.write(REPORT, junit([("tests.test_a", "test_a", "passed")]))
         payload = json.dumps({"cwd": self.root, "session_id": self.session,
                               "hook_event_name": "PostToolUse", "tool_name": "execute_bash",

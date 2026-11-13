@@ -15,12 +15,17 @@ import datetime
 from contextlib import contextmanager
 import fnmatch
 import glob
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import commands
 
 try:
     import fcntl
@@ -45,8 +50,6 @@ DEFAULT_CONFIG = {
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
-# 振り返りの集約を、導入先のルートから起動したコマンド。これ以降は振り返りの会話として扱う。
-RETRO_COMMAND_RE = re.compile(r"(?:^|[\s\"'])\.kiro[/\\]skills[/\\]kiroku-retro[/\\]scripts[/\\]aggregate\.py")
 
 
 def not_run_kind(output):
@@ -246,7 +249,56 @@ def save_state(retro_dir, state):
     os.replace(path + ".tmp", path)
 
 
-def read_test_report(root, cwd, retro_dir, entry):
+def report_stamp(root, entry):
+    """レポートの実行前後を比べる。内容が同じ再実行も時刻・置換で区別する。"""
+    stamps = []
+    for path in sorted(glob.glob(os.path.join(root, entry.get("report") or ""), recursive=True)):
+        if os.path.isfile(path):
+            stat = os.stat(path)
+            stamps.append([os.path.relpath(path, root), stat.st_mtime_ns,
+                           stat.st_ctime_ns, stat.st_size, stat.st_ino])
+    return stamps
+
+
+def start_key(payload, cwd):
+    raw = json.dumps([payload.get("session_id") or os.environ.get("KIRO_SESSION_ID"),
+                      payload.get("tool_name"), cwd, payload.get("tool_input") or {}], sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def begin_test(payload, root, cwd, retro_dir, config):
+    entry = commands.test_entry((payload.get("tool_input") or {}).get("command"), config)
+    if entry is None:
+        return
+    state = load_state(retro_dir)
+    starts = state.setdefault("test_starts", {})
+    key = start_key(payload, cwd)
+    overlap = False
+    for active in starts.values():
+        if active.get("report") == entry.get("report"):
+            active["overlap"] = True
+            overlap = True
+    prior = starts.get(key, {})
+    starts[key] = {"before": report_stamp(root, entry), "report": entry.get("report"),
+                   "count": prior.get("count", 0) + 1, "overlap": overlap}
+    save_state(retro_dir, state)
+
+
+def finish_test(payload, cwd, retro_dir):
+    state = load_state(retro_dir)
+    key = start_key(payload, cwd)
+    start = state.get("test_starts", {}).get(key)
+    if start is not None:
+        start = dict(start)
+        if start["count"] > 1:
+            state["test_starts"][key]["count"] -= 1
+        else:
+            del state["test_starts"][key]
+        save_state(retro_dir, state)
+    return start
+
+
+def read_test_report(root, cwd, retro_dir, entry, start=None):
     """設定されたレポートを読む。前回と同じファイルなら古いものとして読まない。"""
     pattern = entry.get("report")
     if not pattern:
@@ -256,10 +308,18 @@ def read_test_report(root, cwd, retro_dir, entry):
     files = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
     if not files:
         return None, {}, "report_not_found"
-    stamp = [[os.path.relpath(f, root), os.path.getmtime(f), os.path.getsize(f)] for f in files]
+    stamp = report_stamp(root, entry)
     state = load_state(retro_dir)
     if state.get("reports", {}).get(pattern) == stamp:
         return None, {}, "report_stale"
+    if start is None:
+        return None, {}, "missing_test_start"
+    if start.get("overlap") or start.get("report") != pattern:
+        return None, {}, "ambiguous_test_run"
+    if start["before"] == stamp:
+        return None, {}, "report_stale"
+    if any(item in start["before"] for item in stamp):
+        return None, {}, "report_partly_stale"
     try:
         results, test_files = parse_junit(root, cwd, files)
     except (ET.ParseError, OSError):
@@ -272,8 +332,9 @@ def read_test_report(root, cwd, retro_dir, entry):
 def shell_events(payload, root, cwd, retro_dir, config):
     tool_input = payload.get("tool_input") or {}
     command = tool_input.get("command")
-    if not isinstance(command, str) or ".kiro/skills/kiroku-retro/" in command:
+    if not isinstance(command, str) or commands.own_script(command):
         return []  # kiroku 自身のスクリプト（振り返り中の集約など）は記録しない
+    start = finish_test(payload, cwd, retro_dir)
     response = payload.get("tool_response")
     response = response if isinstance(response, str) else json.dumps(response, ensure_ascii=False)
     found = EXIT_CODE_RE.search(response)
@@ -287,10 +348,10 @@ def shell_events(payload, root, cwd, retro_dir, config):
         return [{"type": "recording_gap", "tool": payload.get("tool_name"),
                  "reason": "unknown_shell_response", "command": mask(command)}]
 
-    entry = next((t for t in config["tests"] if re.search(t.get("match", "(?!)"), command)), None)
+    entry = commands.test_entry(command, config)
     if entry is not None and exit_code != -1:
         head, dirty, truncated = worktree_state(root, config)
-        results, test_files, note = read_test_report(root, cwd, retro_dir, entry)
+        results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
         event = {
             "type": "test_run", "command": mask(command), "exit_code": exit_code,
             "head": head, "dirty": dirty, "results": results, "test_files": test_files,
@@ -401,9 +462,11 @@ def main():
                 mark_retro(retro_dir, session_id, now())
             elif text.strip():
                 events = [{"type": "prompt"}]
+        elif hook == "PreToolUse" and tool in ("execute_bash", "execute_pwsh"):
+            begin_test(payload, root, cwd, retro_dir, config)
         elif hook == "PostToolUse" and tool in ("execute_bash", "execute_pwsh"):
             command = (payload.get("tool_input") or {}).get("command")
-            if isinstance(command, str) and RETRO_COMMAND_RE.search(command):
+            if commands.own_script(command) == 'aggregate.py':
                 mark_retro(retro_dir, session_id, now())
             events = shell_events(payload, root, cwd, retro_dir, config)
         elif hook == "PostToolUse" and tool in config["write_tools"]:

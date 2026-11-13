@@ -397,6 +397,12 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     starts = [e["_time"] for e in all_events[:1]] + [f["_time"] for f in findings if f["_time"]]
     adopted, rejected = ledger.tracking(root, occurrences, min(starts) if starts else None,
                                         datetime.datetime.now(datetime.timezone.utc))
+    pending = []
+    for proposal in ledger.pending(root):
+        times = occurrences(proposal["target"]) if proposal["target"] else None
+        recent = None if times is None else sum(
+            1 for t in times if (since is None or t >= since) and (until is None or t < until))
+        pending.append(dict(proposal, recent=recent))
 
     events = [e for e in events if inside(e)]
     failures = [f for f in failures if inside(f)]
@@ -505,6 +511,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "topics": notes.topics(findings, since, until),
         "note_problems": note_problems,
         "adopted": adopted,
+        "pending": pending,
         "rejected": rejected,
         "sessions": session_rows,
         "reading_plan": reading_plan(session_rows, load_config(root)["retro_read_chars"]),
@@ -812,6 +819,14 @@ def render_review(data, cap=None):
         lines.append("- `%s` %s（対象の型 `%s`、採用 %s）：%s" % (
             row["id"], row["title"], row["target"], row["decided_at"], counts))
     lines += more_adopted
+    if data["pending"]:
+        lines += ["", "## 前回のレポートの未判断の案（%d 件）" % len(data["pending"]), "",
+                  "最新のレポートにあり、採用も見送りも記録されていない案です。"
+                  "今回のレポートに引き継ぐか、外すかを決めます。", ""]
+        for row in data["pending"]:
+            recent = "数えられない" if row["recent"] is None else "%d 回" % row["recent"]
+            lines.append("- `%s` %s（対象の型 `%s`）：期間内の発生 %s" % (
+                row["id"], row["title"], row["target"] or "記載なし", recent))
     if data["rejected"]:
         lines += ["", "## 見送った案（%d 件）" % len(data["rejected"]), "",
                   "同じ対象の型への案は、見送りの後に新しい発生がある場合だけ出します。", ""]

@@ -44,7 +44,8 @@ def duplicates(rows):
     """二重に記録されたユーザー発話を探す。{重複の index: 最初の index}。
 
     作業中に割り込んで送った発話は、ログに2回残ることがある。近くにあり、内容が同じか、
-    片方がもう片方を含む発話は、1件として扱う。
+    後の発話が前の発話に丸ごと含まれるものは、1件として扱う。
+    後の発話のほうが長いとき（前の発話に指示を足したもの）は、新しい内容があるので別の発話とする。
     """
     recent, found = [], {}
     for index, (_, payload) in enumerate(rows):
@@ -58,7 +59,7 @@ def duplicates(rows):
         if len(folded) < DUPLICATE_MIN_CHARS:
             continue  # 「はい」「続けて」のような短い発話は、本当に繰り返すことがある
         for first, other in recent:
-            if folded in other or other in folded:
+            if folded in other:
                 found[index] = first
                 break
         else:

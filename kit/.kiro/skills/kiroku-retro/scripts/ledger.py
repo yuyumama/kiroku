@@ -78,6 +78,19 @@ def decisions(root):
     return latest
 
 
+def pending(root):
+    """最新のレポートの案のうち、採用も見送りも記録されていないもの。
+
+    それより古いレポートの未判断の案は、次の振り返りが引き継ぐか外すかを決めた後なので、対象にしない。
+    これにより、判断するときは最新のレポートだけを見ればよい。
+    """
+    found = proposals(root)
+    if not found:
+        return []
+    known = decisions(root)
+    return [p for p in found if p["report"] == found[0]["report"] and p["id"] not in known]
+
+
 def resolve(root, name):
     found = proposals(root)
     if "#" not in name:
@@ -159,8 +172,11 @@ def main(argv=None):
             print("レポートに案がありません。")
             return 0
         labels = {"adopted": "採用", "rejected": "見送り"}
+        latest = found[0]["report"]
         for proposal in found:
-            state = labels.get(known.get(proposal["id"], {}).get("decision"), "未判断")
+            # 古いレポートの未判断の案は、その後の振り返りが引き継ぐか外すかを決めている。
+            undecided = "未判断" if proposal["report"] == latest else "古いレポート。最新を見てください"
+            state = labels.get(known.get(proposal["id"], {}).get("decision"), undecided)
             print("%s  [%s]  %s  （対象の型：%s）" % (
                 proposal["id"], state, proposal["title"], proposal["target"] or "記載なし"))
         return 0

@@ -493,3 +493,51 @@ class RetroFeedbackTest(ReviewSandbox):
                                "--section", "tools"], capture_output=True, text=True, check=True).stdout
         self.assertEqual(full.count("対象の型：`tool:"), 60)
         self.assertNotIn("## セッション一覧", full)
+
+
+class PendingTest(ReviewSandbox):
+    OLD = ("### P1. 古い案\n- 対象の型：`tool:old thing`\n")
+    NEW = ("### P1. ビルドの前提を確かめる\n- 対象の型：`tool:npm run build`\n"
+           "### P2. テストの回し方を書く\n- 対象の型：`topic:テスト実行コマンド`\n"
+           "### P3. 対象の型が無い案\n")
+
+    def test_only_undecided_proposals_of_the_latest_report_are_pending(self):
+        self.report("2026-11-01-0900", self.OLD)
+        self.report("2026-11-08-0900", self.NEW)
+        for _ in range(2):
+            self.shell("npm run build", 1, "boom")
+        self.decide("2026-11-08-0900#P2", "rejected", 0, "topic:テスト実行コマンド")
+        data = aggregate.aggregate(self.root)
+        pending = {row["number"]: row for row in data["pending"]}
+        self.assertEqual(set(pending), {"P1", "P3"})          # 古いレポートの案と、判断済みの案は入らない
+        self.assertEqual(pending["P1"]["recent"], 2)          # 対象の型が、期間内に何回出たか
+        self.assertIsNone(pending["P3"]["recent"])
+        text = aggregate.render(data)
+        self.assertIn("前回のレポートの未判断の案（2 件）", text)
+        self.assertIn("`2026-11-08-0900#P1` ビルドの前提を確かめる", text)
+        self.assertNotIn("古い案", text)
+
+    def test_nothing_pending_when_everything_is_decided(self):
+        self.report("2026-11-08-0900", "### P1. 案\n- 対象の型：`tool:x`\n")
+        self.decide("2026-11-08-0900#P1", "adopted", 0, "tool:x")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["pending"], [])
+        self.assertNotIn("未判断の案", aggregate.render(data))
+
+    def test_list_points_to_the_latest_report_for_old_undecided_proposals(self):
+        self.report("2026-11-01-0900", self.OLD)
+        self.report("2026-11-08-0900", self.NEW)
+        done = subprocess.run([sys.executable, LEDGER, "--root", self.root, "list"],
+                              capture_output=True, text=True)
+        self.assertIn("2026-11-08-0900#P1  [未判断]", done.stdout)
+        self.assertIn("2026-11-01-0900#P1  [古いレポート。最新を見てください]", done.stdout)
+
+
+class DuplicateTest(unittest.TestCase):
+    def test_longer_follow_up_is_not_a_duplicate(self):
+        rows = [("t", {"type": "user", "content": "テストを実行してください"}),
+                ("t", {"type": "assistant", "content": "実行しました"}),
+                ("t", {"type": "user", "content": "テストを実行してください。通ったらコミットして"}),
+                ("t", {"type": "user", "content": "テストを実行してください"})]
+        # 2件目（index=2）は指示を足しているので別の発話。同じ内容の index=3 だけが重複。
+        self.assertEqual(aggregate.prompts.duplicates(rows), {3: 0})

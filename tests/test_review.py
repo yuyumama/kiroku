@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 
 from test_kiroku import KIT, Sandbox, aggregate
@@ -255,3 +256,59 @@ class SteeringWeightTest(ReviewSandbox):
 
     def test_no_steering(self):
         self.assertIn("steering と AGENTS.md はありません", aggregate.render(aggregate.aggregate(self.root)))
+
+
+class ReviewSummaryTest(ReviewSandbox):
+    def test_summary_has_counts_but_no_project_content(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("review", os.path.join(KIT, "review.py"))
+        review = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(review)
+
+        for _ in range(3):
+            self.shell("secret-build-tool --target internal/payments", 1, "機密の出力 PAYMENT_TABLE")
+        self.write("src/internal_payments.py", "x = 1\n")
+        self.saved("src/internal_payments.py")
+        self.log("sess_a", ["顧客台帳の移行手順をもう一度説明して"])
+        self.log("sess_b", ["顧客台帳の移行手順をもう一度説明して"])
+        self.note("sess_a", [finding("顧客台帳の移行手順をもう一度説明して", "顧客台帳の移行", "repeated_explanation")])
+        self.note("sess_b", [finding("顧客台帳の移行手順をもう一度説明して", "顧客台帳の移行", "repeated_explanation")])
+        self.report("2026-11-10-0900", "### P1. 顧客台帳の移行手順を steering に書く\n"
+                                       "- 対象の型：`topic:顧客台帳の移行`\n"
+                                       "### P2. ビルドの前提を hook で確かめる\n"
+                                       "- 対象の型：`tool:secret-build-tool --target internal/payments`\n")
+        self.decide("2026-11-10-0900#P1", "adopted", 5, "topic:顧客台帳の移行")
+        steering = Path(self.root) / ".kiro" / "steering"
+        steering.mkdir(parents=True)
+        (steering / "payments-rules.md").write_text("社外秘の決まり" * 10, encoding="utf-8")
+
+        text = review.summarize(self.root, None, NOW + datetime.timedelta(minutes=1))
+        for secret in ("secret-build-tool", "payments", "PAYMENT_TABLE", "顧客台帳", "社外秘",
+                       "sess_a", self.root):
+            self.assertNotIn(secret, text)
+        self.assertIn("| ツール失敗 | 1 | 1 | 0 | 3 |", text)
+        self.assertIn("トピック：1 個（型の候補 1 個）", text)
+        self.assertIn("レポート：1 個、案：2 件", text)
+        self.assertIn("| topic | 1 | 0 | 0 |", text)
+        self.assertIn("| tool | 0 | 0 | 1 |", text)
+        self.assertIn("セッション：3 件（記録あり 1、ログのみ 2）", text)
+        self.assertIn("常時読み込みの合計：70 文字", text)
+
+    def test_summary_runs_on_an_empty_repository(self):
+        done = subprocess.run([sys.executable, os.path.join(KIT, "review.py"), "--root", self.root],
+                              capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("イベント数：0", done.stdout)
+        self.assertIn("（案なし）", done.stdout)
+
+
+class AgentPermissionTest(unittest.TestCase):
+    def test_retro_agent_may_run_only_kiroku_scripts(self):
+        with open(os.path.join(KIT, "..", "..", "..", "agents", "kiroku-retro.json"), encoding="utf-8") as handle:
+            rules = json.load(handle)["permissions"]["rules"]
+        allow = next(r for r in rules if r["capability"] == "shell" and r["effect"] == "allow")
+        deny = next(r for r in rules if r["capability"] == "shell" and r["effect"] == "deny")
+        self.assertEqual(sorted(allow["match"]), sorted(deny["exclude"]))
+        self.assertEqual(deny["match"], ["*"])
+        scripts = {m.split("/")[-1].split(" ")[0] for m in allow["match"]}
+        self.assertEqual(scripts, {"aggregate.py", "excerpt.py", "ledger.py"})

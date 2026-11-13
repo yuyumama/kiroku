@@ -330,7 +330,9 @@ class ReadingPlanTest(ReviewSandbox):
         self.assertEqual(len(plan["read"]) + plan["rest"], 26)
         self.assertLessEqual(plan["read_chars"], 3000 + 2800)   # 最初の1件は上限を超えても読む
         text = aggregate.render(data)
-        self.assertIn("今回読むセッション", text)
+        self.assertIn("未読の合計：26 件", text)
+        self.assertIn("1回の振り返りで読む分：次の %d 件" % len(plan["read"]), text)
+        self.assertIn("その後に残る分：%d 件" % plan["rest"], text)
         self.assertIn("もう一度 /kiroku-retro を実行すると続きを読みます", text)
 
     def test_sessions_with_notes_are_not_read_again(self):
@@ -376,3 +378,166 @@ class ConfigTest(ReviewSandbox):
         self.assertIn("retro_read_chars = 50000", text)
         self.assertIn("write_tools は、既定値に足して使います", text)
         self.assertNotIn("tests =", text)
+
+
+class RetroFeedbackTest(ReviewSandbox):
+    """振り返りを実際に回して分かった不具合の再発防止。"""
+
+    def messages(self, session, rows, start=None):
+        """種別を指定してセッションログを作る。rows は (type, 本文またはコマンド) の一覧。"""
+        directory = self.home / "sessions" / "0123456789abcdef" / session
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": session, "workspacePaths": [self.root]}), encoding="utf-8")
+        start = start or NOW - datetime.timedelta(minutes=30)
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, (kind, value) in enumerate(rows):
+                payload = {"type": kind, "content": value}
+                if kind == "tool_call":
+                    payload = {"type": kind, "toolName": "execute_bash", "args": {"command": value}}
+                stamp = (start + datetime.timedelta(seconds=index)).isoformat()
+                handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload},
+                                        ensure_ascii=False) + "\n")
+
+    def test_utterance_logged_twice_is_counted_once(self):
+        steer = "そのやり方ではなく、先にテストを書いてから直して"
+        self.messages("sess_dup", [
+            ("user", "ログイン画面を直して"), ("assistant", "直します"),
+            ("user", steer), ("tool_call", "ls"), ("assistant", "途中です"),
+            ("user", steer), ("assistant", "テストを先に書きました"),
+            ("user", "はい"), ("assistant", "続けます"), ("user", "はい")])
+        row = aggregate.aggregate(self.root)["sessions"][0]
+        self.assertEqual(row["prompts"], 4)   # 割り込みの二重記録だけを除く。短い「はい」2回は別の発話
+        view = aggregate.prompts.distill(self.root, "sess_dup")
+        self.assertEqual([t["index"] for t in view["turns"]], [0, 2, 7, 9])
+        self.assertEqual(view["turns"][1]["duplicates"], [5])
+        self.assertEqual(view["turns"][1]["reply"]["index"], 6)   # 重複の後の応答も、最初の発話に付く
+        self.assertIn("index=5 にも記録されています", aggregate.render_session(view))
+
+    def test_conversation_after_retro_start_is_not_development(self):
+        self.session = "sess_dev"
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "機能を足して"})
+        self.shell("make build", 2, "boom")
+        self.messages("sess_dev", [
+            ("user", "機能を足して"), ("assistant", "足しました"),
+            ("user", "/kiroku-retro"),
+            ("tool_call", "python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d"),
+            ("user", "P1 は採用で")], start=datetime.datetime.now(datetime.timezone.utc))
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "/kiroku-retro"})
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "P1 は採用で"})
+        self.assertEqual(len(self.events()), 3)
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["event_count"], 2)           # 振り返り中の発話は数えない
+        self.assertEqual(data["coverage"]["retro_excluded"], 1)
+        self.assertEqual(data["sessions"][0]["prompts"], 1)
+        view = aggregate.prompts.distill(self.root, "sess_dev")
+        self.assertEqual([t["text"] for t in view["turns"]], ["機能を足して"])
+
+    def test_retro_agent_session_without_slash_command_is_excluded(self):
+        self.session = "sess_retro"
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "振り返りをお願い"})
+        self.shell("python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d", 0)
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "P1 は採用で"})
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["event_count"], 1)           # 集約を実行した後の発話は数えない
+        # kiroku 自体の開発で、別の場所にあるスクリプトを動かしても、振り返りとは扱わない。
+        self.session = "sess_kit"
+        self.shell("python3 kit/.kiro/skills/kiroku-retro/scripts/aggregate.py", 0)
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "続けて"})
+        self.assertEqual(aggregate.aggregate(self.root)["event_count"], 2)
+
+    def test_timeout_is_not_reported_as_denial(self):
+        self.shell("npm run e2e", -1, "partial output\nCommand timed out after 120000ms")
+        self.shell("mystery", -1, "something else")
+        self.assertEqual([e["type"] for e in self.events()], ["tool_timeout", "recording_gap"])
+        # 古い版が「拒否」として記録したものも、集約のときに分け直す。
+        with open(self.data / "events.jsonl", "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "tool_denied", "command": "npm run e2e", "v": 2,
+                                     "ts": NOW.isoformat(), "session_id": "sess_old",
+                                     "output_tail": "Command timed out after 120000ms"}) + "\n")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual([(r["type"], r["count"]) for r in data["tool_failures"]], [("tool_timeout", 2)])
+        text = aggregate.render(data)
+        self.assertIn("## タイムアウト（1 種類）", text)
+        self.assertIn("対象の型：`timeout:npm run e2e`", text)
+        self.assertIn("## 権限の規則による拒否（0 種類）", text)
+
+    def test_coverage_says_which_sessions_have_no_hook_events(self):
+        self.log("sess_before", ["導入前の依頼"], days_ago=3)
+        self.log("sess_silent", ["フックが動かなかった依頼"], days_ago=0)
+        self.session = "sess_recorded"
+        self.log("sess_recorded", ["記録のある依頼"], days_ago=1)
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "記録のある依頼"})
+        events = self.data / "events.jsonl"   # 記録は1日前に始まったことにする
+        event = json.loads(events.read_text(encoding="utf-8"))
+        event["ts"] = (NOW - datetime.timedelta(days=1)).isoformat()
+        events.write_text(json.dumps(event) + "\n", encoding="utf-8")
+        data = aggregate.aggregate(self.root)
+        cover = data["coverage"]
+        self.assertEqual((cover["recorded"], cover["log_only"], cover["before_first"], cover["after_first"]),
+                         (1, 2, 1, 1))
+        self.assertIn("記録（フックによるイベント）があるもの 1 件、ログのみ 2 件", aggregate.render(data))
+
+    def test_default_output_fits_the_budget_and_sections_give_the_rest(self):
+        for number in range(60):
+            self.session = "sess_%02d" % number
+            self.log(self.session, ["依頼 %d" % number])
+            self.shell("tool%d --flag value" % number, 1, "\n".join(["error line " + "x" * 150] * 20))
+        done = subprocess.run([sys.executable, os.path.join(KIT, "aggregate.py"), "--root", self.root],
+                              capture_output=True, text=True, check=True)
+        self.assertLessEqual(len(done.stdout), 20000)
+        self.assertLess(done.stdout.index("## 未読のセッション"), done.stdout.index("## ツール失敗"))
+        self.assertLess(done.stdout.index("## 会話からの型の候補"), done.stdout.index("## ツール失敗"))
+        self.assertIn("全件は `--section tools` で出します", done.stdout)
+        full = subprocess.run([sys.executable, os.path.join(KIT, "aggregate.py"), "--root", self.root,
+                               "--section", "tools"], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(full.count("対象の型：`tool:"), 60)
+        self.assertNotIn("## セッション一覧", full)
+
+
+class PendingTest(ReviewSandbox):
+    OLD = ("### P1. 古い案\n- 対象の型：`tool:old thing`\n")
+    NEW = ("### P1. ビルドの前提を確かめる\n- 対象の型：`tool:npm run build`\n"
+           "### P2. テストの回し方を書く\n- 対象の型：`topic:テスト実行コマンド`\n"
+           "### P3. 対象の型が無い案\n")
+
+    def test_only_undecided_proposals_of_the_latest_report_are_pending(self):
+        self.report("2026-11-01-0900", self.OLD)
+        self.report("2026-11-08-0900", self.NEW)
+        for _ in range(2):
+            self.shell("npm run build", 1, "boom")
+        self.decide("2026-11-08-0900#P2", "rejected", 0, "topic:テスト実行コマンド")
+        data = aggregate.aggregate(self.root)
+        pending = {row["number"]: row for row in data["pending"]}
+        self.assertEqual(set(pending), {"P1", "P3"})          # 古いレポートの案と、判断済みの案は入らない
+        self.assertEqual(pending["P1"]["recent"], 2)          # 対象の型が、期間内に何回出たか
+        self.assertIsNone(pending["P3"]["recent"])
+        text = aggregate.render(data)
+        self.assertIn("前回のレポートの未判断の案（2 件）", text)
+        self.assertIn("`2026-11-08-0900#P1` ビルドの前提を確かめる", text)
+        self.assertNotIn("古い案", text)
+
+    def test_nothing_pending_when_everything_is_decided(self):
+        self.report("2026-11-08-0900", "### P1. 案\n- 対象の型：`tool:x`\n")
+        self.decide("2026-11-08-0900#P1", "adopted", 0, "tool:x")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["pending"], [])
+        self.assertNotIn("未判断の案", aggregate.render(data))
+
+    def test_list_points_to_the_latest_report_for_old_undecided_proposals(self):
+        self.report("2026-11-01-0900", self.OLD)
+        self.report("2026-11-08-0900", self.NEW)
+        done = subprocess.run([sys.executable, LEDGER, "--root", self.root, "list"],
+                              capture_output=True, text=True)
+        self.assertIn("2026-11-08-0900#P1  [未判断]", done.stdout)
+        self.assertIn("2026-11-01-0900#P1  [古いレポート。最新を見てください]", done.stdout)
+
+
+class DuplicateTest(unittest.TestCase):
+    def test_longer_follow_up_is_not_a_duplicate(self):
+        rows = [("t", {"type": "user", "content": "テストを実行してください"}),
+                ("t", {"type": "assistant", "content": "実行しました"}),
+                ("t", {"type": "user", "content": "テストを実行してください。通ったらコミットして"}),
+                ("t", {"type": "user", "content": "テストを実行してください"})]
+        # 2件目（index=2）は指示を足しているので別の発話。同じ内容の index=3 だけが重複。
+        self.assertEqual(aggregate.prompts.duplicates(rows), {3: 0})

@@ -361,6 +361,56 @@ class ClassifyTest(Sandbox):
         self.assertEqual(got, {("tests.test_b::test_b", aggregate.RED),
                                ("tests.test_a::test_a", aggregate.REGRESSION)})
 
+    def conflict(self):
+        """全テスト成功の後、コンフリクトする merge を始めた状態にする。"""
+        self.run_tests([("tests.test_a", "test_a", "passed")])
+        self.git("checkout", "-q", "-b", "teammate")
+        self.write("src/app.py", "def f():\n    return 3\n")
+        self.commit("teammate change")
+        self.git("checkout", "-q", "main")
+        self.write("src/app.py", "def f():\n    return 2\n")
+        self.commit("local change")
+        subprocess.run(["git", "-C", self.root, "merge", "--no-edit", "teammate"], capture_output=True)
+
+    def test_failure_during_merge_is_not_a_regression(self):
+        self.conflict()
+        self.run_tests([("tests.test_a", "test_a", "failed")])
+        self.assertEqual(self.events()[-1]["vcs"], "merge")
+        classes, data = self.classes()
+        self.assertEqual(classes, {"tests.test_a::test_a": aggregate.MERGE})
+        text = aggregate.render(data)
+        self.assertIn("## テスト失敗：マージ中の失敗（1 種類）", text)
+        self.assertIn("## テスト失敗：回帰候補（0 種類）", text)
+
+    def test_old_record_during_merge_is_recognized_from_the_merge_commit(self):
+        self.conflict()
+        self.run_tests([("tests.test_a", "test_a", "failed")])
+        path = os.path.join(self.root, ".kiro", "kiroku", "data", "events.jsonl")
+        rows = self.events()
+        del rows[-1]["vcs"]   # 古い版の記録には、merge の最中という印が無い
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.writelines(json.dumps(row) + "\n" for row in rows)
+        self.assertEqual(self.classes()[0], {"tests.test_a::test_a": aggregate.REGRESSION})
+        time.sleep(1.1)   # reflog の時刻は秒単位
+        self.write("src/app.py", "def f():\n    return 3\n")
+        self.commit("merge resolved")
+        self.assertEqual(self.classes()[0], {"tests.test_a::test_a": aggregate.MERGE})
+
+    def test_regression_after_a_finished_merge_says_so(self):
+        self.run_tests([("tests.test_a", "test_a", "passed")])
+        self.git("checkout", "-q", "-b", "teammate")
+        self.write("src/other.py", "y = 1\n")
+        self.commit("teammate change")
+        self.git("checkout", "-q", "main")
+        self.write("README.md", "doc\n")
+        self.commit("local change")
+        self.git("merge", "-q", "--no-edit", "teammate")
+        self.run_tests([("tests.test_a", "test_a", "failed")])
+        _, data = self.classes()
+        row = data["test_failures"][0]
+        self.assertEqual(row["class"], aggregate.REGRESSION)
+        self.assertIn("前回の全テスト成功の後に merge あり", row["basis"])
+
     def test_failure_without_green_baseline_is_other(self):
         self.write("tests/test_a.py", "def test_a():\n    assert False\n")
         self.run_tests([self.A + ("failed",)])

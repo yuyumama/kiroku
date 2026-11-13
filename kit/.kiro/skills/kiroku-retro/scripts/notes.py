@@ -123,7 +123,8 @@ def verify(root):
             key = finding_key(session, finding)
             row = {"session_id": session, "kind": finding["kind"], "topic": finding["topic"].strip(),
                    "summary": str(finding.get("summary") or ""), "quote": finding["quote"],
-                   "index": finding.get("index"), "ts": None, "status": "verified"}
+                   "index": finding.get("index"), "ts": None, "status": "verified",
+                   "context": str(finding.get("context") or "")}
             hit = _locate(rows, finding["quote"], finding.get("index")) if rows is not None else None
             if hit:
                 row["index"], row["ts"] = hit
@@ -168,7 +169,7 @@ def topics(findings, since=None, until=None):
             entry["count"] += 1
             if len(entry["examples"]) < 3:
                 entry["examples"].append({"session_id": row["session_id"], "index": row["index"],
-                                          "quote": row["quote"]})
+                                          "quote": row["quote"], "context": row["context"]})
     rows = []
     for entry in grouped.values():
         sessions = len(entry["sessions"])

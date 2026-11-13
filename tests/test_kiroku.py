@@ -116,6 +116,63 @@ class RecordTest(Sandbox):
             self.assertIsNone(event['results'])
             self.assertEqual(event['note'], 'ambiguous_test_run')
 
+    def test_abandoned_test_start_expires_instead_of_blocking_later_runs(self):
+        """Kiro の異常終了などで終わりのフックが来なかった実行前記録は、期限で捨てる。"""
+        state_path = os.path.join(self.root, '.kiro', 'kiroku', 'data', 'state.json')
+
+        def run(session, name):
+            self.session = session
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': 'pytest'}})
+            time.sleep(0.02)
+            self.write(REPORT, junit([('T', name, 'passed')]))
+            self.shell('pytest', 0)
+            return self.events()[-1]
+
+        def age(seconds):
+            with open(state_path, encoding='utf-8') as handle:
+                state = json.load(handle)
+            for start in state['test_starts'].values():
+                start['at'] = start.get('at', time.time()) - seconds
+            with open(state_path, 'w', encoding='utf-8') as handle:
+                json.dump(state, handle)
+
+        self.session = 'sess_crashed'
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})   # PostToolUse は来ない
+        age(120)
+        held = run('sess_a', 'a')   # 既定の期限内は、重複の可能性として保留する
+        self.assertEqual((held['results'], held['note']), (None, 'ambiguous_test_run'))
+        self.write('.kiro/kiroku/config.json', json.dumps({
+            'tests': [{'match': r'\bpytest\b', 'report': REPORT}], 'test_start_max_seconds': 60}))
+        read = run('sess_b', 'b')
+        self.assertEqual(read['results']['passed'], ['T::b'])
+        self.assertNotIn('note', read)
+        with open(state_path, encoding='utf-8') as handle:
+            self.assertEqual(json.load(handle)['test_starts'], {})
+
+    def test_start_without_timestamp_from_earlier_build_is_dropped(self):
+        os.makedirs(os.path.join(self.root, '.kiro', 'kiroku', 'data'))
+        with open(os.path.join(self.root, '.kiro', 'kiroku', 'data', 'state.json'), 'w') as handle:
+            json.dump({'test_starts': {'old': {'before': [], 'report': REPORT, 'count': 1,
+                                               'overlap': False}}}, handle)
+        self.run_tests([('T', 'a', 'passed')])
+        self.assertEqual(self.events()[-1]['results']['passed'], ['T::a'])
+
+    def test_missing_helper_module_still_exits_zero_and_logs(self):
+        """配布ファイルが欠けた導入先でも、フックは利用者の作業を止めない。"""
+        alone = os.path.join(self.root, 'alone')
+        os.makedirs(alone)
+        shutil.copyfile(RECORD, os.path.join(alone, 'record.py'))
+        payload = {'cwd': self.root, 'session_id': self.session, 'hook_event_name': 'PreToolUse',
+                   'tool_name': 'execute_bash', 'tool_input': {'command': 'pytest'}}
+        done = subprocess.run([sys.executable, os.path.join(alone, 'record.py')],
+                              input=json.dumps(payload), capture_output=True, text=True, cwd=self.root)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, '', ''))
+        log = os.path.join(self.root, '.kiro', 'kiroku', 'data', 'record-errors.log')
+        with open(log, encoding='utf-8') as handle:
+            self.assertIn('commands', handle.read())
+
     def test_first_old_report_is_not_attributed_to_failed_runner(self):
         self.write(REPORT, junit([('Old', 'old', 'passed')]))
         self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',

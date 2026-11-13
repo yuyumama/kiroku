@@ -21,11 +21,16 @@ import os
 import re
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import commands
+try:
+    import commands
+    IMPORT_ERROR = None
+except Exception as exc:  # 配布ファイルが欠けていても、フックは終了コード 0 で終わらせる
+    commands, IMPORT_ERROR = None, exc
 
 try:
     import fcntl
@@ -47,6 +52,8 @@ DEFAULT_CONFIG = {
     "max_dirty_files": 500,
     "retro_read_chars": 50000,
     "retro_output_chars": 20000,
+    # 終わりのフックが来なかった実行前記録を捨てるまでの秒数。最初の値で、根拠は薄い。
+    "test_start_max_seconds": 3600,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
@@ -266,12 +273,31 @@ def start_key(payload, cwd):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def live_starts(state, config):
+    """終わりのフックが来ないまま残った実行前記録を、期限で捨てる。
+
+    Kiro の異常終了などで PostToolUse が来ないと、記録が残り続け、
+    同じレポートを使う以後の実行がすべて「重複」と判定されてしまう。
+    時刻の無い記録（期限を入れる前の版が書いたもの）も、古さを確かめられないので捨てる。
+    """
+    limit = config.get("test_start_max_seconds")
+    if isinstance(limit, bool) or not isinstance(limit, (int, float)) or limit <= 0:
+        limit = DEFAULT_CONFIG["test_start_max_seconds"]
+    starts = state.get("test_starts")
+    moment = time.time()
+    state["test_starts"] = {
+        key: value for key, value in (starts.items() if isinstance(starts, dict) else ())
+        if isinstance(value, dict) and isinstance(value.get("at"), (int, float))
+        and not isinstance(value.get("at"), bool) and abs(moment - value["at"]) <= limit}
+    return state["test_starts"]
+
+
 def begin_test(payload, root, cwd, retro_dir, config):
     entry = commands.test_entry((payload.get("tool_input") or {}).get("command"), config)
     if entry is None:
         return
     state = load_state(retro_dir)
-    starts = state.setdefault("test_starts", {})
+    starts = live_starts(state, config)
     key = start_key(payload, cwd)
     overlap = False
     for active in starts.values():
@@ -280,7 +306,7 @@ def begin_test(payload, root, cwd, retro_dir, config):
             overlap = True
     prior = starts.get(key, {})
     starts[key] = {"before": report_stamp(root, entry), "report": entry.get("report"),
-                   "count": prior.get("count", 0) + 1, "overlap": overlap}
+                   "count": prior.get("count", 0) + 1, "overlap": overlap, "at": time.time()}
     save_state(retro_dir, state)
 
 
@@ -440,6 +466,8 @@ def mark_retro(retro_dir, session_id, stamp):
 
 
 def main():
+    if IMPORT_ERROR is not None:
+        raise IMPORT_ERROR
     payload = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
     cwd = payload.get("cwd") or os.getcwd()
     root = find_root(cwd)

@@ -73,21 +73,26 @@ def _problem(finding):
             or any(ch.isspace() or ch == "`" for ch in topic.strip()):
         return "topic が不正（空白なし、%d 文字以内）" % MAX_TOPIC_CHARS
     quote = finding.get("quote")
-    if not isinstance(quote, str) or len(fold(quote)) < MIN_QUOTE_CHARS:
-        return "quote が短すぎる（%d 文字以上）" % MIN_QUOTE_CHARS
+    if not isinstance(quote, str) or not fold(quote):
+        return "quote が空"
     return None
 
 
 def _locate(rows, quote, index):
     """引用を含むユーザー発話を探す。指定の位置を先に見て、無ければセッション全体を探す。"""
     needle = fold(quote)
+    # 短い引用は、どの発話にも含まれてしまう。「ん？」のような短い発話そのものを引用したときだけ認める。
+    whole = len(needle) < MIN_QUOTE_CHARS
     order = ([index] if isinstance(index, int) and 0 <= index < len(rows) else []) + list(range(len(rows)))
     for position in order:
         stamp, payload = rows[position]
         if payload.get("type") != "user":
             continue
         text = excerpt.content_text(payload)
-        if needle in fold(text) or needle in fold(mask(text)):
+        if whole:
+            if needle == fold(text):
+                return position, stamp
+        elif needle in fold(text) or needle in fold(mask(text)):
             return position, stamp
     return None
 
@@ -140,7 +145,8 @@ def verify(root):
             if row["status"] != "verified":
                 problems.append({"session_id": session, "problem": "%d 件目：%s" % (number, {
                     "no_log": "ログが無く、引用を照合できない",
-                    "quote_not_found": "引用がユーザー発話に見つからない"}[row["status"]])})
+                    "quote_not_found": "引用がユーザー発話に見つからない" if len(fold(finding["quote"])) >= MIN_QUOTE_CHARS
+                    else "%d 文字未満の引用は、発話の全体と一致するときだけ認める" % MIN_QUOTE_CHARS}[row["status"]])})
             findings.append(row)
     if changed:
         os.makedirs(os.path.dirname(store_path), exist_ok=True)
@@ -160,12 +166,15 @@ def topics(findings, since=None, until=None):
             continue
         entry = grouped.setdefault(row["topic"], {
             "topic": row["topic"], "kinds": set(), "summary": row["summary"],
-            "all_sessions": set(), "sessions": set(), "count": 0, "examples": []})
+            "all_sessions": set(), "sessions": set(), "firm_sessions": set(), "count": 0,
+            "examples": []})
         entry["kinds"].add(row["kind"])
         entry["all_sessions"].add(row["session_id"])
         moment = row["_time"]
         if moment is None or ((since is None or moment >= since) and (until is None or moment < until)):
             entry["sessions"].add(row["session_id"])
+            if row["kind"] != "unsure":
+                entry["firm_sessions"].add(row["session_id"])
             entry["count"] += 1
             if len(entry["examples"]) < 3:
                 entry["examples"].append({"session_id": row["session_id"], "index": row["index"],
@@ -173,8 +182,12 @@ def topics(findings, since=None, until=None):
     rows = []
     for entry in grouped.values():
         sessions = len(entry["sessions"])
-        entry["candidate"] = sessions >= PATTERN_SESSIONS or \
-            (sessions >= 1 and "standing_policy" in entry["kinds"])
+        # 「確認事項」だけのセッションは、型の根拠に数えない。趣旨がはっきりしない発話だから。
+        firm = len(entry["firm_sessions"])
+        entry["unsure_only_sessions"] = sessions - firm
+        del entry["firm_sessions"]
+        entry["candidate"] = firm >= PATTERN_SESSIONS or \
+            (firm >= 1 and "standing_policy" in entry["kinds"])
         entry["kinds"] = sorted(entry["kinds"])
         entry["all_sessions"] = len(entry["all_sessions"])
         entry["sessions"] = sessions

@@ -541,3 +541,32 @@ class DuplicateTest(unittest.TestCase):
                 ("t", {"type": "user", "content": "テストを実行してください"})]
         # 2件目（index=2）は指示を足しているので別の発話。同じ内容の index=3 だけが重複。
         self.assertEqual(aggregate.prompts.duplicates(rows), {3: 0})
+
+
+class QuoteRuleTest(ReviewSandbox):
+    def test_short_quote_is_accepted_only_as_a_whole_utterance(self):
+        self.log("sess_a", ["ん？", "ログイン画面を直して"])
+        self.log("sess_b", ["おい", "状況は"])
+        self.note("sess_a", [finding("ん？", "作業の経過が見えない", "explanation_feedback", 0),
+                             finding("画面", "作業の経過が見えない", "explanation_feedback", 1)])  # 切り出しは不可
+        self.note("sess_b", [finding("おい", "作業の経過が見えない", "explanation_feedback", 0),
+                             finding("状況は", "作業の経過が見えない", "explanation_feedback", 1)])
+        data = aggregate.aggregate(self.root)
+        topic = data["topics"][0]
+        self.assertEqual((topic["sessions"], topic["count"], topic["candidate"]), (2, 3, True))
+        self.assertEqual(len(data["note_problems"]), 1)
+        self.assertIn("発話の全体と一致するときだけ", data["note_problems"][0]["problem"])
+
+    def test_unsure_only_sessions_do_not_make_a_pattern(self):
+        self.log("sess_a", ["ootake にデプロイして"])
+        self.log("sess_b", ["あれをデプロイしておいて"])
+        self.note("sess_a", [finding("ootake にデプロイして", "デプロイ先", "correction")])
+        self.note("sess_b", [finding("あれをデプロイしておいて", "デプロイ先", "unsure")])
+        data = aggregate.aggregate(self.root)
+        topic = data["topics"][0]
+        self.assertEqual((topic["sessions"], topic["unsure_only_sessions"], topic["candidate"]), (2, 1, False))
+        self.log("sess_c", ["また ootake にデプロイし忘れてる"])
+        self.note("sess_c", [finding("また ootake にデプロイし忘れてる", "デプロイ先", "correction")])
+        data = aggregate.aggregate(self.root)
+        self.assertTrue(data["topics"][0]["candidate"])
+        self.assertIn("3 セッション、うち確認事項だけのセッション 1 件", aggregate.render(data))

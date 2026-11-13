@@ -781,8 +781,10 @@ def render_review(data, cap=None):
     if not candidates:
         lines.append("なし")
     for topic in candidates:
-        lines.append("- `topic:%s`：%d セッション、%d 回（%s）。%s" % (
-            topic["topic"], topic["sessions"], topic["count"],
+        unsure = "、うち確認事項だけのセッション %d 件" % topic["unsure_only_sessions"] \
+            if topic["unsure_only_sessions"] else ""
+        lines.append("- `topic:%s`：%d セッション%s、%d 回（%s）。%s" % (
+            topic["topic"], topic["sessions"], unsure, topic["count"],
             "、".join(notes.KINDS[k] for k in topic["kinds"]), topic["summary"]))
         for example in topic["examples"]:
             lines.append("  - session `%s` index=%s 「%s」" % (

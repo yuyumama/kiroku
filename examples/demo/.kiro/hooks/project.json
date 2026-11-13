@@ -1,0 +1,21 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "check-python-syntax",
+      "description": "保存した Python ファイルの構文を確かめる",
+      "trigger": "PostFileSave",
+      "matcher": "\\.py$",
+      "action": { "type": "command", "command": "python3 scripts/check_syntax.py" },
+      "timeout": 10
+    },
+    {
+      "name": "guard-shell",
+      "description": "強制的な push と、広い範囲の削除を止める",
+      "trigger": "PreToolUse",
+      "matcher": "execute_bash",
+      "action": { "type": "command", "command": "python3 scripts/guard_shell.py" },
+      "timeout": 10
+    }
+  ]
+}

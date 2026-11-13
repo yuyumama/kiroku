@@ -13,6 +13,6 @@ Kiro CLI V3／IDE 1.xでの開発中に起きた失敗や手直しを記録し�
 | `kit/` | 導入先のリポジトリにコピーするファイル |
 | `install.sh`、`install.ps1`、`install.py` | POSIX／PowerShell の導入スクリプトと共通処理 |
 | `uninstall.sh`、`uninstall.ps1`、`uninstall.py` | 取り除くスクリプトと共通処理 |
-| `examples/demo/` | 動作確認用のサンプル |
+| `examples/demo/` | ハーネスを備えた、動作確認用のサンプル（家計簿の CLI）。試し方は [docs/retro/demo-scenario.md](docs/retro/demo-scenario.md) |
 | `tests/` | テスト |
 | `probe/` | 段階1で使った検証キット |

@@ -228,6 +228,50 @@ python3 .kiro/skills/kiroku-retro/scripts/ledger.py reject P2 --reason "今は�
 常時読み込みに書き足す案には、合計が何文字増えるかが添えられます。
 合計が目安（8,000 文字。最初の値です）を超えていると、足す前に分割や条件付きへの移動を検討します。
 
+## アンインストール
+
+kiroku を導入先から取り除きます。何を残すかを聞かれるので、番号で選びます。
+
+Linux/macOS:
+
+```bash
+sh /path/to/kiroku/uninstall.sh /path/to/project
+```
+
+PowerShell:
+
+```powershell
+& C:\tools\kiroku\uninstall.ps1 -Target 'C:\work\my project'
+```
+
+| 選択 | 消すもの | 残すもの |
+|---|---|---|
+| 1) すべて消す | フック、専用エージェント、skill、設定、記録、振り返りノート、台帳、レポート、`.gitignore` の kiroku の行 | なし |
+| 2) レポートだけ残す | 上のうち、レポート以外 | `.kiro/kiroku/data/reports/` と、`.gitignore` の行 |
+| 3) やめる | なし | すべて |
+
+選んだあとに、消すものと残すものの一覧が表示され、確認を求められます。`y` と答えるまで、何も消しません。
+
+**消すのは kiroku が置いたものだけです。** steering や、ほかの hooks・skills・agents には触りません。
+kiroku の改善案をもとに手で直したハーネスは、そのまま残ります。
+
+レポートを残す場合は、`.gitignore` の行も残します。レポートには会話の引用が含まれうるので、コミットされないようにするためです。
+
+選択をあらかじめ指定することもできます。
+
+| オプション（PowerShell） | 意味 |
+|---|---|
+| `--all`（`-All`） | すべて消す |
+| `--keep-reports`（`-KeepReports`） | レポートだけ残す |
+| `--dry-run`（`-DryRun`） | 消すものを表示するだけで、消さない |
+| `--yes`（`-Yes`） | 確認を省く |
+
+```bash
+sh /path/to/kiroku/uninstall.sh /path/to/project --keep-reports --dry-run
+```
+
+導入先のリポジトリに kiroku のファイルをコミットしていた場合は、取り除いたあとに `git status` に削除として出ます。内容を確かめてコミットしてください。
+
 ## 開発・評価
 
 ```bash

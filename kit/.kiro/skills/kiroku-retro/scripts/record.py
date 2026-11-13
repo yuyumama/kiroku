@@ -41,8 +41,27 @@ DEFAULT_CONFIG = {
     "output_tail_chars": 2000,
     "max_dirty_files": 500,
     "retro_read_chars": 50000,
+    "retro_output_chars": 20000,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
+TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
+# 振り返りの集約を、導入先のルートから起動したコマンド。これ以降は振り返りの会話として扱う。
+RETRO_COMMAND_RE = re.compile(r"(?:^|[\s\"'])\.kiro[/\\]skills[/\\]kiroku-retro[/\\]scripts[/\\]aggregate\.py")
+
+
+def not_run_kind(output):
+    """終了コード -1（実行が完了しなかった呼び出し）を、出力の文言で分ける。
+
+    文言で確かめられないものは、拒否とは決めつけず recording_gap にする。
+    """
+    output = output or ""
+    if "cancelled before it was approved" in output:
+        return "tool_cancelled"
+    if TIMEOUT_RE.search(output):
+        return "tool_timeout"
+    if "Blocked by a permission rule" in output:
+        return "tool_denied"
+    return "recording_gap"
 SECRET_PATTERNS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
      "[REDACTED PRIVATE KEY]"),
@@ -137,6 +156,21 @@ def blob_hashes(root, paths):
             for path, value in zip(existing, out.split()):
                 hashes[path] = value
     return hashes
+
+
+VCS_MARKERS = (("MERGE_HEAD", "merge"), ("rebase-merge", "rebase"), ("rebase-apply", "rebase"),
+               ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert"))
+
+
+def vcs_in_progress(root):
+    """merge や rebase の途中（コンフリクトの解消中など）なら、その種別。そうでなければ None。"""
+    git_dir = git(root, "rev-parse", "--absolute-git-dir")
+    if not git_dir:
+        return None
+    for name, label in VCS_MARKERS:
+        if os.path.exists(os.path.join(git_dir.strip(), name)):
+            return label
+    return None
 
 
 def worktree_state(root, config):
@@ -263,17 +297,22 @@ def shell_events(payload, root, cwd, retro_dir, config):
         }
         if truncated:
             event["dirty_truncated"] = True
+        vcs = vcs_in_progress(root)
+        if vcs:
+            event["vcs"] = vcs
         if note:
             event["note"] = note
         if exit_code != 0:
             event["output_tail"] = tail
         return [event]
     if exit_code == -1:
-        # 実行されなかった呼び出し。人が止めたものと、権限の規則で拒否されたものを分ける。
-        by_human = "cancelled before it was approved" in output
-        return [{"type": "tool_cancelled" if by_human else "tool_denied",
-                 "tool": payload.get("tool_name"),
-                 "command": mask(command), "output_tail": tail}]
+        # 完了しなかった呼び出し。人による取り消し、タイムアウト、権限の規則による拒否を分ける。
+        kind = not_run_kind(output)
+        event = {"type": kind, "tool": payload.get("tool_name"),
+                 "command": mask(command), "output_tail": tail}
+        if kind == "recording_gap":
+            event["reason"] = "unknown_not_run"
+        return [event]
     if exit_code not in (0, None):
         head = git(root, "rev-parse", "HEAD")
         return [{"type": "tool_failure", "tool": payload.get("tool_name"),
@@ -326,6 +365,19 @@ def recording_lock(retro_dir):
         os.close(fd)
 
 
+def mark_retro(retro_dir, session_id, stamp):
+    """このセッションで振り返りが始まった時刻を残す。集約は、それ以降を開発の記録から除く。"""
+    if not session_id:
+        return
+    state = load_state(retro_dir)
+    marks = state.get("retro_sessions")
+    if not isinstance(marks, dict):
+        marks = state["retro_sessions"] = {}
+    if session_id not in marks:
+        marks[session_id] = stamp
+        save_state(retro_dir, state)
+
+
 def main():
     payload = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace"))
     cwd = payload.get("cwd") or os.getcwd()
@@ -335,6 +387,7 @@ def main():
     hook = payload.get("hook_event_name")
     tool = payload.get("tool_name")
 
+    session_id = payload.get("session_id") or os.environ.get("KIRO_SESSION_ID")
     with recording_lock(retro_dir):
         events = []
         if hook in ("PostFileSave", "PostFileCreate"):
@@ -344,9 +397,14 @@ def main():
             if not isinstance(text, str):
                 text = os.environ.get("USER_PROMPT") or ""
             # 振り返りの起動そのものは記録しない。
-            if text.strip() and not text.lstrip().startswith("/kiroku-retro"):
+            if text.lstrip().startswith("/kiroku-retro"):
+                mark_retro(retro_dir, session_id, now())
+            elif text.strip():
                 events = [{"type": "prompt"}]
         elif hook == "PostToolUse" and tool in ("execute_bash", "execute_pwsh"):
+            command = (payload.get("tool_input") or {}).get("command")
+            if isinstance(command, str) and RETRO_COMMAND_RE.search(command):
+                mark_retro(retro_dir, session_id, now())
             events = shell_events(payload, root, cwd, retro_dir, config)
         elif hook == "PostToolUse" and tool in config["write_tools"]:
             # 整形フックなどが PostFileSave で書き換えた後の内容を、ここで取り直す。
@@ -355,7 +413,6 @@ def main():
 
         if events:
             stamp = now()
-            session_id = payload.get("session_id") or os.environ.get("KIRO_SESSION_ID")
             for event in events:
                 event.update({"v": SCHEMA_VERSION, "ts": stamp, "session_id": session_id})
             append_events(retro_dir, events)

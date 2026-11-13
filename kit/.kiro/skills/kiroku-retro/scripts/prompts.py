@@ -10,7 +10,10 @@ import json
 import os
 
 import excerpt
-from record import load_config, mask
+from record import RETRO_COMMAND_RE, load_config, load_state, mask
+
+DUPLICATE_WINDOW = 8    # 同じ発話の二重記録とみなす、ログ上の距離（項目数）
+DUPLICATE_MIN_CHARS = 12  # これより短い発話は、同じ内容でも重複とみなさない
 
 
 def sessions_dir(root):
@@ -35,6 +38,83 @@ def _user_text(payload):
     if not text or not text.strip() or text.lstrip().startswith("/kiroku-retro"):
         return None
     return text
+
+
+def duplicates(rows):
+    """二重に記録されたユーザー発話を探す。{重複の index: 最初の index}。
+
+    作業中に割り込んで送った発話は、ログに2回残ることがある。近くにあり、内容が同じか、
+    片方がもう片方を含む発話は、1件として扱う。
+    """
+    recent, found = [], {}
+    for index, (_, payload) in enumerate(rows):
+        if payload.get("type") != "user":
+            continue
+        text = _user_text(payload)
+        if text is None:
+            continue
+        folded = "".join(text.split())
+        recent = [item for item in recent if index - item[0] <= DUPLICATE_WINDOW]
+        if len(folded) < DUPLICATE_MIN_CHARS:
+            continue  # 「はい」「続けて」のような短い発話は、本当に繰り返すことがある
+        for first, other in recent:
+            if folded in other or other in folded:
+                found[index] = first
+                break
+        else:
+            recent.append((index, folded))
+    return found
+
+
+def retro_marks(root):
+    """記録フックが残した、振り返りの開始時刻。{session_id: 時刻}。"""
+    marks = load_state(os.path.join(root, ".kiro", "kiroku", "data")).get("retro_sessions")
+    result = {}
+    for session, stamp in (marks.items() if isinstance(marks, dict) else []):
+        moment = excerpt.parse_time(stamp)
+        if moment:
+            result[session] = moment
+    return result
+
+
+def retro_start(rows, mark=None):
+    """このセッションで振り返りが始まった時刻。始まっていなければ None。
+
+    /kiroku-retro の発話か、集約スクリプトの実行を目印にする。それ以降は振り返りの会話なので、
+    開発の記録としては数えない。
+    """
+    moments = [mark] if mark else []
+    for stamp, payload in rows or []:
+        kind = payload.get("type")
+        if kind == "user":
+            hit = excerpt.content_text(payload).lstrip().startswith("/kiroku-retro")
+        elif kind == "tool_call":
+            command = (payload.get("args") or {}).get("command")
+            hit = isinstance(command, str) and bool(RETRO_COMMAND_RE.search(command))
+        else:
+            hit = False
+        moment = excerpt.parse_time(stamp) if hit else None
+        if moment:
+            moments.append(moment)
+            break
+    return min(moments) if moments else None
+
+
+def retro_starts(root, session_ids):
+    """記録に出たセッションについて、振り返りの開始時刻をまとめて求める。"""
+    directory, marks, result = sessions_dir(root), retro_marks(root), {}
+    for session in session_ids:
+        rows = None
+        path = excerpt.find_log(session, directory)
+        if path:
+            try:
+                rows = excerpt.load(path)
+            except (OSError, UnicodeError):
+                rows = None
+        start = retro_start(rows, marks.get(session))
+        if start:
+            result[session] = start
+    return result
 
 
 def discover(root, directory=None):
@@ -79,6 +159,7 @@ def sessions(root, events, since=None, until=None):
     記録（events.jsonl）に出たセッションに加えて、ログから見つけたセッションも含める。
     """
     directory = sessions_dir(root)
+    marks = retro_marks(root)
     last_event = {}
     for event in events:
         if event.get("session_id"):
@@ -100,9 +181,13 @@ def sessions(root, events, since=None, until=None):
             except (OSError, UnicodeError):
                 messages = None
                 row["log"] = "unreadable_log"
-            for stamp, payload in messages or []:
+            repeated = duplicates(messages or [])
+            cutoff = retro_start(messages, marks.get(session))
+            for index, (stamp, payload) in enumerate(messages or []):
                 moment = excerpt.parse_time(stamp)
-                if payload.get("type") != "user" or moment is None:
+                if payload.get("type") != "user" or moment is None or index in repeated:
+                    continue
+                if cutoff and moment >= cutoff:
                     continue
                 text = _user_text(payload)
                 if text and _in_period(moment, since, until):
@@ -155,17 +240,28 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
     if result["issues"]:
         result["status"] = "partial_log"
     turn = None
+    repeated = duplicates(rows)
+    cutoff = retro_start(rows, retro_marks(root).get(session))
+    by_index = {}
     for index, (stamp, payload) in enumerate(rows):
         kind = payload.get("type")
         if kind == "user":
+            if index in repeated:
+                # 二重に記録された発話。最初の1件に寄せ、続きの応答もそちらに付ける。
+                if repeated[index] in by_index:
+                    by_index[repeated[index]]["duplicates"].append(index)
+                continue
             turn = None
             moment = excerpt.parse_time(stamp)
             text = _user_text(payload)
             if moment is None or text is None or not _in_period(moment, since, until):
                 continue
+            if cutoff and moment >= cutoff:
+                continue
             turn = {"index": index, "ts": stamp, "chars": len(text),
-                    "text": _clip(mask(text), user_chars),
+                    "text": _clip(mask(text), user_chars), "duplicates": [],
                     "tools": collections.Counter(), "tool_failures": 0, "reply": None}
+            by_index[index] = turn
             result["turns"].append(turn)
         elif turn is None:
             continue
@@ -191,6 +287,7 @@ def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=20
     directory = sessions_dir(root)
     chunks, coverage = [], []
     session_ids = sorted({e["session_id"] for e in events if e.get("session_id")})
+    marks = retro_marks(root)
     for session in session_ids:
         status = {"session_id": session, "status": "ok", "issues": [], "prompts": 0}
         coverage.append(status)
@@ -205,14 +302,18 @@ def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=20
             continue
         if not rows:
             status["issues"].append("no_supported_messages")
+        repeated = duplicates(rows)
+        cutoff = retro_start(rows, marks.get(session))
         for index, (stamp, payload) in enumerate(rows):
-            if payload.get("type") != "user":
+            if payload.get("type") != "user" or index in repeated:
                 continue
             moment = excerpt.parse_time(stamp)
             if moment is None:
                 status["issues"].append("unknown_timestamp:index_%d" % index)
                 continue
             if (since and moment < since) or (until and moment >= until):
+                continue
+            if cutoff and moment >= cutoff:
                 continue
             text = excerpt.content_text(payload)
             if not text:

@@ -24,7 +24,7 @@ from record import find_root  # noqa: E402
 
 HEADING = re.compile(r"^###\s+(P\d+)[.．:：]?\s*(.*)$")
 TARGET = re.compile(r"対象の型[：:]\s*`([^`]+)`")
-TARGET_KINDS = ("topic", "tool", "denied", "cancelled", "test")
+TARGET_KINDS = ("topic", "tool", "denied", "cancelled", "timeout", "test")
 YOUNG_DAYS = 3  # これより日が浅いうちは、効果を判定しない
 
 

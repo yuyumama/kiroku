@@ -36,13 +36,14 @@ def summarize(root, since, until):
              "- イベント数：%d" % data["event_count"]]
 
     lines += ["", "## 週ごとの記録", "",
-              "| 週 | セッション | 発話 | テスト実行 | Red 候補 | 回帰候補 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
+              "| 週 | セッション | 発話 | テスト実行 | Red 候補 | 回帰候補 | マージ中 | その他 | ツール失敗 "
+              "| 取り消し | タイムアウト | 拒否 | 書き込み |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for name, row in data["periods"].items():
-        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
             name, row["sessions"], row["prompts"], row["test_runs"], row[aggregate.RED],
-            row[aggregate.REGRESSION], row[aggregate.OTHER], row["tool_failures"],
-            row["cancelled"], row["denied"], row["writes"]))
+            row[aggregate.REGRESSION], row[aggregate.MERGE], row[aggregate.OTHER], row["tool_failures"],
+            row["cancelled"], row["timeouts"], row["denied"], row["writes"]))
 
     lines += ["", "## 信号ごとの種類の数と、繰り返し", "",
               "| 信号 | 種類 | うち2回以上 | うち2セッション以上 | 最多の回数 |", "|---|---|---|---|---|"]
@@ -53,11 +54,12 @@ def summarize(root, since, until):
             label, len(rows), sum(1 for c in counts if c >= 2),
             sum(1 for r in rows if r["sessions"] >= 2), max(counts) if counts else 0))
 
-    for kind, label in ((aggregate.REGRESSION, "回帰候補"), (aggregate.OTHER, "その他のテスト失敗"),
+    for kind, label in ((aggregate.REGRESSION, "回帰候補"), (aggregate.MERGE, "マージ中の失敗"),
+                        (aggregate.OTHER, "その他のテスト失敗"),
                         (aggregate.RED, "Red 候補")):
         signal(label, [r for r in data["test_failures"] if r["class"] == kind])
     for kind, label in (("tool_failure", "ツール失敗"), ("tool_cancelled", "人による取り消し"),
-                        ("tool_denied", "権限による拒否")):
+                        ("tool_timeout", "タイムアウト"), ("tool_denied", "権限による拒否")):
         signal(label, [r for r in data["tool_failures"] if r["type"] == kind])
     lines += ["", "- 書き直し候補：%d 件" % len(data["rework_candidates"]),
               "- 人間の手直し候補：%d 件（merge などで除いたもの %d 件）" % (

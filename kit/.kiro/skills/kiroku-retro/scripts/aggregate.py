@@ -3,16 +3,23 @@
 
 使い方:
   python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 7d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --section tests
   python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --session <session_id>
+
+出力の長さ:
+  全体の出力は、設定の retro_output_chars（既定 20000 文字）に収まるように、各一覧を上位だけに絞る。
+  省いた分は、その一覧の末尾に件数を出す。--section <名前> で、その節だけを全件出す。
 
 テスト失敗の分類（記録時ではなく、ここで計算する）:
   Red 候補    前回の全テスト成功より後に追加されたテスト、
               または前回の全テスト成功以降にテストファイルが変更されたテストの失敗
   回帰        前回の全テスト成功の時点で存在し、通っていて、テストファイルが変わっていないテストの失敗
+  マージ中    回帰と同じ条件で、merge や rebase の最中（コンフリクトの解消中など）に起きた失敗
   その他      基準になる全テスト成功が無い、通った記録が無い、git から状態を復元できない、など
 
 会話:
   集約結果のセッション一覧で、発話数と振り返りノートの有無を示す。
+  二重に記録された発話は1件として数える。振り返りを始めた後の発話と記録は、開発の記録から除く。
   --session で1セッションを要約表示する。ユーザー発話は原文、ツール実行は件数、応答は冒頭だけ。
   全文が要る箇所は excerpt.py で前後を読む。--prompts は全発話を全文でページ表示する予備。
   ログが欠落したセッションでは会話に基づく判断を保留する。
@@ -40,10 +47,14 @@ import harness  # noqa: E402
 import notes  # noqa: E402
 import ledger  # noqa: E402
 import excerpt  # noqa: E402
-from record import load_config, mask  # noqa: E402
+from record import load_config, mask, not_run_kind  # noqa: E402
 
-RED, REGRESSION, OTHER = "red", "regression", "other"
-LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", OTHER: "その他"}
+RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
+LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
+TOOL_KINDS = (("tool_failure", "tool", "ツール失敗"), ("tool_cancelled", "cancelled", "人による取り消し"),
+              ("tool_timeout", "timeout", "タイムアウト"), ("tool_denied", "denied", "権限の規則による拒否"))
+SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "sessions")
+OUTPUT_CAPS = (12, 6, 3)  # 一覧1つあたりの件数。出力が長すぎるときは、順に小さくする
 VCS_ACTIONS = ("merge", "pull", "rebase", "checkout", "reset", "cherry-pick", "revert",
                "commit (merge)", "am", "switch", "restore")
 
@@ -55,6 +66,7 @@ class Repo:
         self.root = root
         self._blob = {}
         self._diff = {}
+        self._moves = None
 
     def git(self, *args, stdin=None):
         try:
@@ -93,6 +105,11 @@ class Repo:
 
     def head_moves(self):
         """HEAD の移動の履歴。(時刻, 種別, 移動前, 移動後) の一覧。"""
+        if self._moves is None:
+            self._moves = self._head_moves()
+        return self._moves
+
+    def _head_moves(self):
         out = self.git("reflog", "show", "--date=unix", "--format=%H%x09%gd%x09%gs", "HEAD")
         if not out:
             return []
@@ -129,6 +146,11 @@ def load_events(path):
                 try:
                     event = json.loads(line)
                     event["_time"] = parse_time(event["ts"])
+                    if event.get("type") == "tool_denied":
+                        # 古い版は、終了コード -1 のうち取り消し以外をすべて拒否として記録していた。
+                        event["type"] = not_run_kind(event.get("output_tail"))
+                        if event["type"] == "recording_gap":
+                            event["reason"] = "unknown_not_run"
                     events.append(event)
                 except (ValueError, KeyError, TypeError):
                     continue  # 壊れた行は飛ばす
@@ -191,6 +213,25 @@ def test_file_changed(test_id, known_file, changed):
     return False
 
 
+def merge_basis(repo, run):
+    """merge や rebase の最中の実行なら、その根拠を返す。そうでなければ None。"""
+    if run.get("vcs"):
+        return "%s の最中の失敗（コンフリクトの解消中など）" % run["vcs"]
+    when = int(run["_time"].timestamp())
+    for moved, subject, old, _ in repo.head_moves():
+        # 記録に印が無い古い実行。手で作ったマージコミットが、同じコミットの上に後からできていれば、最中とみる。
+        if moved >= when and subject.startswith("commit (merge)") and old == run.get("head"):
+            return "merge の最中の失敗と推定（この実行の後に、同じコミットからマージコミットが作られた）"
+    return None
+
+
+def merged_between(repo, base, run):
+    """2つのテスト実行の間に取り込まれた変更の種別（merge、pull、rebase）。"""
+    start, end = int(base["_time"].timestamp()), int(run["_time"].timestamp())
+    return sorted({subject.split(":", 1)[0].split(" ", 1)[0] for moved, subject, _, _ in repo.head_moves()
+                   if start <= moved <= end and subject.startswith(("merge", "pull", "rebase"))})
+
+
 def classify_failures(repo, runs):
     """全期間のテスト実行を時刻順に見て、失敗を1件ずつ分類する。"""
     failures = []
@@ -220,10 +261,17 @@ def classify_failures(repo, runs):
                         verdict = test_file_changed(test_id, known_file, changed)
                         if verdict:
                             kind, basis = RED, "前回の全テスト成功以降にテストファイルが変更された"
-                        elif verdict is None:
-                            kind, basis = REGRESSION, "通っていたテストの失敗（テストファイルは特定できず）"
                         else:
-                            kind, basis = REGRESSION, "通っていたテストの失敗（テストファイルは変更なし）"
+                            kind = REGRESSION
+                            basis = "通っていたテストの失敗（テストファイルは%s）" % (
+                                "特定できず" if verdict is None else "変更なし")
+                            merging = merge_basis(repo, run)
+                            if merging:
+                                kind, basis = MERGE, merging
+                            else:
+                                merged = merged_between(repo, green, run)
+                                if merged:
+                                    basis += "。前回の全テスト成功の後に %s あり" % "、".join(merged)
                 failures.append({
                     "test_id": test_id, "class": kind, "basis": basis, "ts": run["ts"],
                     "_time": run["_time"], "session_id": run.get("session_id"),
@@ -316,7 +364,13 @@ def period_key(moment, by):
 def aggregate(root, since=None, until=None, by="week", with_prompts=False,
               prompt_offset=0, prompt_limit=20):
     repo = Repo(root)
-    events = load_events(os.path.join(root, ".kiro", "kiroku", "data", "events.jsonl"))
+    data_dir = os.path.join(root, ".kiro", "kiroku", "data")
+    events = load_events(os.path.join(data_dir, "events.jsonl"))
+    # 振り返りを始めた後の記録は、振り返りの会話そのものなので、開発の記録から除く。
+    retro = prompts.retro_starts(root, sorted({e["session_id"] for e in events if e.get("session_id")}))
+    recorded_total = len(events)
+    events = [e for e in events if not (e.get("session_id") in retro and e["_time"] >= retro[e["session_id"]])]
+    retro_excluded = recorded_total - len(events)
     runs = [e for e in events if e.get("type") == "test_run"]
     failures = classify_failures(repo, runs)  # 基準が要るので、分類は全期間で行う
 
@@ -332,8 +386,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         if kind == "topic":
             return [f["_time"] for f in findings
                     if f["status"] == "verified" and f["topic"] == name and f["_time"]]
-        if kind in ("tool", "denied", "cancelled"):
-            wanted = {"tool": "tool_failure", "denied": "tool_denied", "cancelled": "tool_cancelled"}[kind]
+        if kind in ("tool", "denied", "cancelled", "timeout"):
+            wanted = {short: name for name, short, _ in TOOL_KINDS}[kind]
             return [e["_time"] for e in all_events
                     if e.get("type") == wanted and command_key(e.get("command")) == name]
         if kind == "test":
@@ -349,8 +403,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     candidates, excluded = fix_candidates(repo, [e for e in events if e.get("type") == "write"])
 
     periods = collections.OrderedDict()
-    columns = ("sessions", "test_runs", RED, REGRESSION, OTHER, "tool_failures", "cancelled",
-               "denied", "writes", "prompts")
+    columns = ("sessions", "test_runs", RED, REGRESSION, MERGE, OTHER, "tool_failures", "cancelled",
+               "timeouts", "denied", "writes", "prompts")
     seen_writes = set()
 
     def bucket(moment):
@@ -368,6 +422,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             row["tool_failures"] += 1
         elif kind == "tool_cancelled":
             row["cancelled"] += 1
+        elif kind == "tool_timeout":
+            row["timeouts"] += 1
         elif kind == "tool_denied":
             row["denied"] += 1
         elif kind == "write":
@@ -393,7 +449,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
 
     grouped_tools = {}
     for event in events:
-        if event.get("type") not in ("tool_failure", "tool_cancelled", "tool_denied"):
+        if event.get("type") not in [name for name, _, _ in TOOL_KINDS]:
             continue
         entry = grouped_tools.setdefault((event["type"], command_key(event.get("command"))), {
             "type": event["type"], "command_key": command_key(event.get("command")),
@@ -416,6 +472,20 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         return sorted(rows, key=lambda r: (-r["count"], r.get("test_id") or r.get("command_key")))
 
     session_rows = prompts.sessions(root, events, since, until)
+    first = all_events[0]["_time"] if all_events else None
+    log_only = [s for s in session_rows if not s["recorded"]]
+    before = sum(1 for s in log_only if first and s["last_activity"]
+                 and parse_time(s["last_activity"]) < first)
+    try:
+        with open(os.path.join(data_dir, "record-errors.log"), encoding="utf-8", errors="replace") as handle:
+            record_errors = sum(1 for _ in handle)
+    except OSError:
+        record_errors = 0
+    coverage = {"sessions": len(session_rows), "recorded": len(session_rows) - len(log_only),
+                "log_only": len(log_only), "first_event": first.isoformat() if first else None,
+                "before_first": before, "after_first": len(log_only) - before if first else None,
+                "record_errors": record_errors, "retro_sessions": len(retro),
+                "retro_excluded": retro_excluded}
     return {
         "since": since.isoformat() if since else None,
         "until": until.isoformat() if until else None,
@@ -423,6 +493,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "periods": periods,
         "test_failures": finish(grouped_tests.values()),
         "tool_failures": finish(grouped_tools.values()),
+        "coverage": coverage,
         "recording_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
                             "reason": e.get("reason"), "tool": e.get("tool")}
                            for e in events if e.get("type") == "recording_gap"],
@@ -442,92 +513,43 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     }
 
 
-def render(data, show_prompts=False):
+def capped(rows, cap, section):
+    """一覧を上位 cap 件に絞る。省いた件数の注記を添えて返す。"""
+    if cap is None or len(rows) <= cap:
+        return rows, []
+    return rows[:cap], ["- ほか %d 件。全件は `--section %s` で出します。" % (len(rows) - cap, section)]
+
+
+def render(data, show_prompts=False, section=None, cap=None):
+    """集約をテキストにする。section を指定すると、その節だけを全件出す。"""
+    def want(name):
+        return section in (None, name)
+
     lines = ["# kiroku 集約", ""]
     lines.append("- 期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"))
     lines.append("- イベント数：%d" % data["event_count"])
     lines.append("- レポートの保存先：.kiro/kiroku/data/reports/%s.md"
                  % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
-    lines += ["", "## 比較対象の所在（本文は未確認）", ""]
-    for entry in data["harness"]:
-        lines.append("- %s `%s`: %s" % (entry["scope"], entry["path"], entry["status"]))
-        lines.extend("  - `%s`" % path for path in entry["files"])
-    lines += render_steering(data["steering"])
-    if not data["event_count"]:
-        lines += ["", "この期間の記録はありません。"]
-        lines += render_review(data)
-        lines += render_sessions(data["sessions"])
+    if section is None and cap is not None:
+        lines.append("- 各一覧は上位だけを出しています。節ごとの全件は `--section <%s>` で出します。"
+                     % "|".join(SECTIONS))
+    if want("plan"):
         lines += render_plan(data["reading_plan"])
-        return "\n".join(lines) + "\n"
-
-    if data["recording_gaps"]:
-        lines += ["", "## 記録の不足（成功・失敗を判定できない実行）", ""]
-        for gap in data["recording_gaps"]:
-            lines.append("- %s session `%s` tool `%s`: %s" % (
-                gap["ts"], gap["session_id"], gap["tool"], gap["reason"]))
-
-    lines += ["", "## 期間ごとの要約", "",
-              "| 期間 | セッション | 発話 | テスト実行 | Red 候補 | 回帰候補 | その他 | ツール失敗 | 取り消し | 拒否 | 書き込み |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
-    for name, row in data["periods"].items():
-        lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
-            name, row["sessions"], row["prompts"], row["test_runs"], row[RED], row[REGRESSION], row[OTHER],
-            row["tool_failures"], row["cancelled"], row["denied"], row["writes"]))
-
-    for kind in (REGRESSION, OTHER, RED):
-        rows = [r for r in data["test_failures"] if r["class"] == kind]
-        lines += ["", "## テスト失敗：%s（%d 種類）" % (LABELS[kind], len(rows)), ""]
-        if not rows:
-            lines.append("なし")
-        for row in rows[:30]:
-            lines.append("- `%s`：%d 回、%d セッション。%s。最後は %s（session `%s`）" % (
-                row["test_id"], row["count"], row["sessions"], row["basis"],
-                row["last_ts"], row["last_session"]))
-            if kind == REGRESSION:
-                lines.append("  - 対象の型：`test:%s`" % row["test_id"])
-
-    for kind, title in (("tool_failure", "ツール失敗"), ("tool_cancelled", "人による取り消し"),
-                        ("tool_denied", "権限の規則による拒否")):
-        rows = [r for r in data["tool_failures"] if r["type"] == kind]
-        lines += ["", "## %s（%d 種類）" % (title, len(rows)), ""]
-        if not rows:
-            lines.append("なし")
-        for row in rows[:30]:
-            codes = "、終了コード %s" % ",".join(map(str, row["exit_codes"])) if row["exit_codes"] else ""
-            lines.append("- `%s`：%d 回、%d セッション%s。最後は %s（session `%s`）" % (
-                row["command_key"], row["count"], row["sessions"], codes,
-                row["last_ts"], row["last_session"]))
-            lines.append("  - 対象の型：`%s:%s`" % (
-                {"tool_failure": "tool", "tool_cancelled": "cancelled", "tool_denied": "denied"}[kind],
-                row["command_key"]))
-            lines.append("  - コマンド：`%s`" % row["last_command"])
-            if row["last_output_tail"]:
-                lines.append("  - 出力の末尾：")
-                lines += ["    > " + text for text in row["last_output_tail"].splitlines()[-8:]]
-
-    rework = data["rework_candidates"]
-    lines += ["", "## 書き直し候補（%d 件）" % len(rework), "",
-              "同じセッションの中で、複数の発話にまたがって書き直されたファイルです。"
-              "発話の時刻からセッションログを確認してください。", ""]
-    if not rework:
-        lines.append("なし")
-    for row in rework[:30]:
-        lines.append("- `%s`：%d 回の発話で書き込み（session `%s`）" % (
-            row["path"], row["turns"], row["session_id"]))
-        for prompt in row["prompts"][:5]:
-            lines.append("  - 発話の時刻：%s" % prompt["ts"])
-
-    lines += ["", "## 人間の手直し候補（%d 件）" % len(data["fix_candidates"]), ""]
-    if not data["fix_candidates"]:
-        lines.append("なし")
-    for row in data["fix_candidates"][:50]:
-        lines.append("- `%s`：%s。エージェントの最後の書き込みは %s（session `%s`）" % (
-            row["path"], row["status"], row["written_at"], row["session_id"]))
-    if data["fix_excluded"]:
-        lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
-    lines += render_review(data)
-    lines += render_sessions(data["sessions"])
-    lines += render_plan(data["reading_plan"])
+    if want("review"):
+        lines += render_review(data, cap)
+    if want("summary"):
+        lines += render_summary(data, cap)
+    if data["event_count"]:
+        if want("tests"):
+            lines += render_tests(data, cap)
+        if want("tools"):
+            lines += render_tools(data, cap)
+        if want("files"):
+            lines += render_files(data, cap)
+    if want("harness"):
+        lines += render_harness(data, cap)
+    if want("sessions"):
+        lines += render_sessions(data["sessions"], None if cap is None else cap * 3)
     page = data.get("prompt_page")
     if page is not None:
         lines += ["", "## ユーザー発話（ログから取得・本文の保存なし）", ""]
@@ -547,6 +569,134 @@ def render(data, show_prompts=False):
         else:
             lines += ["", "ユーザー発話の最終ページです。"]
     return "\n".join(lines) + "\n"
+
+
+def render_summary(data, cap):
+    lines = []
+    if not data["event_count"]:
+        lines += ["", "この期間の記録はありません。"]
+    else:
+        lines += ["", "## 期間ごとの要約", "",
+                  "| 期間 | セッション | 発話 | テスト実行 | Red 候補 | 回帰候補 | マージ中 | その他 | ツール失敗 "
+                  "| 取り消し | タイムアウト | 拒否 | 書き込み |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for name, row in data["periods"].items():
+            lines.append("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |" % (
+                name, row["sessions"], row["prompts"], row["test_runs"], row[RED], row[REGRESSION],
+                row[MERGE], row[OTHER], row["tool_failures"], row["cancelled"], row["timeouts"],
+                row["denied"], row["writes"]))
+
+    cover = data["coverage"]
+    lines += ["", "## 記録の範囲", ""]
+    lines.append("- セッション %d 件のうち、記録（フックによるイベント）があるもの %d 件、ログのみ %d 件。" % (
+        cover["sessions"], cover["recorded"], cover["log_only"]))
+    if cover["log_only"]:
+        lines.append("  - テスト失敗、ツール失敗、書き込みの数は、記録がある %d 件だけが対象です。"
+                     "ログのみのセッションで何も起きなかったという意味ではありません。" % cover["recorded"])
+        if cover["first_event"]:
+            lines.append("  - 最初の記録は %s。ログのみのうち、それより前のもの %d 件（記録を始める前）、"
+                         "後のもの %d 件（フックが動かなかった可能性。原因は未確認）。" % (
+                             cover["first_event"], cover["before_first"], cover["after_first"]))
+        else:
+            lines.append("  - 記録が1件もありません。フックが読み込まれているかを確かめてください。")
+    if cover["record_errors"]:
+        lines.append("- 記録処理のエラー（data/record-errors.log）：%d 行" % cover["record_errors"])
+    if cover["retro_sessions"]:
+        lines.append("- 振り返りを始めた後の発話と記録は除いています（%d セッション、イベント %d 件）。" % (
+            cover["retro_sessions"], cover["retro_excluded"]))
+
+    if data["recording_gaps"]:
+        lines += ["", "## 記録の不足（成功・失敗を判定できない実行：%d 件）" % len(data["recording_gaps"]), ""]
+        rows, more = capped(data["recording_gaps"], cap, "summary")
+        for gap in rows:
+            lines.append("- %s session `%s` tool `%s`: %s" % (
+                gap["ts"], gap["session_id"], gap["tool"], gap["reason"]))
+        lines += more
+    return lines
+
+
+def render_tests(data, cap):
+    lines = []
+    for kind in (REGRESSION, MERGE, OTHER, RED):
+        found = [r for r in data["test_failures"] if r["class"] == kind]
+        if kind == MERGE and not found:
+            continue
+        lines += ["", "## テスト失敗：%s（%d 種類）" % (LABELS[kind], len(found)), ""]
+        if kind == MERGE:
+            lines += ["取り込んだ変更の影響を含みます。回帰候補には数えません。", ""]
+        if not found:
+            lines.append("なし")
+        rows, more = capped(found, cap, "tests")
+        for row in rows:
+            lines.append("- `%s`：%d 回、%d セッション。%s。最後は %s（session `%s`）" % (
+                row["test_id"], row["count"], row["sessions"], row["basis"],
+                row["last_ts"], row["last_session"]))
+            if kind == REGRESSION:
+                lines.append("  - 対象の型：`test:%s`" % row["test_id"])
+        lines += more
+    return lines
+
+
+def render_tools(data, cap):
+    lines = []
+    tail_lines = 8 if cap is None else 4
+    for kind, short, title in TOOL_KINDS:
+        found = [r for r in data["tool_failures"] if r["type"] == kind]
+        lines += ["", "## %s（%d 種類）" % (title, len(found)), ""]
+        if not found:
+            lines.append("なし")
+        rows, more = capped(found, cap, "tools")
+        for row in rows:
+            codes = "、終了コード %s" % ",".join(map(str, row["exit_codes"])) if row["exit_codes"] else ""
+            lines.append("- `%s`：%d 回、%d セッション%s。最後は %s（session `%s`）" % (
+                row["command_key"], row["count"], row["sessions"], codes,
+                row["last_ts"], row["last_session"]))
+            lines.append("  - 対象の型：`%s:%s`" % (short, row["command_key"]))
+            lines.append("  - コマンド：`%s`" % shorten(row["last_command"], 300))
+            if row["last_output_tail"]:
+                lines.append("  - 出力の末尾：")
+                lines += ["    > " + text[:200] for text in row["last_output_tail"].splitlines()[-tail_lines:]]
+        lines += more
+    return lines
+
+
+def render_files(data, cap):
+    rework = data["rework_candidates"]
+    lines = ["", "## 書き直し候補（%d 件）" % len(rework), "",
+             "同じセッションの中で、複数の発話にまたがって書き直されたファイルです。"
+             "発話の時刻からセッションログを確認してください。", ""]
+    if not rework:
+        lines.append("なし")
+    rows, more = capped(rework, cap, "files")
+    for row in rows:
+        lines.append("- `%s`：%d 回の発話で書き込み（session `%s`）" % (
+            row["path"], row["turns"], row["session_id"]))
+        for prompt in row["prompts"][:3 if cap is not None else 5]:
+            lines.append("  - 発話の時刻：%s" % prompt["ts"])
+    lines += more
+
+    lines += ["", "## 人間の手直し候補（%d 件）" % len(data["fix_candidates"]), ""]
+    if not data["fix_candidates"]:
+        lines.append("なし")
+    rows, more = capped(data["fix_candidates"], cap, "files")
+    for row in rows:
+        lines.append("- `%s`：%s。エージェントの最後の書き込みは %s（session `%s`）" % (
+            row["path"], row["status"], row["written_at"], row["session_id"]))
+    lines += more
+    if data["fix_excluded"]:
+        lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
+    return lines
+
+
+def render_harness(data, cap):
+    lines = ["", "## 比較対象の所在（本文は未確認）", ""]
+    for entry in data["harness"]:
+        lines.append("- %s `%s`: %s" % (entry["scope"], entry["path"], entry["status"]))
+        rows, _ = capped(entry["files"], cap, "harness")
+        lines.extend("  - `%s`" % path for path in rows)
+        if len(rows) < len(entry["files"]):
+            lines.append("  - ほか %d 個。全件は `--section harness` で出します。" % (len(entry["files"]) - len(rows)))
+    return lines + render_steering(data["steering"])
 
 
 NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり"}
@@ -594,22 +744,27 @@ def reading_plan(sessions, budget):
 
 
 def render_plan(plan):
-    lines = ["", "## 今回読むセッション（%d 件、見積もり %d 文字）" % (len(plan["read"]), plan["read_chars"]), ""]
-    if not plan["read"]:
+    total = len(plan["read"]) + plan["rest"]
+    lines = ["", "## 未読のセッション（合計 %d 件）" % total, ""]
+    if not total:
         lines.append("未読のセッションはありません。")
+    else:
+        lines.append("- 未読の合計：%d 件。レポートの「未読」には、ノートを書き終えた後の集約に出るこの数を書きます。" % total)
+        lines.append("- 1回の振り返りで読む分：次の %d 件（見積もり %d 文字）。" % (
+            len(plan["read"]), plan["read_chars"]))
     for session in plan["read"]:
-        lines.append("- `%s`" % session)
+        lines.append("  - `%s`" % session)
     if plan["rest"]:
-        lines += ["", "未読があと %d 件（見積もり %d 文字）残ります。1回に読む量の上限（%d 文字）を超えるためです。"
-                  "今回の分を読み終えたら、もう一度 /kiroku-retro を実行すると続きを読みます。" % (
-                      plan["rest"], plan["rest_chars"], plan["budget"])]
+        lines.append("- その後に残る分：%d 件（見積もり %d 文字）。1回に読む量の上限（%d 文字）を超えるためです。"
+                     "もう一度 /kiroku-retro を実行すると続きを読みます。" % (
+                         plan["rest"], plan["rest_chars"], plan["budget"]))
     if plan["unreadable"]:
         lines += ["", "ログが無い、または読めないセッションが %d 件あります。会話に基づく判断はできません。"
                   % plan["unreadable"]]
     return lines
 
 
-def render_review(data):
+def render_review(data, cap=None):
     """ノートと台帳から求めたもの。会話からの型の候補、ノートの検査、案の追跡。"""
     topics = data["topics"]
     candidates = [t for t in topics if t["candidate"]]
@@ -625,21 +780,28 @@ def render_review(data):
         for example in topic["examples"]:
             lines.append("  - session `%s` index=%s 「%s」" % (
                 example["session_id"], example["index"], shorten(example["quote"], 120)))
+            if example.get("context"):
+                lines.append("    - ノートに書かれた経緯：%s" % shorten(example["context"], 120))
     others = [t for t in topics if not t["candidate"]]
     if others:
         lines += ["", "### まだ型ではないトピック（同じ話題には、この名前を使う）", ""]
-        for topic in others:
+        rows, more = capped(others, None if cap is None else cap * 2, "review")
+        for topic in rows:
             lines.append("- `topic:%s`：期間内 %d セッション、全期間 %d セッション。%s" % (
                 topic["topic"], topic["sessions"], topic["all_sessions"], topic["summary"]))
+        lines += more
     if data["note_problems"]:
         lines += ["", "## ノートの検査で外したもの（%d 件）" % len(data["note_problems"]), ""]
-        for problem in data["note_problems"]:
+        rows, more = capped(data["note_problems"], cap, "review")
+        for problem in rows:
             lines.append("- session `%s`：%s" % (problem["session_id"], problem["problem"]))
+        lines += more
 
     lines += ["", "## 採用した案の追跡（%d 件）" % len(data["adopted"]), ""]
     if not data["adopted"]:
         lines.append("なし")
-    for row in data["adopted"]:
+    adopted, more_adopted = capped(data["adopted"], cap, "review")
+    for row in adopted:
         if row["before"] is None:
             counts = row["verdict"]
         elif row["verdict"] == "まだ日が浅い":
@@ -649,25 +811,31 @@ def render_review(data):
                 row["before"], row["before_days"], row["after"], row["after_days"], row["verdict"])
         lines.append("- `%s` %s（対象の型 `%s`、採用 %s）：%s" % (
             row["id"], row["title"], row["target"], row["decided_at"], counts))
+    lines += more_adopted
     if data["rejected"]:
         lines += ["", "## 見送った案（%d 件）" % len(data["rejected"]), "",
                   "同じ対象の型への案は、見送りの後に新しい発生がある場合だけ出します。", ""]
-        for row in data["rejected"]:
+        rejected, more = capped(data["rejected"], cap, "review")
+        for row in rejected:
             after = "数えられない" if row["after"] is None else "%d 回" % row["after"]
             lines.append("- `%s` %s（対象の型 `%s`、見送り %s）：その後の発生 %s。理由：%s" % (
                 row["id"], row["title"], row["target"], row["decided_at"], after, row["reason"] or "記載なし"))
+        lines += more
     return lines
 
 
-def render_sessions(sessions):
+def render_sessions(sessions, cap=None):
+    rows, more = capped(sessions, cap, "sessions")
     lines = ["", "## セッション一覧（%d 件、新しい順）" % len(sessions), "",
              "会話は `--session <session_id>` で1件ずつ読みます。", "",
              "| session | 最後の活動 | 記録 | ログ | 発話 | 発話の文字数 | 振り返りノート |",
              "|---|---|---|---|---|---|---|"]
-    for row in sessions:
+    for row in rows:
         lines.append("| `%s` | %s | %s | %s | %d | %d | %s |" % (
             row["session_id"], row["last_activity"], "あり" if row["recorded"] else "ログのみ",
             row["log"], row["prompts"], row["prompt_chars"], NOTE_LABELS[row["note"]]))
+    if more:
+        lines += [""] + more
     return lines
 
 
@@ -676,12 +844,16 @@ def render_session(view):
              "- ログの状態：%s" % view["status"],
              "- ユーザー発話：%d 件" % len(view["turns"]),
              "- ユーザー発話は原文、ツール実行は件数、応答は最後の1件の冒頭だけです。",
+             "- 応答やその後の作業を根拠に書くときは、抜粋で本文を確かめます。",
              "- 全文は `excerpt.py --session %s --index <index> --context 3` で読みます。" % view["session_id"]]
     if view["status"] != "ok":
         lines.append("- 会話に基づく判断を保留：%s" % (", ".join(view["issues"]) or view["status"]))
     for turn in view["turns"]:
         lines += ["", "## index=%d [%s] ユーザー（%d 文字）" % (turn["index"], turn["ts"], turn["chars"]),
                   "", turn["text"], ""]
+        if turn.get("duplicates"):
+            lines.append("- 同じ発話がログの index=%s にも記録されています。1件として数えます。"
+                         % "、".join(map(str, turn["duplicates"])))
         if turn["tools"]:
             tools = "、".join("%s×%d" % item for item in sorted(turn["tools"].items()))
             failed = "、失敗 %d 件" % turn["tool_failures"] if turn["tool_failures"] else ""
@@ -701,6 +873,7 @@ def main(argv=None):
     parser.add_argument("--until", default=None, help="終了。日数または日付")
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
+    parser.add_argument("--section", choices=SECTIONS, help="この節だけを、件数を絞らずに出す")
     parser.add_argument("--session", help="このセッションだけを要約表示する")
     parser.add_argument("--user-chars", type=int, default=1500, help="要約表示で、発話1件の最大文字数（既定 1500）")
     parser.add_argument("--reply-chars", type=int, default=300, help="要約表示で、応答の冒頭の文字数（既定 300）")
@@ -734,8 +907,15 @@ def main(argv=None):
     if args.json:
         json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")
+    elif args.section:
+        sys.stdout.write(render(data, args.prompts, section=args.section))
     else:
-        sys.stdout.write(render(data, args.prompts))
+        budget = load_config(root)["retro_output_chars"]
+        for cap in OUTPUT_CAPS:
+            text = render(data, args.prompts, cap=cap)
+            if len(text) <= budget:
+                break
+        sys.stdout.write(text)
 
 
 if __name__ == "__main__":

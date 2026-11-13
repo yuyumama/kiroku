@@ -51,6 +51,7 @@ kiroku の更新で設定項目が増えても、`config.json` に書き足す�
 | `ignore_paths` | `.kiro/kiroku/data/**`、`.git/**` | 記録しないパス。書いた値は既定値に足される |
 | `output_tail_chars` | 2000 | 失敗時に残す出力の末尾の文字数 |
 | `retro_read_chars` | 50000 | 1回の振り返りで読む量の上限（文字数の見積もり） |
+| `retro_output_chars` | 20000 | 集約の出力の長さの目安。超えるときは各一覧を上位だけに絞る。全件は `--section <節>` で出す |
 
 `write_tools` と `ignore_paths` は、既定値を置き換えずに足します。古い版の値が `config.json` に残っていても、新しい既定値は有効です。
 旧 `prompt_max_chars` は現在使いません。
@@ -79,13 +80,15 @@ CLI と IDE には共通の v1 フック形式を使います。製品上の発�
 | イベント | 内容 |
 |---|---|
 | `tool_failure` | シェル失敗のコマンド、終了コード、出力末尾 |
-| `tool_cancelled` / `tool_denied` | 人による取り消し／権限規則による拒否 |
+| `tool_cancelled` / `tool_timeout` / `tool_denied` | 人による取り消し／タイムアウト／権限規則による拒否。出力の文言で分ける |
 | `write` | ファイルのパス、内容ハッシュ、コミット |
 | `prompt` | 発話の時刻と session ID。本文は保存しない |
 | `test_run` | 設定された JUnit レポートと、その時点の Git 状態 |
-| `recording_gap` | 未知のシェル応答など、判定できなかった実行 |
+| `recording_gap` | 未知のシェル応答、理由の分からない未完了など、判定できなかった実行 |
 
 通常の成功したシェル実行と kiroku 自身のコマンドは記録しません。
+`/kiroku-retro` の発話、または集約スクリプトの実行より後は、振り返りの会話として扱います。同じセッションのそれ以降の発話と記録は、集約から除きます。
+テスト実行の記録には、merge や rebase の最中だったかどうかも残します。その最中の失敗は、回帰候補ではなく「マージ中の失敗」に分けます。
 `execute_bash` と `execute_pwsh`、書き込みは `fs_write`・`fs_append`・`str_replace` とファイル保存フックに対応します。
 シェル応答は既存の `Exit Code:` 形式を解析します。未知の応答を成功扱いにはしません。
 
@@ -156,7 +159,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d
 python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --session <session_id>
 ```
 
-1回の振り返りで読む量は、件数ではなく文字数の見積もりで区切ります。集約の「今回読むセッション」に、未読のものが新しい順に、上限に収まるところまで並びます。
+1回の振り返りで読む量は、件数ではなく文字数の見積もりで区切ります。集約の「未読のセッション」に、未読の合計と、今回読む分（新しい順に、上限に収まるところまで）が並びます。
 短いセッションなら数十件、長いセッションなら数件になります。上限は `config.json` の `retro_read_chars`（既定 50,000 文字）で変えられます。
 
 未読が残った場合は、集約とレポートに件数が出ます。もう一度 `/kiroku-retro` を実行すると、続きから読みます。ノートがあるセッションは読み直さないので、何度実行しても重複しません。

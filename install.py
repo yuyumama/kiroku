@@ -26,9 +26,18 @@ def install(target, update=False, python_command="python3"):
                  and (target / p).read_text(encoding="utf-8") != content]
     if conflicts:
         raise ValueError("既存ファイルと衝突しています。変更していません: " + ", ".join(conflicts))
+    changes = {"新規": [], "更新": [], "変更なし": [], "そのまま（導入先の設定）": []}
     for relative, content in files.items():
         path = target / relative
         if relative == config and path.exists():
+            changes["そのまま（導入先の設定）"].append(str(relative))
+            continue
+        if not path.exists():
+            changes["新規"].append(str(relative))
+        elif path.read_text(encoding="utf-8") != content:
+            changes["更新"].append(str(relative))
+        else:
+            changes["変更なし"].append(str(relative))
             continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -47,6 +56,7 @@ def install(target, update=False, python_command="python3"):
     if ".kiro/kiroku/data/" not in lines:
         lines.extend(["# kiroku の生データ。コミットしない。", ".kiro/kiroku/data/"])
     ignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changes
 
 
 def main():
@@ -56,9 +66,18 @@ def main():
     parser.add_argument("--python-command", choices=("python3", "python", "py -3"), default="python3")
     args = parser.parse_args()
     try:
-        install(args.target, args.update, args.python_command)
+        changes = install(args.target, args.update, args.python_command)
     except (OSError, ValueError) as exc:
         parser.exit(1, "%s\n" % exc)
+    for label, names in changes.items():
+        if label == "変更なし":
+            continue
+        for name in names:
+            print("%s  %s" % (label, name))
+    print("新規 %d、更新 %d、変更なし %d" % (
+        len(changes["新規"]), len(changes["更新"]), len(changes["変更なし"])))
+    if not changes["新規"] and not changes["更新"]:
+        print("導入先は、この kiroku と同じ内容です。")
     print("完了。テスト結果の記録は .kiro/kiroku/config.json の tests を設定してください。")
 
 

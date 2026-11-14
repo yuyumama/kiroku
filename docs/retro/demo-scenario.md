@@ -6,6 +6,8 @@ kiroku を入れて数回やり取りし、振り返りが既存のハーネス�
 このファイルには、サンプルに仕込んである不備と、振り返りに期待する結果を書いています。
 振り返りのエージェントに答えを見せないよう、サンプルの中ではなく、ここに置いています。
 
+範囲を広げて検査する場合は [拡張ケースと判定基準](demo-cases.md) を使います。実行できたこと、集計が合うこと、提案の意味が妥当なことを別々に判定します。
+
 ## サンプルの中身
 
 テスト結果の記録まで検証する回では、`python3 run_tests.py` を実行するよう依頼します。`make test` の失敗はハーネスの不整合を見つける材料ですが、代わりにJUnitを生成しない `python3 -m unittest` を使うだけでは、kirokuのテスト分類を確認したことにはなりません。
@@ -37,7 +39,7 @@ sh ~/kiroku/install.sh . && git add -A && git commit -m init
 ```
 
 以前の `~/kiroku-demo` が残っている場合は、先に別名に変えるか削除します。
-Kiro を起動して `/hooks` を入力し、`kiroku-record-` の3本と、`check-python-syntax`、`guard-shell` が出ることを確かめます。
+Kiro を起動して `/hooks` を入力し、`kiroku-record-` の4本と、`check-python-syntax`、`guard-shell` が出ることを確かめます。
 
 ## 会話の例
 

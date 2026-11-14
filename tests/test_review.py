@@ -139,6 +139,22 @@ class LedgerTest(ReviewSandbox):
         self.report('2026-11-14-0100', '### P1. 以前の案\n- 対象の型：`tool:cd /tmp &&`\n')
         self.assertIsNone(aggregate.aggregate(self.root)['pending'][0]['recent'])
 
+    def test_old_target_is_unknown_when_an_exact_match_hides_other_commands(self):
+        """旧版の対象は先頭3語が同じ失敗すべて。完全一致の実行だけを数えて対象を狭めない。"""
+        self.shell('npm run build', 1)
+        self.shell('npm run build --production', 1)
+        self.report('2026-11-01-0900', '### P1. 旧版の案\n- 対象の型：`tool:npm run build`\n')
+        self.assertIsNone(aggregate.aggregate(self.root)['pending'][0]['recent'])
+        self.assertEqual(self.cli('adopt', 'P1').returncode, 0)
+        self.assertEqual(aggregate.aggregate(self.root)['adopted'][0]['verdict'], '対象の型を数えられない')
+
+    def test_current_report_target_counts_only_its_own_command(self):
+        self.shell('npm run build', 1)
+        self.shell('npm run build --production', 1)
+        self.report('2026-11-14-0900', '### P1. 今の版の案\n- 対象の型：`tool:npm run build`\n\n'
+                    '```kiroku-facts\n{}\n```\n')
+        self.assertEqual(aggregate.aggregate(self.root)['pending'][0]['recent'], 1)
+
     REPORT = ("# 振り返り\n\n## ハーネスへの改善案（プロジェクト内）\n\n"
               "### P1. ビルド前に依存を入れる hook を足す\n\n- 区分：実績に基づく改善\n"
               "- 対象の型：`tool:npm run build`\n\n"

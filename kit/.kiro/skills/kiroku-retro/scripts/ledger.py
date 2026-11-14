@@ -43,6 +43,22 @@ def latest_report(root):
     return max(names) if names else None
 
 
+def current_keys(root, report):
+    """このレポートの「対象の型」が、今の見出しの形式で書かれているか。
+
+    旧版の失敗の見出しは先頭3語だった。今の版が作るレポートには kiroku-facts の
+    検証値が付くので、それがあるレポートを今の形式とみなす。レポートが読めない、
+    または検証値が無いときは、旧版として扱う。
+    """
+    if not report:
+        return False
+    try:
+        with open(os.path.join(data_dir(root), "reports", report + ".md"), encoding="utf-8") as handle:
+            return re.search(r"^```kiroku-facts\s*$", handle.read(), re.M) is not None
+    except OSError:
+        return False
+
+
 def proposals(root):
     """レポートから案を読む。新しいレポートが先。"""
     directory = os.path.join(data_dir(root), "reports")
@@ -137,7 +153,8 @@ def tracking(root, occurrences, data_start, now):
         decided = _parse(entry["ts"])
         row = {"id": entry["id"], "title": entry.get("title"), "target": entry.get("target"),
                "decided_at": entry["ts"], "reason": entry.get("reason")}
-        times = occurrences(entry.get("target")) if entry.get("target") else None
+        times = occurrences(entry.get("target"), str(entry.get("id") or "").partition("#")[0]) \
+            if entry.get("target") else None
         after_days = max((now - decided).total_seconds() / 86400, 0)
         row["after_days"] = round(after_days, 1)
         if times is None:

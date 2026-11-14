@@ -382,8 +382,11 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     all_events, all_failures = events, failures
     findings, note_problems = notes.verify(root)
 
-    def occurrences(target):
-        """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。"""
+    def occurrences(target, report=None):
+        """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。
+
+        report は、その案が書かれたレポート名。失敗の見出しの形式を見分けるのに使う。
+        """
         kind, _, name = (target or "").partition(":")
         if kind == "topic":
             return [f["_time"] for f in findings
@@ -392,13 +395,18 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             wanted = {short: name for name, short, _ in TOOL_KINDS}[kind]
             matching = [e for e in all_events if e.get("type") == wanted]
             exact = [e['_time'] for e in matching if command_key(e.get('command')) == name]
-            if exact:
+            if ledger.current_keys(root, report):
                 return exact
-            # 旧版の先頭3語キーは、一意に対応するときだけ引き継ぐ。
-            legacy = [e for e in matching if ' '.join((e.get('command') or '').split()[:3])[:60] == name]
-            if len({command_key(e.get('command')) for e in legacy}) > 1:
+            # 旧版のレポートの対象は「先頭3語が同じ失敗すべて」を指す。その失敗がすべて
+            # 今の同じ見出しに入るときだけ引き継ぐ。完全に一致する実行があっても、
+            # ほかの見出しに分かれる実行が含まれるなら、対象が狭まるので数えない。
+            legacy = {command_key(e.get('command')) for e in matching
+                      if ' '.join((e.get('command') or '').split()[:3])[:60] == name}
+            if len(legacy) > 1:
                 return None
-            return [e['_time'] for e in legacy]
+            if legacy and legacy != {name}:
+                return [e['_time'] for e in matching if command_key(e.get('command')) in legacy]
+            return exact
         if kind == "test":
             return [f["_time"] for f in all_failures if f["class"] == REGRESSION and f["test_id"] == name]
         return None
@@ -408,7 +416,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                                         datetime.datetime.now(datetime.timezone.utc))
     pending = []
     for proposal in ledger.pending(root):
-        times = occurrences(proposal["target"]) if proposal["target"] else None
+        times = occurrences(proposal["target"], proposal["report"]) if proposal["target"] else None
         recent = None if times is None else sum(
             1 for t in times if (since is None or t >= since) and (until is None or t < until))
         pending.append(dict(proposal, recent=recent))

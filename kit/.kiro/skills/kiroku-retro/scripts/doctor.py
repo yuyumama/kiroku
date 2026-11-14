@@ -21,12 +21,12 @@ def inspect(root, command):
         if not isinstance(custom, dict) or not isinstance(custom.get('tests', []), list):
             raise ValueError('tests は配列が必要です')
         config = load_config(root)
-        entry = commands.test_entry(command, config)
+        entry, how = commands.test_match(command, config)
     except (OSError, ValueError, TypeError, AttributeError, re.error):
-        entry = None
+        entry, how = None, None
         errors.append('テストの検出設定を読めません。config.json を確認してください。')
     if entry is None:
-        errors.append('指定した起動先が検出設定と一致しません。本文への言及や未対応の複合構文も検出対象外です。')
+        errors.append('指定したコマンドが検出設定と一致しません。config.json の tests の match を確認してください。')
     elif not entry.get('report') or entry.get('format', 'junit') != 'junit':
         errors.append('取り込む JUnit レポートの場所と形式を設定してください。')
     try:
@@ -37,8 +37,12 @@ def inspect(root, command):
             errors.append('実行前の記録フックがありません。kiroku を更新してください。')
     except (OSError, ValueError, TypeError, KeyError):
         errors.append('記録フックの設定を読めません。')
-    return {'ok': not errors, 'command': mask(command), 'matched': entry,
-            'errors': errors,
+    notes = []
+    if how == 'text':
+        notes.append('起動先では照合できず、コマンドの文面で一致しました（パイプ、前置き、展開など）。'
+                     '結果を取り込むのは、実行の前後で JUnit レポートが変わったときだけです。')
+    return {'ok': not errors, 'command': mask(command), 'matched': entry, 'matched_by': how,
+            'errors': errors, 'notes': notes,
             'verification': '設定の一致だけを確認します。実行後に JUnit と test_run の照合が必要です。'}
 
 
@@ -53,8 +57,8 @@ def main(argv=None):
         print(mask(json.dumps(result, ensure_ascii=False, indent=2)))
     else:
         print('設定の一致：%s' % ('確認済み' if result['ok'] else '要確認'))
-        for error in result['errors']:
-            print('- ' + error)
+        for line in result['errors'] + result['notes']:
+            print('- ' + line)
         print(result['verification'])
     return 0 if result['ok'] else 1
 

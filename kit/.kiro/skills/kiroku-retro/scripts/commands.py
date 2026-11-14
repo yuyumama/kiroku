@@ -1,9 +1,11 @@
 """実行せずに、単純なシェル入力から実コマンドを取り出す。
 
-対応は単一コマンド、先頭の cd DIR &&、末尾のリダイレクト。
+parse の対応は単一コマンド、先頭の cd DIR &&、末尾のリダイレクト。
 heredoc・展開・パイプ・複合構文は推測せず None を返す。
+
+解釈できない入力は捨てない。集約の見出し（key）は最初の区切りまで、
+テストの検出（test_match）はコマンドの文面での照合に落とす。
 """
-import hashlib
 import os
 import re
 import shlex
@@ -61,12 +63,34 @@ def parse(command):
     return {'argv': argv, 'directory': directory}
 
 
+CUTS = ('|', '||', ';', '&&', '&')
+
+
+def first_command(command):
+    """パイプや連結の手前までを解釈する。`npm run build 2>&1 | tail -20` は npm run build。"""
+    line = (command or '').split('\n', 1)[0]
+    position = 0
+    while position < len(line.rstrip()):
+        match = TOKEN.match(line, position)
+        if not match:
+            return None
+        if match.group('op') in CUTS:
+            parsed = parse(line[:match.start('op')])
+            if parsed:
+                return parsed
+        position = match.end()
+    return None
+
+
 def key(command):
-    parsed = parse(command)
+    """失敗をまとめる見出し。作業場所の指定、リダイレクト、パイプ以降を除いた実コマンド。
+
+    それでも解釈できない入力（展開を含むものなど）は、先頭の3語でまとめる。
+    """
+    parsed = parse(command) or first_command(command)
     if parsed:
         return shlex.join(parsed['argv'])
-    # 不明な入力同士を先頭の数語だけで混ぜない。長い本文はキーに複製しない。
-    return 'unparsed:' + hashlib.sha256((command or '').encode('utf-8')).hexdigest()
+    return ' '.join((command or '').split()[:3])[:60]
 
 
 def invocation(command):
@@ -91,12 +115,28 @@ def invocation(command):
     return shlex.join(argv[:count])
 
 
-def test_entry(command, config):
+def test_match(command, config):
+    """テストの検出設定と照合する。(設定, 照合のしかた) を返す。
+
+    'invocation'：起動先（プログラム、スクリプト、タスク名）で一致した。
+    'text'：起動先では照合できず、コマンドの文面で一致した。パイプ、uv run などの前置き、
+            展開を含む実行のほか、テスト名への言及もここに入る。結果を取り込むのは、
+            実行の前後でレポートが変わったときだけ。
+    """
+    if not isinstance(command, str):
+        return None, None
     target = invocation(command)
-    if target is None:
-        return None
-    return next((entry for entry in config['tests']
-                 if re.search(entry.get('match', '(?!)'), target)), None)
+    for how, text in (('invocation', target), ('text', command)):
+        if text is None:
+            continue
+        for entry in config['tests']:
+            if re.search(entry.get('match', '(?!)'), text):
+                return entry, how
+    return None, None
+
+
+def test_entry(command, config):
+    return test_match(command, config)[0]
 
 
 def own_script(command):

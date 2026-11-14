@@ -374,7 +374,7 @@ def shell_events(payload, root, cwd, retro_dir, config):
         return [{"type": "recording_gap", "tool": payload.get("tool_name"),
                  "reason": "unknown_shell_response", "command": mask(command)}]
 
-    entry = commands.test_entry(command, config)
+    entry, how = commands.test_match(command, config)
     if entry is not None and exit_code != -1:
         head, dirty, truncated = worktree_state(root, config)
         results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
@@ -382,6 +382,8 @@ def shell_events(payload, root, cwd, retro_dir, config):
             "type": "test_run", "command": mask(command), "exit_code": exit_code,
             "head": head, "dirty": dirty, "results": results, "test_files": test_files,
         }
+        if how == "text":
+            event["matched"] = "text"  # 起動先ではなく文面で一致。実行か言及かは、ここでは決めない
         if truncated:
             event["dirty_truncated"] = True
         vcs = vcs_in_progress(root)
@@ -391,6 +393,11 @@ def shell_events(payload, root, cwd, retro_dir, config):
             event["note"] = note
         if exit_code != 0:
             event["output_tail"] = tail
+        if how == "text" and results is None and exit_code != 0:
+            # テストの実行と確かめられなかった失敗は、ツール失敗としても残す。
+            return [event, {"type": "tool_failure", "tool": payload.get("tool_name"),
+                            "command": mask(command), "exit_code": exit_code,
+                            "output_tail": tail, "head": head}]
         return [event]
     if exit_code == -1:
         # 完了しなかった呼び出し。人による取り消し、タイムアウト、権限の規則による拒否を分ける。

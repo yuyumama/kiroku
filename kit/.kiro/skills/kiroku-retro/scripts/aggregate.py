@@ -349,7 +349,7 @@ def rework_candidates(events):
 
 
 def command_key(command):
-    """作業場所の指定を除いた実コマンド。解釈できない入力は別々に保つ。"""
+    """作業場所の指定、リダイレクト、パイプ以降を除いた実コマンド。解釈できなければ先頭の3語。"""
     return commands.key(mask(command or ""))
 
 
@@ -430,7 +430,9 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         row["_s"].add(event.get("session_id"))
         kind = event.get("type")
         if kind == "test_run":
-            row["test_runs"] += 1
+            # 文面だけで一致し、結果も取り込めなかったものは、実行か言及か分からないので数えない。
+            if event.get("matched") != "text" or event.get("results") is not None:
+                row["test_runs"] += 1
         elif kind == "prompt":
             row["prompts"] += 1
             turns[event.get("session_id")] += 1
@@ -516,7 +518,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                             "reason": e.get("reason"), "tool": e.get("tool")}
                            for e in events if e.get("type") == "recording_gap"],
         "test_result_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
-                              "command": e.get("command"), "reason": e.get("note") or 'unknown'}
+                              "command": e.get("command"), "reason": e.get("note") or 'unknown',
+                              "matched": e.get("matched") or 'invocation'}
                              for e in events if e.get("type") == "test_run" and e.get("results") is None],
         "test_configuration": [{k: mask(t.get(k)) for k in ('match', 'report', 'format')}
                                for t in load_config(root)['tests']],
@@ -644,8 +647,10 @@ def render_summary(data, cap):
         lines += ['', '## テスト結果の記録不足（%d 件）' % len(data['test_result_gaps']), '']
         rows, more = capped(data['test_result_gaps'], cap, 'summary')
         for row in rows:
-            lines.append('- %s session `%s`: %s。コマンド `%s`' % (
-                row['ts'], row['session_id'], row['reason'], shorten(row['command'], 200)))
+            lines.append('- %s session `%s`: %s%s。コマンド `%s`' % (
+                row['ts'], row['session_id'], row['reason'],
+                '（文面で一致。テストの実行か、名前への言及かは未確認）' if row['matched'] == 'text' else '',
+                shorten(row['command'], 200)))
         lines += more
 
     if data["recording_gaps"]:

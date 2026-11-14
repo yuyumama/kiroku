@@ -182,12 +182,47 @@ class RecordTest(Sandbox):
         self.assertIsNone(event['results'])
         self.assertEqual(event['note'], 'report_stale')
 
-    def test_mentioning_a_runner_in_data_is_not_a_test_execution(self):
+    def test_mentioning_a_runner_never_gets_results_and_is_not_counted_as_a_run(self):
+        """言及は結果を持たない。実行か言及か分からないものは、数えずに記録不足として出す。"""
+        self.write(REPORT, junit([('Old', 'old', 'failed')]))
         commands = ["echo pytest", "printf '%s' pytest", "cat > report.md <<'EOF'\npytest\nEOF",
                     "rg pytest README.md", "python3 -c 'print(\"pytest\")'"]
         for command in commands:
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': command}})
             self.shell(command, 0)
-        self.assertEqual(self.events(), [])
+        events = self.events()
+        self.assertEqual([(e['type'], e['results'], e['matched'], e['note']) for e in events],
+                         [('test_run', None, 'text', 'report_stale')] * len(commands))
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['periods']['全期間']['test_runs'], 0)
+        self.assertEqual(data['test_failures'], [])
+        self.assertEqual(len(data['test_result_gaps']), len(commands))
+        self.assertIn('文面で一致', aggregate.render(data))
+
+    def test_piped_wrapped_and_prefixed_runs_are_read_when_the_report_changes(self):
+        """起動先で照合できない実行も、実行の前後でレポートが変わっていれば結果を取り込む。"""
+        commands = ['pytest -q 2>&1 | tail -20', 'uv run pytest -q', 'PYTHONPATH=. pytest',
+                    'timeout 120 pytest', 'source .venv/bin/activate && pytest -q']
+        for number, command in enumerate(commands):
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': command}})
+            time.sleep(0.02)
+            self.write(REPORT, junit([('T', 'case%d' % number, 'passed')]))
+            self.shell(command, 0)
+            event = self.events()[-1]
+            self.assertEqual((event['results']['passed'], event['matched']),
+                             (['T::case%d' % number], 'text'), command)
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['periods']['全期間']['test_runs'], len(commands))
+        self.assertEqual(data['test_result_gaps'], [])
+
+    def test_failed_text_match_without_results_is_also_a_tool_failure(self):
+        self.shell('rg pytest missing.txt', 2, 'No such file')
+        self.assertEqual([e['type'] for e in self.events()], ['test_run', 'tool_failure'])
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['tool_failures'][0]['command_key'], 'rg pytest missing.txt')
+        self.assertEqual(data['periods']['全期間']['test_runs'], 0)
 
     def test_hook_is_silent_and_never_fails(self):
         done = self.shell("ls /no/such/dir", 2, "ls: cannot access")
@@ -591,6 +626,18 @@ class SummaryTest(Sandbox):
         groups = {r['command_key']: r['count'] for r in aggregate.aggregate(self.root)['tool_failures']}
         self.assertEqual(groups['echo 2'], 2)
         self.assertEqual(groups["echo '&&'"], 1)
+
+    def test_unparsed_commands_group_by_first_command_then_by_leading_words(self):
+        for command in ('npm run build 2>&1 | tail -20', 'npm run build 2>&1 | tail -40', 'npm run build',
+                        'cd web && npm run build | tee log.txt', 'ls $HOME/a $HOME/b', 'ls $HOME/a $HOME/b | wc -l'):
+            self.shell(command, 1)
+        self.write('.kiro/kiroku/data/reports/2026-11-14-0100.md',
+                   '### P1. ビルド\n- 対象の型：`tool:npm run build`\n')
+        data = aggregate.aggregate(self.root)
+        groups = {r['command_key']: r['count'] for r in data['tool_failures']}
+        self.assertEqual(groups, {'npm run build': 4, 'ls $HOME/a $HOME/b': 2})
+        self.assertEqual(data['pending'][0]['recent'], 4)
+        self.assertNotIn('unparsed', aggregate.render(data))
 
     def test_restored_content_counts_again_after_an_intervening_write(self):
         for content in ('A', 'B', 'A'):

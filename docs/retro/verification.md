@@ -401,3 +401,103 @@ Linux / V3 対話モード。作業担当2セッション、reviewer、停止フ
 `probe/` の機能はデモの使い捨てコピーで確認できる。違いは診断手順の有無であり、デモでは代替できないという判断は誤りだった。今回実施した停止フックの監査も、その代替方法の実例に当たる。
 独立した初期キット8ファイルを削除し、再確認の手順を demo-cases.md に統合した。過去の検証記録は保持し、現行手順への案内を付けた。古い診断出力のgit除外は継続する。配布ファイルや既存設定・データへの影響はない。
 この整理によって9種類のフックの再実測や、D15・D16の問題の修正を行ったとは扱わない。
+
+## 2026-11-15：D16 の改善案を判断するための実機診断
+
+[PR #3 の依頼](https://github.com/yuyumama/kiroku/pull/3#issuecomment-6880451786)に対応した。今回は確認のみで、配布コードと元のデモは変更していない。既存導入先への影響は「なし」。
+
+### 1. 環境と方法
+
+- Ubuntu 22.04.4 LTS、Linux 6.8.0-52-generic、Kiro CLI 3.3.0、V3 対話モード。
+- 最新取得した main の `be808dd` を一時領域へ展開し、その `examples/demo/` のコピーへ同じ main のインストーラーで導入した。比較用のコピーはそれぞれリモート未設定の使い捨て Git とした。
+- 一時エージェントに読み取りと指定した無害なコマンドの allow、固定 printf の deny／ask を設定した。承認拒否は、試験操作として承認画面の「Deny once」を選択した。人間がその場で操作したという意味ではない。
+- Stop 観測フックと、終了コード1の試験フックは一時コピーだけに置いた。配布スクリプトと guard_shell.py が main と同じ内容であること、リモートが無いことを確認した。実際の push・削除、拒否の回避、`--trust-all-tools` の使用は無い。
+- Kiro がツール呼び出し前に拒否したターンや、呼び出さず成功を申告したターンがあった。これらは実行・停止の証拠から除外した。以下は実際の tool_call／tool_result、フック、state、イベント、JUnit を照合した結果であり、エージェントの完了報告だけでは判定していない。
+- 生ログ、発話本文、個別 ID、個人設定は転載していない。以下のコマンドと出力例は、この試験の固定値である。
+
+### 2. 確認1：キー・型・対応関係
+
+messages.jsonl の各行の外枠は `id: string / timestamp: string / payload: object`。以下は payload のキーで、型名は JSON の型に揃えた。
+
+| payload | キーと型 |
+|---|---|
+| tool_call（フック停止） | `type, toolCallId, toolName, status, kind, executionId, turnId, actionType, title: string`、`args, _meta: object` |
+| その args | `command, cwd: string`、`description, timeout: null`、`run_in_background: boolean` |
+| その _meta | `kiro: object`。その中に `agentMode, toolOrigin: string` |
+| tool_result | `type, toolCallId, content, executionId, turnId: string`、`success: boolean`、`_meta: object` |
+| その _meta | `kiro: object`。その中に `agentMode: string` |
+| ContextualHookInvoked | `type, hookId, operationId, name, hookActionType, status, executionId, turnId: string` |
+
+固定コマンド `git push --force --dry-run` の tool_call は `toolName="execute_bash" / status="denied"`、tool_result は `success=false / content="{}"` だった。content は空オブジェクトではなく、2文字の**文字列**である。guard_shell.py に同じコマンドを標準入力で与える直接検査では終了コード2、標準出力なしを確認した。
+
+フック行には `name="guard-shell"` があり、`hookActionType="runCommand" / status="completed"` だった。**終了コード・標準エラー・停止を示す専用キーは無い。** 後述の許可されるコマンドで guard-shell が通過した場合も、このフック行の status は completed である。名前が存在するだけで「このフックが止めた」とは判定できない。
+
+対応と行の順序は次のとおり。
+
+- tool_call と tool_result の `toolCallId / executionId / turnId` は一致した。
+- フック行にも同じ `executionId / turnId` があったが、`toolCallId` は無い。`operationId` は tool_call の `toolCallId / modelToolUseId / executionId / turnId` のいずれとも一致しなかった。`hookId` はフックの定義元・位置を示すもので、呼び出しの対応キーではない。
+- 単独フック停止の行順は、prompt フック → kiroku-record-test-start → guard-shell → tool_call → tool_result → Stop 観測フック → turn_end。PostToolUse の kiroku-record-tool は無い。
+- 今回は各判定対象ターンに shell 呼び出し1件だった。同一ターンの複数・並行呼び出しを、フックへ一対一に結びつけられるかは未確認。ターンの一致を個別ツールの一致と扱うことはできない。
+
+### 3. 確認2：4種類の対照
+
+全4ケースの tool_result は `success=false`。各ターンの prompt は全ケースで記録されたため、イベント欄ではその後の追加記録を示す。
+
+| ケースと固定コマンド | tool_call / 判別に使える情報 | tool_result.content の固定値・特徴 | PostToolUse | events.jsonl の追加記録 |
+|---|---|---|---|---|
+| フック停止：`git push --force --dry-run` | `status=denied`。policyDenial 無し。guard-shell の発火あり | `"{}"`。終了コード・理由なし | 無し | 無し（prompt のみ） |
+| エージェント規則の拒否：`printf KIROKU_DENIED_PROBE` | `status=denied`。`_meta.kiro.policyDenial.effect=deny / source=agent-profile` | `Blocked by a permission rule (deny shell matching "printf KIROKU_DENIED_PROBE"); the user did not reject it. Source: agent-profile.` と `Exit Code: -1` | 有り | `tool_denied` 1件 |
+| 承認画面で Deny once：`printf KIROKU_CANCEL_PROBE` | `status=denied`。policyDenial 無し。対応する `interaction_resolved` は `outcome=selected / selectedOption=reject` | `The user rejected this tool call.` と `Exit Code: -1` | 有り | `recording_gap` 1件、`reason=unknown_not_run` |
+| 通常の実行失敗：`ls /no/such/kiroku-d16` | `status=failed`。policyDenial 無し | `ls: cannot access '/no/such/kiroku-d16': No such file or directory` と `Exit Code: 2` | 有り | `tool_failure` 1件、`exit_code=2` |
+
+フック停止以外の3ケースでも、事前の kiroku-record-test-start と guard-shell は completed として記録された。行順は、両 PreToolUse → tool_call → tool_result → kiroku-record-tool → Stop。承認拒否では両 PreToolUse の後、tool_call より前に `pending_interaction → interaction_resolved` が入った。
+
+3ケースの tool_call の共通キー・型は確認1と同じで、加えて `modelToolUseId: string` があった。args は `command: string / run_in_background: boolean`。これら3ケースでは `cwd / description / timeout` は args に無かった。フック停止時の args の補完や modelToolUseId の有無は観測上の差だが、停止理由を表す契約とは確認できていない。
+
+権限拒否にだけあった `policyDenial: object` の中は、`capability, resource, triggeringResource, effect, scope, source: string`、`matchedRule: object`。matchedRule の中は `capability, effect: string / match: array<string>` だった。各 tool_result と ContextualHookInvoked のキー・型は確認1と同じだった。
+
+承認拒否の `interaction_resolved` は `type, toolCallId, outcome, selectedOption, executionId: string / consentRound: number（整数）`。その toolCallId は拒否された tool_call と一致し、利用者による選択の証拠を持つ。これは「不明な拒否」の推測とは区別できる。
+
+この4件は区別できた。ただし、`denied + "{}" + フック発火 + PostToolUse不在` は今回の観測上の組み合わせであり、あらゆる拒否・異常終了からフック停止だけを一意に確定できるという証明ではない。既存の tool_denied、recording_gap、tool_failure をもう一度拒否として加算すると二重計上になる。
+
+### 4. 確認3：複合コマンドと残留した開始記録
+
+削除を含む例の代わりに、`git push --force --dry-run ; python3 run_tests.py` を使った。各コピーで先に guard_shell.py へ標準入力で渡し、終了コード2になることを確認した。下表の順序は、ログに記録された両 PreToolUse 行の順序である。
+
+| 一時コピーの定義ファイル名 | 両フックの記録順 | 停止直後の test_starts | 次の通常テスト |
+|---|---|---|---|
+| `kiroku.json / project.json`（既定） | kiroku-record-test-start → guard-shell | 1件残留 | 実行・JUnitとも11件成功、記録は ambiguous_test_run |
+| `a-project.json / z-kiroku.json` | guard-shell → kiroku-record-test-start | 1件残留 | 実行・JUnitとも11件成功、記録は ambiguous_test_run |
+| `a-kiroku.json / z-project.json` | kiroku-record-test-start → guard-shell | 1件残留 | 実行・JUnitとも11件成功、記録は ambiguous_test_run |
+
+複合コマンドは各コピーで実際の tool_call を1件ずつ確認し、`denied / success=false / content="{}"`。PostToolUse は無く、そのターンのイベントは prompt のみだった。停止前に控えられたレポート一覧は、下記のとおり空だった。
+
+停止直後の開始1件は `before=[] / report="reports/junit.xml" / count=1 / overlap=false`、`at: number` だった。`test_starts` 自体はキーが文字列、値が object の対応表である。キーの値と at の実値は転載しない。
+
+続く `python3 run_tests.py` は各コピーで本当に実行され、終了コード0、JUnit11件・失敗0・エラー0を確認した。一方、イベントは `type=test_run / exit_code=0 / results=null / note=ambiguous_test_run`。通常実行分の開始は消費されたが、停止分は1件残って `overlap=true` に変わった。停止した開始と通常実行が重なったため、成功したJUnitの取り込みが保留になった。
+
+3通りとも両 PreToolUse が動き、**guard-shell が先でも、後続の記録フックは動いた**。今回はファイル名の順に対応してログの順序が変わったが、一般の実行順保証や同期実行まで証明するものではない。フックの名前替えだけで残留記録を防ぐことは、今回の結果ではできない。
+
+### 5. 追加2項目
+
+**終了コード1**：一時コピーに、固定標準エラー `KIROKU_EXIT1_WARNING` を出して終了コード1で終わる PreToolUse を追加した。`printf KIROKU_EXIT1_PROBE` の実呼び出しは `status=completed / success=true`、出力は固定文字列、終了コード0。PostToolUse も動いた。試験フックの ContextualHookInvoked も status=completed であり、そこには終了コードや標準エラーが無い。この条件では**1は停止せず、2は停止した**。
+
+[actions](https://kiro.dev/docs/hooks/actions/) は PreToolUse の非0終了を停止と説明する一方、[exit-codes](https://kiro.dev/docs/reference/exit-codes/) は2のみを停止と説明している。今回の CLI 3.3.0 の観測は後者と一致する。公式説明の適用範囲を他のモードまで一般化しない。[types](https://kiro.dev/docs/hooks/types/) も参照したが、今回調べた拒否時の順序・発火を補う仕様根拠にはしなかった。
+
+**Stop**：単独フック停止と、3通りの複合コマンド停止の各ターンで Stop 観測フックが実行された。`/quit` 前にローカルの観測ファイルとログの両方で確認したため、セッション終了時だけの発火ではない。Stop 入力は `hook_event_name="Stop" / cwd: string / session_id: string` のみで、個別呼び出しの toolCallId や停止理由は無かった。
+
+### 6. 未確認と検証の限界
+
+Windows／IDE／headless、Kiro の別バージョン、同一ターンの複数・並行ツール、別のフック停止原因、フックのタイムアウトやプロセス異常終了は未確認。配列内のフック順序だけを入れ替える検査と、同一条件での反復・競合試験も行っていない。今回の順序はログの順序であり、内部の起動・完了時刻や直列／並列実行は未確認。
+
+セッションログは非公開形式であり、今回のキーの意味や欠落条件を他の環境へ保証する根拠は無い。実装・更新処理の変更は行わず、A／B の集約や記録不足表示を製品へ実装しての検証もしていない。承認取り消しは Deny once を検査したもので、Escape／Ctrl+C 等は未確認。
+
+今回のリポジトリ全体の自動テストは `python3 -B -m unittest discover -s tests` で125件成功。これは上記の実機観測と区別する。
+
+### 7. 所見：案A・案B
+
+**案A**：今回の4ケースを区別し、events と toolCallId 等を突き合わせて不足を検出する材料はある。ただし「guard-shell が発火した」だけでは停止理由にならず、フック行には終了コード・標準エラー・ツール単位の対応キーが無い。一般のログに対して、フックによる停止と確定して数える仕様をそのまま実装する根拠は不足している。明示的な policyDenial・承認拒否を先に区別し、残りを「理由を確定できない未実行／記録不足」として扱う案なら検討できる。個別フックへの原因の断定は避ける必要がある。
+
+**案B**：今回の3通りでは、別のフックが停止しても開始を残せたので、PostToolUse が来なかったことを「記録不足」に出す補助方式は実装を検討できる。ただし現行の開始記録はテスト対象だけであり、確認1の単独コマンドを覆っていない。全対象への開始記録、対応づけ、残留記録を閉じるタイミングが別途必要となる。Stop の発火はその判断材料になるが、Stop 入力単独では呼び出しや拒否理由を特定できない。
+
+現状の開始記録を残すだけでは、次の正常なテストまで保留になることを実測した。A／B いずれを選んでも、拒否済みの記録との二重計上と、停止した開始記録が後続テストへ与える影響を扱う必要がある。今回はこれらの事実を報告するまでとし、修正はしていない。

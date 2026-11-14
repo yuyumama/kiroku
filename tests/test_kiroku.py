@@ -76,6 +76,8 @@ class Sandbox(unittest.TestCase):
 
     def run_tests(self, cases):
         """テストを実行したことにする。レポートを書き、シェル実行のフックを流す。"""
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",
+                   "tool_input": {"command": "pytest -q --junitxml=%s" % REPORT}})
         time.sleep(0.02)  # レポートの更新時刻が前回と変わるようにする
         self.write(REPORT, junit(cases))
         failed = any(status in ("failed", "error") for _, _, status in cases)
@@ -99,6 +101,129 @@ class Sandbox(unittest.TestCase):
 
 
 class RecordTest(Sandbox):
+    def test_result_without_start_and_overlapping_runs_are_explicit_gaps(self):
+        self.write(REPORT, junit([('Old', 'old', 'passed')]))
+        self.shell('pytest', 0)
+        self.assertIsNone(self.events()[-1]['results'])
+        self.assertEqual(self.events()[-1]['note'], 'missing_test_start')
+        for command in ('pytest -q', 'pytest -v'):
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': command}})
+        self.write(REPORT, junit([('New', 'new', 'passed')]))
+        self.shell('pytest -q', 0)
+        self.shell('pytest -v', 0)
+        for event in self.events()[-2:]:
+            self.assertIsNone(event['results'])
+            self.assertEqual(event['note'], 'ambiguous_test_run')
+
+    def test_abandoned_test_start_expires_instead_of_blocking_later_runs(self):
+        """Kiro の異常終了などで終わりのフックが来なかった実行前記録は、期限で捨てる。"""
+        state_path = os.path.join(self.root, '.kiro', 'kiroku', 'data', 'state.json')
+
+        def run(session, name):
+            self.session = session
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': 'pytest'}})
+            time.sleep(0.02)
+            self.write(REPORT, junit([('T', name, 'passed')]))
+            self.shell('pytest', 0)
+            return self.events()[-1]
+
+        def age(seconds):
+            with open(state_path, encoding='utf-8') as handle:
+                state = json.load(handle)
+            for start in state['test_starts'].values():
+                start['at'] = start.get('at', time.time()) - seconds
+            with open(state_path, 'w', encoding='utf-8') as handle:
+                json.dump(state, handle)
+
+        self.session = 'sess_crashed'
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})   # PostToolUse は来ない
+        age(120)
+        held = run('sess_a', 'a')   # 既定の期限内は、重複の可能性として保留する
+        self.assertEqual((held['results'], held['note']), (None, 'ambiguous_test_run'))
+        self.write('.kiro/kiroku/config.json', json.dumps({
+            'tests': [{'match': r'\bpytest\b', 'report': REPORT}], 'test_start_max_seconds': 60}))
+        read = run('sess_b', 'b')
+        self.assertEqual(read['results']['passed'], ['T::b'])
+        self.assertNotIn('note', read)
+        with open(state_path, encoding='utf-8') as handle:
+            self.assertEqual(json.load(handle)['test_starts'], {})
+
+    def test_start_without_timestamp_from_earlier_build_is_dropped(self):
+        os.makedirs(os.path.join(self.root, '.kiro', 'kiroku', 'data'))
+        with open(os.path.join(self.root, '.kiro', 'kiroku', 'data', 'state.json'), 'w') as handle:
+            json.dump({'test_starts': {'old': {'before': [], 'report': REPORT, 'count': 1,
+                                               'overlap': False}}}, handle)
+        self.run_tests([('T', 'a', 'passed')])
+        self.assertEqual(self.events()[-1]['results']['passed'], ['T::a'])
+
+    def test_missing_helper_module_still_exits_zero_and_logs(self):
+        """配布ファイルが欠けた導入先でも、フックは利用者の作業を止めない。"""
+        alone = os.path.join(self.root, 'alone')
+        os.makedirs(alone)
+        shutil.copyfile(RECORD, os.path.join(alone, 'record.py'))
+        payload = {'cwd': self.root, 'session_id': self.session, 'hook_event_name': 'PreToolUse',
+                   'tool_name': 'execute_bash', 'tool_input': {'command': 'pytest'}}
+        done = subprocess.run([sys.executable, os.path.join(alone, 'record.py')],
+                              input=json.dumps(payload), capture_output=True, text=True, cwd=self.root)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, '', ''))
+        log = os.path.join(self.root, '.kiro', 'kiroku', 'data', 'record-errors.log')
+        with open(log, encoding='utf-8') as handle:
+            self.assertIn('commands', handle.read())
+
+    def test_first_old_report_is_not_attributed_to_failed_runner(self):
+        self.write(REPORT, junit([('Old', 'old', 'passed')]))
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})
+        self.shell('pytest', 2, 'runner did not start')
+        event = self.events()[0]
+        self.assertIsNone(event['results'])
+        self.assertEqual(event['note'], 'report_stale')
+
+    def test_mentioning_a_runner_never_gets_results_and_is_not_counted_as_a_run(self):
+        """言及は結果を持たない。実行か言及か分からないものは、数えずに記録不足として出す。"""
+        self.write(REPORT, junit([('Old', 'old', 'failed')]))
+        commands = ["echo pytest", "printf '%s' pytest", "cat > report.md <<'EOF'\npytest\nEOF",
+                    "rg pytest README.md", "python3 -c 'print(\"pytest\")'"]
+        for command in commands:
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': command}})
+            self.shell(command, 0)
+        events = self.events()
+        self.assertEqual([(e['type'], e['results'], e['matched'], e['note']) for e in events],
+                         [('test_run', None, 'text', 'report_stale')] * len(commands))
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['periods']['全期間']['test_runs'], 0)
+        self.assertEqual(data['test_failures'], [])
+        self.assertEqual(len(data['test_result_gaps']), len(commands))
+        self.assertIn('文面で一致', aggregate.render(data))
+
+    def test_piped_wrapped_and_prefixed_runs_are_read_when_the_report_changes(self):
+        """起動先で照合できない実行も、実行の前後でレポートが変わっていれば結果を取り込む。"""
+        commands = ['pytest -q 2>&1 | tail -20', 'uv run pytest -q', 'PYTHONPATH=. pytest',
+                    'timeout 120 pytest', 'source .venv/bin/activate && pytest -q']
+        for number, command in enumerate(commands):
+            self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                       'tool_input': {'command': command}})
+            time.sleep(0.02)
+            self.write(REPORT, junit([('T', 'case%d' % number, 'passed')]))
+            self.shell(command, 0)
+            event = self.events()[-1]
+            self.assertEqual((event['results']['passed'], event['matched']),
+                             (['T::case%d' % number], 'text'), command)
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['periods']['全期間']['test_runs'], len(commands))
+        self.assertEqual(data['test_result_gaps'], [])
+
+    def test_failed_text_match_without_results_is_also_a_tool_failure(self):
+        self.shell('rg pytest missing.txt', 2, 'No such file')
+        self.assertEqual([e['type'] for e in self.events()], ['test_run', 'tool_failure'])
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['tool_failures'][0]['command_key'], 'rg pytest missing.txt')
+        self.assertEqual(data['periods']['全期間']['test_runs'], 0)
+
     def test_hook_is_silent_and_never_fails(self):
         done = self.shell("ls /no/such/dir", 2, "ls: cannot access")
         self.assertEqual((done.returncode, done.stdout), (0, ""))
@@ -424,10 +549,14 @@ class ClassifyTest(Sandbox):
         xml = ('<testsuites><testsuite name="s" file="spec/login.spec.ts">'
                '<testcase classname="Login page" name="logs in">%s</testcase>'
                '</testsuite></testsuites>')
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})
         self.write(REPORT, xml % "")
         self.shell("pytest", 0)
         self.write("spec/login.spec.ts", "it('logs in', () => { expect(1).toBe(2) })\n")
         time.sleep(0.02)
+        self.hook({'hook_event_name': 'PreToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest'}})
         self.write(REPORT, xml % "<failure/>")
         self.shell("pytest", 1)
         classes, _ = self.classes()
@@ -491,6 +620,47 @@ class FixCandidateTest(Sandbox):
 
 
 class SummaryTest(Sandbox):
+    def test_redirects_preserve_numeric_arguments_and_quoted_operators(self):
+        for command in ('echo 2 > output.txt', 'echo 2 2>error.txt', "echo '&&'"):
+            self.shell(command, 1)
+        groups = {r['command_key']: r['count'] for r in aggregate.aggregate(self.root)['tool_failures']}
+        self.assertEqual(groups['echo 2'], 2)
+        self.assertEqual(groups["echo '&&'"], 1)
+
+    def test_unparsed_commands_group_by_first_command_then_by_leading_words(self):
+        for command in ('npm run build 2>&1 | tail -20', 'npm run build 2>&1 | tail -40', 'npm run build',
+                        'cd web && npm run build | tee log.txt', 'ls $HOME/a $HOME/b', 'ls $HOME/a $HOME/b | wc -l'):
+            self.shell(command, 1)
+        self.write('.kiro/kiroku/data/reports/2026-11-14-0100.md',
+                   '### P1. ビルド\n- 対象の型：`tool:npm run build`\n')
+        data = aggregate.aggregate(self.root)
+        groups = {r['command_key']: r['count'] for r in data['tool_failures']}
+        self.assertEqual(groups, {'npm run build': 4, 'ls $HOME/a $HOME/b': 2})
+        self.assertEqual(data['pending'][0]['recent'], 4)
+        self.assertNotIn('unparsed', aggregate.render(data))
+
+    def test_restored_content_counts_again_after_an_intervening_write(self):
+        for content in ('A', 'B', 'A'):
+            self.write('src/app.py', content)
+            self.saved('src/app.py')
+            self.hook({'hook_event_name': 'PostToolUse', 'tool_name': 'str_replace',
+                       'tool_input': {'path': 'src/app.py'}})
+        data = aggregate.aggregate(self.root, by='all')
+        self.assertEqual(data['periods']['全期間']['writes'], 3)
+
+    def test_directory_wrapper_preserves_failure_identity_and_tracking(self):
+        self.shell("make test", 2)
+        self.session = "sess_other"
+        self.shell('cd "%s" && make test' % self.root, 2)
+        self.shell('cd "%s" && python -m unittest' % self.root, 127)
+        self.write(".kiro/kiroku/data/reports/2026-11-14-0100.md",
+                   "### P1. テスト実行\n- 対象の型：`tool:make test`\n")
+        data = aggregate.aggregate(self.root)
+        groups = {r["command_key"]: (r["count"], r["sessions"]) for r in data["tool_failures"]}
+        self.assertEqual(groups["make test"], (2, 2))
+        self.assertEqual(groups["python -m unittest"], (1, 1))
+        self.assertEqual(data["pending"][0]["recent"], 2)
+
     def test_summary_groups_repeated_tool_failures(self):
         for _ in range(3):
             self.shell("npm run build", 1, "error TS2304: Cannot find name")

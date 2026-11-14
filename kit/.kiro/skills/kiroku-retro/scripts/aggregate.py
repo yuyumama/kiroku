@@ -47,13 +47,15 @@ import harness  # noqa: E402
 import notes  # noqa: E402
 import ledger  # noqa: E402
 import excerpt  # noqa: E402
+import commands  # noqa: E402
+import reportcheck  # noqa: E402
 from record import load_config, mask, not_run_kind  # noqa: E402
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
 TOOL_KINDS = (("tool_failure", "tool", "ツール失敗"), ("tool_cancelled", "cancelled", "人による取り消し"),
               ("tool_timeout", "timeout", "タイムアウト"), ("tool_denied", "denied", "権限の規則による拒否"))
-SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "sessions")
+SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "sessions", "facts")
 OUTPUT_CAPS = (12, 6, 3)  # 一覧1つあたりの件数。出力が長すぎるときは、順に小さくする
 VCS_ACTIONS = ("merge", "pull", "rebase", "checkout", "reset", "cherry-pick", "revert",
                "commit (merge)", "am", "switch", "restore")
@@ -347,8 +349,8 @@ def rework_candidates(events):
 
 
 def command_key(command):
-    """似たコマンドをまとめるための見出し。先頭の3語まで。"""
-    return " ".join((command or "").split()[:3])[:60]
+    """作業場所の指定、リダイレクト、パイプ以降を除いた実コマンド。解釈できなければ先頭の3語。"""
+    return commands.key(mask(command or ""))
 
 
 def period_key(moment, by):
@@ -380,16 +382,31 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     all_events, all_failures = events, failures
     findings, note_problems = notes.verify(root)
 
-    def occurrences(target):
-        """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。"""
+    def occurrences(target, report=None):
+        """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。
+
+        report は、その案が書かれたレポート名。失敗の見出しの形式を見分けるのに使う。
+        """
         kind, _, name = (target or "").partition(":")
         if kind == "topic":
             return [f["_time"] for f in findings
                     if f["status"] == "verified" and f["topic"] == name and f["_time"]]
         if kind in ("tool", "denied", "cancelled", "timeout"):
             wanted = {short: name for name, short, _ in TOOL_KINDS}[kind]
-            return [e["_time"] for e in all_events
-                    if e.get("type") == wanted and command_key(e.get("command")) == name]
+            matching = [e for e in all_events if e.get("type") == wanted]
+            exact = [e['_time'] for e in matching if command_key(e.get('command')) == name]
+            if ledger.current_keys(root, report):
+                return exact
+            # 旧版のレポートの対象は「先頭3語が同じ失敗すべて」を指す。その失敗がすべて
+            # 今の同じ見出しに入るときだけ引き継ぐ。完全に一致する実行があっても、
+            # ほかの見出しに分かれる実行が含まれるなら、対象が狭まるので数えない。
+            legacy = {command_key(e.get('command')) for e in matching
+                      if ' '.join((e.get('command') or '').split()[:3])[:60] == name}
+            if len(legacy) > 1:
+                return None
+            if legacy and legacy != {name}:
+                return [e['_time'] for e in matching if command_key(e.get('command')) in legacy]
+            return exact
         if kind == "test":
             return [f["_time"] for f in all_failures if f["class"] == REGRESSION and f["test_id"] == name]
         return None
@@ -399,7 +416,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                                         datetime.datetime.now(datetime.timezone.utc))
     pending = []
     for proposal in ledger.pending(root):
-        times = occurrences(proposal["target"]) if proposal["target"] else None
+        times = occurrences(proposal["target"], proposal["report"]) if proposal["target"] else None
         recent = None if times is None else sum(
             1 for t in times if (since is None or t >= since) and (until is None or t < until))
         pending.append(dict(proposal, recent=recent))
@@ -411,7 +428,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     periods = collections.OrderedDict()
     columns = ("sessions", "test_runs", RED, REGRESSION, MERGE, OTHER, "tool_failures", "cancelled",
                "timeouts", "denied", "writes", "prompts")
-    seen_writes = set()
+    last_writes, turns = {}, collections.Counter()
 
     def bucket(moment):
         return periods.setdefault(period_key(moment, by), {c: 0 for c in columns} | {"_s": set()})
@@ -421,9 +438,12 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         row["_s"].add(event.get("session_id"))
         kind = event.get("type")
         if kind == "test_run":
-            row["test_runs"] += 1
+            # 文面だけで一致し、結果も取り込めなかったものは、実行か言及か分からないので数えない。
+            if event.get("matched") != "text" or event.get("results") is not None:
+                row["test_runs"] += 1
         elif kind == "prompt":
             row["prompts"] += 1
+            turns[event.get("session_id")] += 1
         elif kind == "tool_failure":
             row["tool_failures"] += 1
         elif kind == "tool_cancelled":
@@ -434,9 +454,11 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             row["denied"] += 1
         elif kind == "write":
             # 1回の書き込みは PostFileSave と PostToolUse の両方で記録されるので、まとめて数える。
-            key = (event.get("session_id"), event.get("path"), event.get("hash"))
-            if key not in seen_writes:
-                seen_writes.add(key)
+            session = event.get("session_id")
+            key = (session, event.get("path"))
+            version = (event.get("hash"), turns[session], period_key(event["_time"], by))
+            if key not in last_writes or last_writes[key] != version:
+                last_writes[key] = version
                 row["writes"] += 1
     for failure in failures:
         bucket(failure["_time"])[failure["class"]] += 1
@@ -492,7 +514,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                 "before_first": before, "after_first": len(log_only) - before if first else None,
                 "record_errors": record_errors, "retro_sessions": len(retro),
                 "retro_excluded": retro_excluded}
-    return {
+    result = {
         "since": since.isoformat() if since else None,
         "until": until.isoformat() if until else None,
         "event_count": len(events),
@@ -503,6 +525,13 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "recording_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
                             "reason": e.get("reason"), "tool": e.get("tool")}
                            for e in events if e.get("type") == "recording_gap"],
+        "test_result_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
+                              "command": e.get("command"), "reason": e.get("note") or 'unknown',
+                              "matched": e.get("matched") or 'invocation'}
+                             for e in events if e.get("type") == "test_run" and e.get("results") is None],
+        "test_configuration": [{k: mask(t.get(k)) for k in ('match', 'report', 'format')}
+                               for t in load_config(root)['tests']],
+        "execution_context": prompts.execution_context(root),
         "rework_candidates": rework_candidates(events),
         "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit)
         if with_prompts else None,
@@ -518,6 +547,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "fix_candidates": candidates,
         "fix_excluded": excluded,
     }
+    result['report_facts'] = reportcheck.facts(result)
+    return result
 
 
 def capped(rows, cap, section):
@@ -529,12 +560,18 @@ def capped(rows, cap, section):
 
 def render(data, show_prompts=False, section=None, cap=None):
     """集約をテキストにする。section を指定すると、その節だけを全件出す。"""
+    if section == 'facts':
+        return '# レポート用の検証値\n\n```kiroku-facts\n' + json.dumps(
+            data['report_facts'], ensure_ascii=False, indent=2) + '\n```\n'
     def want(name):
         return section in (None, name)
 
     lines = ["# kiroku 集約", ""]
     lines.append("- 期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"))
     lines.append("- イベント数：%d" % data["event_count"])
+    context = data['execution_context']
+    lines.append('- 実行エージェント：%s（%s）' % (context['agent'] or '未確認', context['status']))
+    lines.append('- レポートの検証値は `--section facts`、保存後の照合は `--check-report <パス>` で確認します。')
     lines.append("- レポートの保存先：.kiro/kiroku/data/reports/%s.md"
                  % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
     if section is None and cap is not None:
@@ -601,7 +638,7 @@ def render_summary(data, cap):
         lines.append("  - テスト失敗、ツール失敗、書き込みの数は、記録がある %d 件だけが対象です。"
                      "ログのみのセッションで何も起きなかったという意味ではありません。" % cover["recorded"])
         if cover["first_event"]:
-            lines.append("  - 最初の記録は %s。ログのみのうち、それより前のもの %d 件（記録を始める前）、"
+            lines.append("  - 現在残っている最古の記録は %s。ログのみのうち、それより前のもの %d 件（記録が無い原因は未確認）、"
                          "後のもの %d 件（フックが動かなかった可能性。原因は未確認）。" % (
                              cover["first_event"], cover["before_first"], cover["after_first"]))
         else:
@@ -611,6 +648,18 @@ def render_summary(data, cap):
     if cover["retro_sessions"]:
         lines.append("- 振り返りを始めた後の発話と記録は除いています（%d セッション、イベント %d 件）。" % (
             cover["retro_sessions"], cover["retro_excluded"]))
+
+    if not any(p['test_runs'] for p in data['periods'].values()):
+        lines.append('- テスト実行の記録が0件です。テストが成功した証拠ではありません。実行コマンド・検出設定・JUnit 出力を照合してください。')
+    if data['test_result_gaps']:
+        lines += ['', '## テスト結果の記録不足（%d 件）' % len(data['test_result_gaps']), '']
+        rows, more = capped(data['test_result_gaps'], cap, 'summary')
+        for row in rows:
+            lines.append('- %s session `%s`: %s%s。コマンド `%s`' % (
+                row['ts'], row['session_id'], row['reason'],
+                '（文面で一致。テストの実行か、名前への言及かは未確認）' if row['matched'] == 'text' else '',
+                shorten(row['command'], 200)))
+        lines += more
 
     if data["recording_gaps"]:
         lines += ["", "## 記録の不足（成功・失敗を判定できない実行：%d 件）" % len(data["recording_gaps"]), ""]
@@ -845,12 +894,13 @@ def render_sessions(sessions, cap=None):
     rows, more = capped(sessions, cap, "sessions")
     lines = ["", "## セッション一覧（%d 件、新しい順）" % len(sessions), "",
              "会話は `--session <session_id>` で1件ずつ読みます。", "",
-             "| session | 最後の活動 | 記録 | ログ | 発話 | 発話の文字数 | 振り返りノート |",
-             "|---|---|---|---|---|---|---|"]
+             "| session | 最後の活動 | 記録 | ログ | 発話 | 発話の文字数 | 振り返りノート | 記録されたエージェント |",
+             "|---|---|---|---|---|---|---|---|"]
     for row in rows:
-        lines.append("| `%s` | %s | %s | %s | %d | %d | %s |" % (
+        lines.append("| `%s` | %s | %s | %s | %d | %d | %s | %s |" % (
             row["session_id"], row["last_activity"], "あり" if row["recorded"] else "ログのみ",
-            row["log"], row["prompts"], row["prompt_chars"], NOTE_LABELS[row["note"]]))
+            row["log"], row["prompts"], row["prompt_chars"], NOTE_LABELS[row["note"]],
+            mask(row.get('agent') or '未確認')))
     if more:
         lines += [""] + more
     return lines
@@ -859,6 +909,7 @@ def render_sessions(sessions, cap=None):
 def render_session(view):
     lines = ["# セッションの要約表示 `%s`" % view["session_id"], "",
              "- ログの状態：%s" % view["status"],
+             "- 記録されたエージェント：`%s`（session.json、取れない場合は未確認。途中の切り替えは未復元）" % mask(view.get('agent') or '未確認'),
              "- ユーザー発話：%d 件" % len(view["turns"]),
              "- ユーザー発話は原文、ツール実行は件数、応答は最後の1件の冒頭だけです。",
              "- 応答やその後の作業を根拠に書くときは、抜粋で本文を確かめます。",
@@ -890,6 +941,8 @@ def main(argv=None):
     parser.add_argument("--until", default=None, help="終了。日数または日付")
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
+    parser.add_argument("--require-agent", action="store_true", help="専用エージェントの起動を確認してから進む")
+    parser.add_argument("--check-report", help="レポートの検証値と対象の型を記録と照合する")
     parser.add_argument("--section", choices=SECTIONS, help="この節だけを、件数を絞らずに出す")
     parser.add_argument("--session", help="このセッションだけを要約表示する")
     parser.add_argument("--user-chars", type=int, default=1500, help="要約表示で、発話1件の最大文字数（既定 1500）")
@@ -906,7 +959,26 @@ def main(argv=None):
     if root is None:
         top = Repo(os.getcwd()).git("rev-parse", "--show-toplevel")
         root = top.strip() if top else os.getcwd()
+    if args.require_agent and prompts.execution_context(root)['status'] != 'verified':
+        print('専用エージェントを確認できません。kiro-cli --agent kiroku-retro で起動し、/kiroku-retro を実行してください。')
+        return 1
     now = datetime.datetime.now(datetime.timezone.utc)
+    if args.check_report:
+        try:
+            with open(args.check_report, encoding='utf-8') as handle:
+                body = handle.read()
+            declared = reportcheck.extract(body)
+            start = parse_bound(declared['since'], now) if declared['since'] else None
+            end = parse_bound(declared['until'], now) if declared['until'] else None
+            expected = aggregate(root, start, end)['report_facts']
+            errors = reportcheck.validate(body, expected)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            errors = ['レポートを検査できません：' + str(exc)]
+        for error in errors:
+            print(mask(error))
+        if not errors:
+            print('検証値と対象の型は記録と一致します。本文の意味・提案の妥当性は別に確認してください。')
+        return 1 if errors else 0
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else now
     if args.session:
@@ -936,4 +1008,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

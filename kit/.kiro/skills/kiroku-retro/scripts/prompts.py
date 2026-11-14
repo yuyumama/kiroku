@@ -10,7 +10,8 @@ import json
 import os
 
 import excerpt
-from record import RETRO_COMMAND_RE, load_config, load_state, mask
+from record import load_config, load_state, mask
+import commands
 
 DUPLICATE_WINDOW = 8    # 同じ発話の二重記録とみなす、ログ上の距離（項目数）
 DUPLICATE_MIN_CHARS = 12  # これより短い発話は、同じ内容でも重複とみなさない
@@ -27,6 +28,29 @@ def sessions_dir(root):
 
 def notes_dir(root):
     return os.path.join(root, ".kiro", "kiroku", "data", "notes")
+
+
+def session_agent(root, session):
+    """session.json に記録されたプロファイル名。無ければ推測せず None。"""
+    path = excerpt.find_log(session, sessions_dir(root)) if session else None
+    if path:
+        try:
+            with open(os.path.join(os.path.dirname(path), 'session.json'), encoding='utf-8-sig') as handle:
+                meta = json.load(handle)
+            agent = meta.get('agentMode')
+            if isinstance(agent, str):
+                return agent
+        except (OSError, ValueError, AttributeError):
+            pass
+    return None
+
+
+def execution_context(root):
+    """現在のセッションのプロファイルを確認する。取れないときは未確認。"""
+    session = os.environ.get('KIRO_SESSION_ID')
+    agent = session_agent(root, session)
+    return {'session_id': session, 'agent': agent,
+            'status': 'unverified' if agent is None else 'verified' if agent == 'kiroku-retro' else 'wrong_agent'}
 
 
 def _in_period(moment, since, until):
@@ -91,7 +115,7 @@ def retro_start(rows, mark=None):
             hit = excerpt.content_text(payload).lstrip().startswith("/kiroku-retro")
         elif kind == "tool_call":
             command = (payload.get("args") or {}).get("command")
-            hit = isinstance(command, str) and bool(RETRO_COMMAND_RE.search(command))
+            hit = commands.own_script(command) == 'aggregate.py'
         else:
             hit = False
         moment = excerpt.parse_time(stamp) if hit else None
@@ -169,7 +193,8 @@ def sessions(root, events, since=None, until=None):
     rows = []
     for session in names:
         recorded = session in last_event
-        row = {"session_id": session, "last_event": last_event.get(session), "recorded": recorded,
+        row = {"session_id": session, "agent": session_agent(root, session),
+               "last_event": last_event.get(session), "recorded": recorded,
                "log": "ok", "prompts": 0, "prompt_chars": 0, "note": "none"}
         latest = None
         path = excerpt.find_log(session, directory)
@@ -228,7 +253,8 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
     ユーザー発話は原文（長ければ頭と末尾）。次の発話までのツール実行は件数だけ、
     応答は最後の1件の冒頭だけを添える。全文が要る箇所は excerpt.py --index で読む。
     """
-    result = {"session_id": session, "status": "ok", "issues": [], "turns": []}
+    result = {"session_id": session, "agent": session_agent(root, session),
+              "status": "ok", "issues": [], "turns": []}
     path = excerpt.find_log(session, sessions_dir(root))
     if not path:
         result["status"] = "missing_log"

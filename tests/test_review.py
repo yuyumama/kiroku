@@ -133,6 +133,28 @@ class NotesTest(ReviewSandbox):
 
 
 class LedgerTest(ReviewSandbox):
+    def test_old_broad_target_is_unknown_when_commands_are_ambiguous(self):
+        self.shell('cd /tmp && make test', 2)
+        self.shell('cd /tmp && make lint', 2)
+        self.report('2026-11-14-0100', '### P1. 以前の案\n- 対象の型：`tool:cd /tmp &&`\n')
+        self.assertIsNone(aggregate.aggregate(self.root)['pending'][0]['recent'])
+
+    def test_old_target_is_unknown_when_an_exact_match_hides_other_commands(self):
+        """旧版の対象は先頭3語が同じ失敗すべて。完全一致の実行だけを数えて対象を狭めない。"""
+        self.shell('npm run build', 1)
+        self.shell('npm run build --production', 1)
+        self.report('2026-11-01-0900', '### P1. 旧版の案\n- 対象の型：`tool:npm run build`\n')
+        self.assertIsNone(aggregate.aggregate(self.root)['pending'][0]['recent'])
+        self.assertEqual(self.cli('adopt', 'P1').returncode, 0)
+        self.assertEqual(aggregate.aggregate(self.root)['adopted'][0]['verdict'], '対象の型を数えられない')
+
+    def test_current_report_target_counts_only_its_own_command(self):
+        self.shell('npm run build', 1)
+        self.shell('npm run build --production', 1)
+        self.report('2026-11-14-0900', '### P1. 今の版の案\n- 対象の型：`tool:npm run build`\n\n'
+                    '```kiroku-facts\n{}\n```\n')
+        self.assertEqual(aggregate.aggregate(self.root)['pending'][0]['recent'], 1)
+
     REPORT = ("# 振り返り\n\n## ハーネスへの改善案（プロジェクト内）\n\n"
               "### P1. ビルド前に依存を入れる hook を足す\n\n- 区分：実績に基づく改善\n"
               "- 対象の型：`tool:npm run build`\n\n"
@@ -142,6 +164,16 @@ class LedgerTest(ReviewSandbox):
     def cli(self, *args):
         return subprocess.run([sys.executable, LEDGER, "--root", self.root] + list(args),
                               capture_output=True, text=True)
+
+    def test_latest_report_without_proposals_retires_old_bare_numbers(self):
+        self.report("2026-11-01-0900", self.REPORT)
+        self.report("2026-11-08-0900", "# 振り返り\n\n改善案なし\n")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["pending"], [])
+        self.assertEqual(self.cli("adopt", "P1").returncode, 1)
+        self.assertEqual(ledger.decisions(self.root), {})
+        self.assertIn("古いレポート", self.cli("list").stdout)
+        self.assertEqual(self.cli("adopt", "2026-11-01-0900#P1").returncode, 0)
 
     def test_cli_reads_proposals_and_records_decisions(self):
         self.report("2026-11-01-0900", "### P1. 古い案\n- 対象の型：`tool:old`\n")
@@ -202,6 +234,25 @@ class LedgerTest(ReviewSandbox):
 
 
 class DiscoveryTest(ReviewSandbox):
+    def test_session_agent_is_available_in_summary_and_report_facts(self):
+        self.log('sess_actor', ['今後の完了報告は短くしてください'])
+        path = self.home / 'sessions/0123456789abcdef/sess_actor/session.json'
+        meta = json.loads(path.read_text(encoding='utf-8'))
+        meta['agentMode'] = 'kiroku-live-driver'
+        path.write_text(json.dumps(meta), encoding='utf-8')
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data['report_facts']['session_agents'], {'sess_actor': 'kiroku-live-driver'})
+        view = aggregate.prompts.distill(self.root, 'sess_actor')
+        self.assertIn('kiroku-live-driver', aggregate.render_session(view))
+        self.assertIn('kiroku-live-driver', aggregate.render(data))
+
+    def test_oldest_retained_event_does_not_claim_recording_start(self):
+        self.log('old', ['古い会話'], days_ago=2)
+        self.shell('make test', 2)
+        text = aggregate.render(aggregate.aggregate(self.root))
+        self.assertNotIn('記録を始める前', text)
+        self.assertIn('原因は未確認', text)
+
     def test_sessions_without_events_are_found_by_workspace(self):
         self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "x"})   # sess_test は記録あり
         self.log(self.session, ["記録のあるセッション"])
@@ -381,6 +432,13 @@ class ConfigTest(ReviewSandbox):
 
 
 class RetroFeedbackTest(ReviewSandbox):
+    def test_mentioning_aggregate_does_not_end_development_recording(self):
+        self.shell('echo ".kiro/skills/kiroku-retro/scripts/aggregate.py"', 0)
+        self.shell('make build', 2, 'boom')
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data['event_count'], 1)
+        self.assertEqual(data['tool_failures'][0]['command_key'], 'make build')
+
     """振り返りを実際に回して分かった不具合の再発防止。"""
 
     def messages(self, session, rows, start=None):

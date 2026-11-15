@@ -251,6 +251,29 @@ def _kiro_meta(payload):
     return kiro if isinstance(kiro, dict) else {}
 
 
+def hook_triggers(root):
+    """フックの定義ファイルから、{フック名: トリガー（小文字）} を読む。
+
+    プロジェクト内（.kiro/hooks/）と、ユーザー共通（~/.kiro/hooks/、KIRO_HOME があればその配下）。
+    セッションログのフックの記録には、どのトリガーで動いたかが無い。実行を止められるのは
+    実行前（PreToolUse）のフックだけなので、候補を絞るために定義から引く。
+    """
+    home = os.environ.get("KIRO_HOME") or os.path.join(os.path.expanduser("~"), ".kiro")
+    found = {}
+    for directory in (os.path.join(home, "hooks"), os.path.join(root, ".kiro", "hooks")):
+        for path in sorted(glob.glob(os.path.join(glob.escape(directory), "*.json"))):
+            try:
+                with open(path, encoding="utf-8-sig") as handle:
+                    hooks = json.load(handle).get("hooks")
+            except (OSError, ValueError, AttributeError):
+                continue
+            for hook in hooks if isinstance(hooks, list) else []:
+                if isinstance(hook, dict) and isinstance(hook.get("name"), str) \
+                        and isinstance(hook.get("trigger"), str):
+                    found[hook["name"]] = hook["trigger"].lower()
+    return found
+
+
 def unrecorded_calls(root, session_ids, since=None, until=None):
     """実行後のフックが呼ばれなかったシェル実行を、セッションログから拾う。
 
@@ -263,9 +286,12 @@ def unrecorded_calls(root, session_ids, since=None, until=None):
       - 権限の規則による拒否（policyDenial）ではない
       - 承認画面での取り消し・拒否（interaction_resolved の cancelled／reject）ではない
     止めたフックと理由はログに無い。同じターンでそれまでに動いたフックの名前を、候補として添える。
+    今の定義で実行前（PreToolUse）以外と分かるフックは、実行を止められないので候補から外す。
+    定義が見つからないフックは、外さずに残す。
     ログの形式は文書化されていないので、当てはまらないものは数えない。
     """
     directory, marks, found = sessions_dir(root), retro_marks(root), []
+    triggers = hook_triggers(root)
     for session in session_ids:
         path = excerpt.find_log(session, directory)
         if not path:
@@ -291,6 +317,7 @@ def unrecorded_calls(root, session_ids, since=None, until=None):
             if kind == "ContextualHookInvoked":
                 name = payload.get("name")
                 if isinstance(name, str) and not name.startswith(OWN_HOOK_PREFIX) \
+                        and triggers.get(name, "pretooluse") == "pretooluse" \
                         and name not in hooks[payload.get("turnId")]:
                     hooks[payload.get("turnId")].append(name)
                 continue

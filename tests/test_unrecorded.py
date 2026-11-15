@@ -192,6 +192,21 @@ class UnrecordedCallTest(ReviewSandbox):
         # 追跡の対象にはしない。レポートの「対象の型」として書かれても、集約にない型として扱う。
         self.assertFalse(any(BLOCKED in key for key in data['report_facts']['targets']))
 
+    def test_hooks_that_cannot_block_are_not_candidates(self):
+        """実機で、発話のときに動く観測用フックが候補に混ざった。実行前のフックだけを候補にする。"""
+        self.write('.kiro/hooks/project.json', json.dumps({'version': 'v1', 'hooks': [
+            {'name': 'guard-shell', 'trigger': 'PreToolUse', 'action': {'type': 'command', 'command': 'x'}},
+            {'name': 'diagnostic-UserPromptSubmit', 'trigger': 'UserPromptSubmit',
+             'action': {'type': 'command', 'command': 'x'}},
+            {'name': 'check-python-syntax', 'trigger': 'PostFileSave',
+             'action': {'type': 'command', 'command': 'x'}}]}))
+        rows = [{'type': 'user', 'content': '実行'}, self.hook_row('diagnostic-UserPromptSubmit'),
+                self.hook_row('check-python-syntax'), self.hook_row('removed-hook'),
+                self.hook_row('guard-shell')] + self.call('c1', BLOCKED, 'denied', '{}')
+        self.session_log('sess_hooks', rows)
+        row = aggregate.aggregate(self.root)['unrecorded_calls'][0]
+        self.assertEqual(row['hooks'], ['removed-hook', 'guard-shell'])   # 定義の無いものは残す
+
     def test_repeats_across_sessions_are_grouped_and_wrappers_are_ignored(self):
         for session, command in (('sess_a', BLOCKED), ('sess_b', 'cd . && ' + BLOCKED + ' 2>&1')):
             self.session_log(session, [{'type': 'user', 'content': '実行'}] + self.call('c', command, 'denied', '{}'))

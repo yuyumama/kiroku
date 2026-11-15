@@ -2,9 +2,11 @@
 """kiroku の記録フック。Kiro CLI（V3）のフックから呼ばれ、.kiro/kiroku/data/events.jsonl に追記する。
 
 対応するフック:
+  PreToolUse    テスト実行の前のレポートの状態（state に控える。イベントは書かない）
   PostToolUse   シェル実行の失敗、テスト実行の結果、書き込みツールが触ったファイル
   PostFileSave  エージェントが保存したファイル
   UserPromptSubmit  発話のタイミングのみ（本文は保存しない）
+  Stop          ターンの終わり。終わりの記録が来なかったテスト実行を閉じる
 
 守ること:
   - 標準出力には何も書かない（終了コード 0 の標準出力はエージェントの文脈に入る）。
@@ -65,7 +67,8 @@ def not_run_kind(output):
     文言で確かめられないものは、拒否とは決めつけず recording_gap にする。
     """
     output = output or ""
-    if "cancelled before it was approved" in output:
+    # 承認画面での Escape／Ctrl+C と、Deny once。どちらも人がその場で実行を断ったもの。
+    if "cancelled before it was approved" in output or "The user rejected this tool call" in output:
         return "tool_cancelled"
     if TIMEOUT_RE.search(output):
         return "tool_timeout"
@@ -292,7 +295,36 @@ def live_starts(state, config):
     return state["test_starts"]
 
 
-def begin_test(payload, root, cwd, retro_dir, config):
+def close_starts(retro_dir, session_id):
+    """このセッションで、終わりの記録が来ないまま残った実行前記録を閉じる。
+
+    別のフックに止められた実行や、実行中に中断された実行では PostToolUse が呼ばれない。
+    残したままにすると、同じレポートを使う次のテスト実行が「重複」と判定されるので、
+    ターンの終わり（Stop）と次の発話（UserPromptSubmit）で閉じ、記録の不足として残す。
+    セッションの分からない記録（この処理を入れる前の版が書いたもの）は、期限に任せる。
+    """
+    if not session_id:
+        return []
+    state = load_state(retro_dir)
+    starts = state.get("test_starts")
+    if not isinstance(starts, dict):
+        return []
+    closed = [key for key, value in starts.items()
+              if isinstance(value, dict) and value.get("session") == session_id]
+    if not closed:
+        return []
+    events = []
+    for key in closed:
+        start = starts.pop(key)
+        count = start.get("count")
+        for _ in range(count if isinstance(count, int) and 0 < count <= 20 else 1):
+            events.append({"type": "recording_gap", "tool": start.get("tool"),
+                           "reason": "test_end_missing"})
+    save_state(retro_dir, state)
+    return events
+
+
+def begin_test(payload, root, cwd, retro_dir, config, session_id=None):
     entry = commands.test_entry((payload.get("tool_input") or {}).get("command"), config)
     if entry is None:
         return
@@ -306,7 +338,8 @@ def begin_test(payload, root, cwd, retro_dir, config):
             overlap = True
     prior = starts.get(key, {})
     starts[key] = {"before": report_stamp(root, entry), "report": entry.get("report"),
-                   "count": prior.get("count", 0) + 1, "overlap": overlap, "at": time.time()}
+                   "count": prior.get("count", 0) + 1, "overlap": overlap, "at": time.time(),
+                   "session": session_id, "tool": payload.get("tool_name")}
     save_state(retro_dir, state)
 
 
@@ -377,13 +410,21 @@ def shell_events(payload, root, cwd, retro_dir, config):
     entry, how = commands.test_match(command, config)
     if entry is not None and exit_code != -1:
         head, dirty, truncated = worktree_state(root, config)
-        results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
+        background = tool_input.get("run_in_background") is True
+        if background:
+            # バックグラウンドの実行では、処理が終わる前にこのフックが呼ばれる。終了コードは
+            # 起動の成否で、レポートもまだ書かれていない。結果は読まず、未完了として残す。
+            results, test_files, note = None, {}, "background_not_finished"
+        else:
+            results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
         event = {
             "type": "test_run", "command": mask(command), "exit_code": exit_code,
             "head": head, "dirty": dirty, "results": results, "test_files": test_files,
         }
         if how == "text":
             event["matched"] = "text"  # 起動先ではなく文面で一致。実行か言及かは、ここでは決めない
+        if background:
+            event["background"] = True
         if truncated:
             event["dirty_truncated"] = True
         vcs = vcs_in_progress(root)
@@ -492,13 +533,17 @@ def main():
             text = payload.get("prompt")
             if not isinstance(text, str):
                 text = os.environ.get("USER_PROMPT") or ""
+            # 次の発話が来たなら、前のターンの実行は終わっている。
+            events = close_starts(retro_dir, session_id)
             # 振り返りの起動そのものは記録しない。
             if text.lstrip().startswith("/kiroku-retro"):
                 mark_retro(retro_dir, session_id, now())
             elif text.strip():
-                events = [{"type": "prompt"}]
+                events.append({"type": "prompt"})
+        elif hook == "Stop":
+            events = close_starts(retro_dir, session_id)
         elif hook == "PreToolUse" and tool in ("execute_bash", "execute_pwsh"):
-            begin_test(payload, root, cwd, retro_dir, config)
+            begin_test(payload, root, cwd, retro_dir, config, session_id)
         elif hook == "PostToolUse" and tool in ("execute_bash", "execute_pwsh"):
             command = (payload.get("tool_input") or {}).get("command")
             if commands.own_script(command) == 'aggregate.py':

@@ -59,7 +59,8 @@ def parse_time(value):
         return None
 
 
-def load(path, issues=None):
+def load(path, issues=None, types=SHOWN_TYPES):
+    """ログの行を読む。types に None を渡すと、すべての種別を返す。"""
     rows = []
     with open(path, encoding="utf-8-sig") as handle:
         for number, line in enumerate(handle, 1):
@@ -78,7 +79,7 @@ def load(path, issues=None):
                 if issues is not None:
                     issues.append("invalid_payload:line_%d" % number)
                 continue
-            if payload.get("type") in SHOWN_TYPES:
+            if types is None or payload.get("type") in types:
                 rows.append((row.get("timestamp"), payload))
     return rows
 

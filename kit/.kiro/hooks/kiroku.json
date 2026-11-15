@@ -41,6 +41,16 @@
         "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py"
       },
       "timeout": 30
+    },
+    {
+      "name": "kiroku-record-turn-end",
+      "description": "ターンの終わりに、終わりの記録が来なかったテスト実行を閉じる",
+      "trigger": "Stop",
+      "action": {
+        "type": "command",
+        "command": "python3 .kiro/skills/kiroku-retro/scripts/record.py"
+      },
+      "timeout": 30
     }
   ]
 }

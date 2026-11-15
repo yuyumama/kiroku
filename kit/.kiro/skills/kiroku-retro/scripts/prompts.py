@@ -8,6 +8,7 @@ import collections
 import glob
 import json
 import os
+import re
 
 import excerpt
 from record import load_config, load_state, mask
@@ -237,6 +238,86 @@ def sessions(root, events, since=None, until=None):
     for row in rows:
         del row["_activity"]
     return rows
+
+
+SHELL_TOOLS = ("execute_bash", "execute_pwsh")
+EXIT_CODE_LINE = re.compile(r"Exit Code:\s*-?\d+")
+OWN_HOOK_PREFIX = "kiroku-record-"
+
+
+def _kiro_meta(payload):
+    meta = payload.get("_meta")
+    kiro = meta.get("kiro") if isinstance(meta, dict) else None
+    return kiro if isinstance(kiro, dict) else {}
+
+
+def unrecorded_calls(root, session_ids, since=None, until=None):
+    """実行後のフックが呼ばれなかったシェル実行を、セッションログから拾う。
+
+    別のフックが実行前に止めた呼び出しと、実行中に中断された呼び出しでは、PostToolUse が
+    呼ばれず、events.jsonl に何も残らない。ログには残るので、集約のときにここで数える。
+
+    拾うのは、次をすべて満たすものだけ（Kiro CLI 3.3.0 で実測した形。verification.md）。
+      - シェル実行の tool_call で、状態が denied または failed
+      - 対応する tool_result の本文に Exit Code の行が無い（あるものは PostToolUse で記録済み）
+      - 権限の規則による拒否（policyDenial）ではない
+      - 承認画面での取り消し・拒否（interaction_resolved の cancelled／reject）ではない
+    止めたフックと理由はログに無い。同じターンでそれまでに動いたフックの名前を、候補として添える。
+    ログの形式は文書化されていないので、当てはまらないものは数えない。
+    """
+    directory, marks, found = sessions_dir(root), retro_marks(root), []
+    for session in session_ids:
+        path = excerpt.find_log(session, directory)
+        if not path:
+            continue
+        try:
+            rows = excerpt.load(path, types=None)
+        except (OSError, UnicodeError):
+            continue
+        cutoff = retro_start([r for r in rows if r[1].get("type") in excerpt.SHOWN_TYPES],
+                             marks.get(session))
+        results, resolved = {}, {}
+        for _, payload in rows:
+            call_id = payload.get("toolCallId")
+            if not isinstance(call_id, str):
+                continue
+            if payload.get("type") == "tool_result":
+                results[call_id] = payload
+            elif payload.get("type") == "interaction_resolved":
+                resolved.setdefault(call_id, []).append(payload)
+        hooks = collections.defaultdict(list)   # ターンごとの、それまでに動いたフックの名前
+        for stamp, payload in rows:
+            kind = payload.get("type")
+            if kind == "ContextualHookInvoked":
+                name = payload.get("name")
+                if isinstance(name, str) and not name.startswith(OWN_HOOK_PREFIX) \
+                        and name not in hooks[payload.get("turnId")]:
+                    hooks[payload.get("turnId")].append(name)
+                continue
+            if kind != "tool_call" or payload.get("toolName") not in SHELL_TOOLS:
+                continue
+            status, call_id = payload.get("status"), payload.get("toolCallId")
+            command = (payload.get("args") or {}).get("command") if isinstance(payload.get("args"), dict) else None
+            result = results.get(call_id)
+            if status not in ("denied", "failed") or not isinstance(command, str) or result is None:
+                continue
+            content = result.get("content")
+            if result.get("success") is not False or not isinstance(content, str) \
+                    or EXIT_CODE_LINE.search(content):
+                continue
+            if "policyDenial" in _kiro_meta(payload):
+                continue
+            if any(item.get("outcome") == "cancelled" or item.get("selectedOption") == "reject"
+                   for item in resolved.get(call_id, [])):
+                continue
+            moment = excerpt.parse_time(stamp)
+            if moment is None or not _in_period(moment, since, until) or (cutoff and moment >= cutoff):
+                continue
+            found.append({"session_id": session, "ts": moment.isoformat(),
+                          "kind": "blocked" if status == "denied" else "interrupted",
+                          "command": mask(command),
+                          "hooks": list(hooks[payload.get("turnId")]) if status == "denied" else []})
+    return found
 
 
 def _clip(text, limit):

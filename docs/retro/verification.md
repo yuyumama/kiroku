@@ -642,3 +642,123 @@ Windows／IDE／headless、ほかの Kiro バージョン、ほかのスラッ�
 ### 未検証
 
 修正後の版での実機確認（依頼は Issue #4 のコメント）。Windows／IDE、headless、ほかの Kiro のバージョン、フックのタイムアウト、書き込みなどシェル以外のツールが止められた場合。
+
+## 2026-11-15：修正版 4f30930 の実機検証
+
+[Issue #4 の依頼](https://github.com/yuyumama/kiroku/issues/4#issuecomment-6889158181)の確認1〜6を実施した。直前の「自動テストのみ・実機未検証」は実装時点の記録であり、以下が修正後の実機結果である。期待と異なる出力・生成レポートは訂正せず保持した。今回の変更は検証文書だけで、配布コードと元のデモは変更していない。既存導入先への影響は「なし」。
+
+### 1. 環境
+
+- 対象：`fix/recording-and-retro-consistency` の `4f309302fde64bdf70e1f5c92ed02a4c332b6b5e`。更新前との比較には main `6519776` を使用。
+- Ubuntu 22.04.4 LTS、Linux 6.8.0-52-generic、Kiro CLI 3.3.0、V3 対話。
+- 対象版を一時領域に展開し、同じ版のデモとインストーラーで、基本動作・背景実行・同一ターンの混在・イベント無し・起動中の更新用の5コピーを作った。すべてリモート未設定の使い捨て Git。
+- 複合コマンド `git push --force --dry-run ; python3 run_tests.py` は、各コピーの guard_shell.py へ標準入力で渡し、終了コード2を先に確認した。実際の push・削除、拒否の回避、`--trust-all-tools` は使用していない。
+- 診断用の UserPromptSubmit／Stop フックと、実行前後の入力・state・JUnit を観測するラッパーは一時コピーだけに置いた。ラッパーは元の record.py に同じ入力を渡し、出力と終了コードをそのまま返した。更新試験では配布定義をそのまま使用した。
+- 振り返りは配布版 kiroku-retro の定義・権限を変更せずに実行した。skill のロードと、そのセッションだけの読み取りを承認した。シェルの deny 規則は緩めていない。
+- エージェントの完了申告ではなく、ログ、観測フック、state、イベント、集約、JUnit を照合した。ツール未呼び出しの完了申告は実行証拠に数えていない。生ログ、個別セッションID、発話本文、個人設定は転載しない。
+
+対象版の `python3 -B -m unittest discover -s tests` は138件成功。以下の Kiro 実機観測とは区別する。
+
+### 2. 確認1〜6の結果
+
+| 確認 | 判定 | 結果 |
+|---|---|---|
+| 1：5本の読み込み・Stop で閉じる | 一致 | 開始記録0件、test_end_missing 1件、次の通常テストは11件成功 |
+| 2：中断後の次の発話で閉じる | 一致 | 中断直後1件、次の発話後0件。次の通常テストは11件成功 |
+| 3：集約の排他・回数・候補 | 部分不一致 | 6ケースの回数と除外は一致。候補に関係のない UserPromptSubmit フックが混入 |
+| 4：背景テスト | 一致 | 入力の true を実測。background_not_finished で記録し、通常実行を妨げない |
+| 5：起動中の更新 | 一致（旧形式は模擬入力による互換性確認を含む） | 再起動せず新しい Stop が動作。設定・データを保持、記録エラーなし |
+| 6：振り返り | 部分不一致 | 検査・表示先・専用セッションの除外は一致。本文に未確認の原因断定と実測に合わない推測 |
+
+#### 確認1：Stop による終了と、通常テストの復旧
+
+`/hooks` で kiroku の記録フック5本（test-start、tool、file、prompt、turn-end）が読み込まれていることを確認した。デモの2本と診断用2本を含む一覧は9本だった。新しい kiroku-record-turn-end の実発火もログで確認した。
+
+複合コマンドの実呼び出しは `status=denied / success=false / content="{}"`。PostToolUse は無かった。Pre のラッパーでは開始1件を確認し、そのターンの Stop 後には `test_starts={}`、追加イベントは `type=recording_gap / reason=test_end_missing` 1件だった。
+
+続く通常の `python3 run_tests.py` は、終了コード0、`results.passed` 11件、failed／error／skipped 各0件。`note` は null ではなく**キー自体が無い**。ambiguous_test_run は出なかった。集約の summary に test_end_missing と「テスト実行の終わりが記録されなかった（別のフックによる停止、または中断の可能性）」の説明が出た。
+
+#### 確認2：実行中の中断と、次の発話
+
+一時コピーに、開始を診断記録へ書き、固定の30秒待機後に run_tests.py を呼ぶ `interrupt_run_tests.py` を置いた。名前は既存のテスト検出に一致する。Allow once の後、スクリプトの開始記録を実際に確認してから Ctrl+C を送った。
+
+中断は `status=failed / success=false`、応答に Exit Code は無く、PostToolUse と Stop は無かった。中断直後の開始記録は1件。普通の発話を同じセッションへ送ると UserPromptSubmit で0件になり、test_end_missing が**追加で1件**残った。確認1と合わせた記録不足は2件であり、1回の中断を2回閉じたものではない。
+
+次の通常テストも11件成功、note キー無しで取り込まれた。待機スクリプトの終了記録は生成されておらず、正常完了したものとは扱っていない。
+
+#### 確認3：6ケースと、イベント無し・混在のセッション
+
+基本動作の1つの導入先で、以下を実際に1回ずつ起こした。停止と中断には確認1・2の呼び出しを使用した。
+
+| 起こしたこと・固定コマンド | 集約の節 | 件数 | 停止／中断への誤加算 |
+|---|---|---:|---|
+| フック停止：`git push --force --dry-run ; python3 run_tests.py` | 実行前に止められた呼び出し | 1 | 中断へは0 |
+| 実行中 Ctrl+C：`python3 interrupt_run_tests.py` | 実行中に中断された呼び出し | 1 | 停止へは0 |
+| agent-profile の deny：`printf KIROKU_PERMISSION_DENY` | 権限の規則による拒否 | 1 | 両方0 |
+| Deny once：`printf KIROKU_DENY_ONCE` | 人による取り消し | 1 | 両方0 |
+| 承認画面 Escape：`printf KIROKU_ESCAPE` | 人による取り消し | 1 | 両方0 |
+| 通常失敗：`ls /no/such/kiroku-fixed` | ツール失敗 | 1 | 両方0 |
+
+Deny once と Escape は両方とも `tool_cancelled` となり、unknown_not_run は出なかった。集約には取り消し2種類がそれぞれ1回ずつ出た。基本動作の集約は18イベント、通常テスト2回。終了しなかったテスト開始についての test_end_missing 2件は、停止・中断の表示とは別の「記録の不足」として出ている。
+
+候補には guard-shell が含まれ、`kiroku-record-` のフックは含まれなかった。しかし **diagnostic-UserPromptSubmit も含まれた**。この観測フックは UserPromptSubmit で時刻を控えるだけのもので、PreToolUse ではない。候補に関係のないフックが出ないという期待には不一致だった。
+
+別コピーでは kiroku の記録フック定義だけを外し、guard-shell と観測フックは残した。events.jsonl の存在しないセッションで停止の実呼び出し1件を起こすと、summary はイベント0件・ログのみ1セッション、tools は停止1回を表示した。「イベント無し」でも拾えることを確認したもので、Kiro のフック発火ログまで無いという意味ではない。
+
+さらに別コピーの同一ターンで、停止する `git push --force --dry-run` と、独立した `printf KIROKU_MIXED_OK` を別々に実行した。turnId／executionId は同じで、前者だけ denied、後者は completed。PostToolUse は後者だけだった。集約は停止1回・中断0回で、正常な printf は追加されなかった。ここでも候補名の不一致は同じだった。
+
+#### 確認4：バックグラウンド
+
+一時スクリプト `diagnostic_run_tests.py` で、開始記録、固定の12秒待機、run_tests.py、終了記録を実行した。ログの args.run_in_background だけでなく、**PostToolUse の入力 tool_input.run_in_background が boolean の true** であることをラッパーで確認した。
+
+実行後フックは処理完了前に来て、tool_response に Exit Code: 0 があった。その時点ではJUnitは未生成だった。記録は期待どおり、`type=test_run / results=null / note=background_not_finished / background=true`。開始記録は消費されて0件になり、Stop による test_end_missing は追加されなかった。
+
+背景処理の終了後、本物のJUnitで11件・失敗0・エラー0を確認してから、通常の run_tests.py を実行した。こちらは11件成功・note キー無しで取り込まれた。集約は test_run イベント2件に対してテスト実行回数1回（通常分だけ）となり、背景分は「テスト結果の記録不足」に「バックグラウンドで起動」と表示された。
+
+#### 確認5：旧mainからの更新
+
+main `6519776` を導入した別コピーの Kiro を起動し、通常テスト1回の実記録を作った。保持検査用のノート1ファイルも固定の内容で用意した。**同じ Kiro セッションを開いたまま**修正版の `--update` を実行した。
+
+更新されたのは次の6ファイル。新規0、更新6、変更なし9で、config.json は導入先の設定として保持された。
+
+- .kiro/hooks/kiroku.json
+- .kiro/skills/kiroku-retro/SKILL.md
+- .kiro/skills/kiroku-retro/scripts/aggregate.py
+- .kiro/skills/kiroku-retro/scripts/excerpt.py
+- .kiro/skills/kiroku-retro/scripts/prompts.py
+- .kiro/skills/kiroku-retro/scripts/record.py
+
+インストーラーの実行前後で、config.json・events.jsonl・試験用ノート・state.json のハッシュはすべて一致した。更新後、同じセッションの /hooks に新しい Stop が現れた。複合コマンドの停止で開始記録0件・test_end_missing 1件となり、次の通常テストも11件成功・note キー無し。再起動は不要だった。
+
+旧形式の確認では、更新後のコピーに**旧mainの record.py へ模擬 PreToolUse 入力を渡し**、session フィールドの無い開始記録を1件作った。その状態で、開いたままの実機セッションへ通常の発話を送り、新版の UserPromptSubmit／Stop を動かした。旧記録は1件のまま残り、record-errors.log は生成されなかった。旧記録はセッションで閉じず期限に任せるという実装と整合する。これは旧スクリプトが生成する形式の互換性確認であり、旧Kiroの異常終了を再現したものではない。
+
+検証対象の更新影響は、今回の Linux／V3 対話・起動済みセッションでは「`--update` だけで済む」と確認した。
+
+#### 確認6：専用エージェントでの振り返り
+
+基本動作の導入先で、配布版 kiroku-retro を起動し `/kiroku-retro` を実行した。
+
+- 最初の `aggregate.py --since 7d --require-agent`、facts の取得、保存後の `--check-report ... --require-agent` は、実際のツール結果で終了コード0を確認した。外からの再検査（require-agent 無し）も0。
+- レポート `2026-11-15-1409.md`、ノート1件、提案2件を生成。停止・中断を「対象の型」には書かず、「記録の不足、確認事項」に各1回と固定コマンドを書いていた。
+- ただし本文の別箇所に、未確認の停止原因の断定と、承認事実に合わない推測が残った。詳細は次節のとおり。生成物は訂正していない。
+- レポート保存後、同じ振り返りセッションで固定の `printf KIROKU_RETRO_PERMISSION_DENY` を1回だけ要求し、agent-profile による実際の拒否を起こした。policyDenial があり、Exit Code: -1、tool_denied が記録された。拒否後の再試行はしていない。
+- この診断の発話・拒否で生イベントは20件になったが、集約は振り返りセッションの2件を除外して18件のまま。停止1回・中断1回・開発時の権限拒否1回も増えなかった。再検査も0で、専用エージェント自身の拒否が混ざらないことを確認した。
+- レポート・ノート以外の保全対象45ファイルは集合と内容が完全一致。台帳は作らず、採用・見送りも記録していない。
+
+### 3. 不一致の詳細
+
+| 対象 | 期待 | 実際 |
+|---|---|---|
+| 確認3：候補のフック名 | 関係のないフックが含まれない | 候補は guard-shell と diagnostic-UserPromptSubmit。後者は観測用 UserPromptSubmit であり、停止とは無関係 |
+| 確認6：停止原因の説明 | 確認していない候補は原因と断定しない | 「記録の不足、確認事項」では未確認とした一方、「様子見」では「guard-shell による強制 push 停止」と断定した。ツールログに guard_shell.py 本文の読み取りは無かった |
+| 確認6：実行中の中断 | 承認済みで開始したという実測と矛盾しない | 「利用者が承認しなかった可能性」と推測。実ログの interaction_resolved は selectedOption=accept で、診断スクリプトの開始記録もあった |
+
+候補の混入は観測用フックを置いた条件で実測したもので、無計測のデモに同名のフックがあるという意味ではない。検査スクリプトが成功しても、本文中の原因説明や推測までは保証されなかった。以上は修正せず、そのまま結果として報告する。
+
+### 4. 未確認と限界
+
+Windows／IDE／headless、ほかの Kiro バージョン、フックのタイムアウト・プロセス異常終了、同一コマンドの並行実行、実行中のツール処理と同時に更新する場合は未確認。更新は Kiro を起動したまま、ターンが終わった状態で行った。旧形式の開始記録が実機の異常終了で残る過程と、3600秒経過後の実機動作は再現していない。
+
+背景実行は1回の成功する処理を確認したもので、完了結果を後から自動取得する方式は対象外。シェル以外の停止、長期運用、提案採用後の効果は未確認。振り返り本文には上記の不一致が残るため、機械検査の成功をレポート全体の妥当性とは扱わない。
+
+今回の対象は `4f30930` であり、その後の修正は含めない。配布コード・デモ・生成レポートを直して期待値に合わせることは行っていない。

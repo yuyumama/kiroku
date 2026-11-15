@@ -383,9 +383,11 @@ def begin_test(payload, root, cwd, retro_dir, config, session_id=None):
         if not may_share_report(active.get("report"), entry.get("report")):
             continue
         if active.get("background"):
-            # バックグラウンドで起動した実行。レポートが起動のときから変わっていれば、
-            # 書き終えたとみなして忘れる。変わっていなければ、これから書く可能性がある。
-            if active.get("report") == entry.get("report") and same_stamp(active.get("before")) != before:
+            # バックグラウンドで起動した実行。ほかの実行が書いたと分かっている状態（seen）から
+            # レポートが変わっていれば、裏の処理が書き終えたとみなして忘れる。
+            # 変わっていなければ、これから書く可能性がある。
+            seen = active.get("seen", active.get("before"))
+            if active.get("report") == entry.get("report") and same_stamp(seen) != before:
                 del starts[other]
                 continue
         else:
@@ -418,6 +420,24 @@ def finish_test(payload, cwd, retro_dir):
             del state["test_starts"][key]
         save_state(retro_dir, state)
     return start
+
+
+def note_report_seen(root, retro_dir, entry):
+    """通常の実行が終わった時点のレポートの状態を、バックグラウンドの記録に控える。
+
+    裏の処理が動いている間に通常の実行がレポートを書き換えても、それを「裏の処理が
+    書き終えた」と取り違えないため。次の実行の前にこの状態から変わっていれば、
+    通常の実行のあとで誰か（裏の処理）が書いたと分かる。
+    """
+    state = load_state(retro_dir)
+    changed = False
+    for active in (state.get("test_starts") or {}).values():
+        if isinstance(active, dict) and active.get("background") \
+                and active.get("report") == entry.get("report"):
+            active["seen"] = report_stamp(root, entry)
+            changed = True
+    if changed:
+        save_state(retro_dir, state)
 
 
 def read_test_report(root, cwd, retro_dir, entry, start=None):
@@ -481,6 +501,7 @@ def shell_events(payload, root, cwd, retro_dir, config):
             results, test_files, note = None, {}, "background_not_finished"
         else:
             results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
+            note_report_seen(root, retro_dir, entry)
         event = {
             "type": "test_run", "command": mask(command), "exit_code": exit_code,
             "head": head, "dirty": dirty, "results": results, "test_files": test_files,

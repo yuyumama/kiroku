@@ -117,6 +117,24 @@ class LeftoverStartTest(ReviewSandbox):
         event = self.events()[-1]
         self.assertEqual((event['results'], event['note']), (None, 'ambiguous_test_run'))
 
+    def test_background_mark_survives_reports_written_by_other_runs(self):
+        """実機で再現。裏の処理が動いている間の通常の実行が書いたレポートを、裏の処理の完了とみなさない。"""
+        def background():
+            return [s for s in self.starts().values() if s.get('background')]
+
+        self.pre('pytest', run_in_background=True)
+        self.hook({'hook_event_name': 'PostToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest', 'run_in_background': True},
+                   'tool_response': 'Output:\n\n\nExit Code: 0'})
+        for name in ('first', 'second'):   # 裏の処理はまだ書いていない
+            held = self.run_ok(name)
+            self.assertEqual((held['results'], held['note']), (None, 'ambiguous_test_run'), name)
+            self.assertEqual(len(background()), 1, name)
+        time.sleep(0.02)
+        self.write(REPORT, junit([('T', 'background', 'passed')]))   # 裏の処理が書き終えた
+        self.assertEqual(self.run_ok('third')['results']['passed'], ['T::third'])
+        self.assertEqual(background(), [])
+
     def test_runs_that_may_write_the_same_report_file_are_ambiguous(self):
         """レポートの指定が違っても、同じファイルを指しうるなら、結果の帰属を確定しない。"""
         self.write('.kiro/kiroku/config.json', json.dumps({'tests': [

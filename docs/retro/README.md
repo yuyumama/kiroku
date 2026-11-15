@@ -362,5 +362,6 @@ python3 -m unittest discover -s tests -v
 
 テストは一時 Git リポジトリと模擬フック・ログを使います。製品連携や LLM の提案品質を証明するものではありません。
 サンプルは `examples/demo/` です。ハーネス（steering、hooks、skill、agent）を備えた家計簿の CLI で、本番に近い振り返りを試せます。手順と、仕込んである不備は [demo-scenario.md](demo-scenario.md) にあります。
+繰り返しの指摘、一時的な依頼、既存規則との重複、再振り返りなどの [拡張ケース](demo-cases.md) では、実行・集計・提案の意味を分けて判定します。
 製品での確認手順は [evaluation.md](evaluation.md) にあります。
 過去の CLI 実測は [verification.md](verification.md) に記録されています。

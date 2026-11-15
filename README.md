@@ -15,4 +15,3 @@ Kiro CLI V3／IDE 1.xでの開発中に起きた失敗や手直しを記録し�
 | `uninstall.sh`、`uninstall.ps1`、`uninstall.py` | 取り除くスクリプトと共通処理 |
 | `examples/demo/` | ハーネスを備えた、動作確認用のサンプル（家計簿の CLI）。試し方は [docs/retro/demo-scenario.md](docs/retro/demo-scenario.md) |
 | `tests/` | テスト |
-| `probe/` | 段階1で使った検証キット |

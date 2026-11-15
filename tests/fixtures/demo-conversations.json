@@ -1,0 +1,99 @@
+{
+  "description": "模擬会話と、試験者が意味を読んで付けたノート。LLM が分類できることの証拠ではない。",
+  "sessions": [
+    {
+      "id": "demo_a",
+      "texts": [
+        "説明が長い。結論から書いてください。",
+        "今回だけ、比較する月は2026-10にしてください。既定値にはしません。"
+      ],
+      "findings": [
+        {
+          "kind": "explanation_feedback",
+          "topic": "報告の順序",
+          "summary": "結論を先に書く",
+          "quote": "説明が長い。結論から書いてください。",
+          "index": 0,
+          "context": "模擬入力。応答側の原因は未確認"
+        }
+      ]
+    },
+    {
+      "id": "demo_b",
+      "texts": [
+        "説明は結論から短く。前のセッションでもお願いしました。"
+      ],
+      "findings": [
+        {
+          "kind": "explanation_feedback",
+          "topic": "報告の順序",
+          "summary": "結論を先に書く",
+          "quote": "説明は結論から短く。",
+          "index": 0,
+          "context": "模擬入力。応答側の原因は未確認"
+        }
+      ]
+    },
+    {
+      "id": "demo_policy",
+      "texts": [
+        "このプロジェクトでは今後、コミットメッセージを日本語で書いてください。今回はコミット不要です。"
+      ],
+      "findings": [
+        {
+          "kind": "standing_policy",
+          "topic": "コミットの言語",
+          "summary": "コミットメッセージは日本語",
+          "quote": "今後、コミットメッセージを日本語で書いてください。",
+          "index": 0,
+          "context": "模擬入力。継続方針の1回の明示"
+        }
+      ]
+    },
+    {
+      "id": "demo_unsure",
+      "texts": [
+        "あれは前のやり方でよかった？"
+      ],
+      "findings": [
+        {
+          "kind": "unsure",
+          "topic": "前のやり方",
+          "summary": "何を指すか未確認",
+          "quote": "あれは前のやり方でよかった？",
+          "index": 0,
+          "context": "模擬入力。意味は未確認"
+        }
+      ]
+    },
+    {
+      "id": "demo_one_session",
+      "texts": [
+        "根拠も示してください。",
+        "まだ根拠が足りません。"
+      ],
+      "findings": [
+        {
+          "kind": "correction",
+          "topic": "根拠の表示",
+          "summary": "根拠を示す",
+          "quote": "根拠も示してください。",
+          "index": 0,
+          "context": "模擬入力。応答側の原因は未確認"
+        },
+        {
+          "kind": "correction",
+          "topic": "根拠の表示",
+          "summary": "根拠を示す",
+          "quote": "まだ根拠が足りません。",
+          "index": 1,
+          "context": "模擬入力。応答側の原因は未確認"
+        }
+      ]
+    }
+  ],
+  "expected_candidates": {
+    "報告の順序": 2,
+    "コミットの言語": 1
+  }
+}

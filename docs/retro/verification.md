@@ -501,3 +501,114 @@ Windows／IDE／headless、Kiro の別バージョン、同一ターンの複数
 **案B**：今回の3通りでは、別のフックが停止しても開始を残せたので、PostToolUse が来なかったことを「記録不足」に出す補助方式は実装を検討できる。ただし現行の開始記録はテスト対象だけであり、確認1の単独コマンドを覆っていない。全対象への開始記録、対応づけ、残留記録を閉じるタイミングが別途必要となる。Stop の発火はその判断材料になるが、Stop 入力単独では呼び出しや拒否理由を特定できない。
 
 現状の開始記録を残すだけでは、次の正常なテストまで保留になることを実測した。A／B いずれを選んでも、拒否済みの記録との二重計上と、停止した開始記録が後続テストへ与える影響を扱う必要がある。今回はこれらの事実を報告するまでとし、修正はしていない。
+
+## 2026-11-15：Issue #4 の追加実機診断
+
+[指定コメント](https://github.com/yuyumama/kiroku/issues/4#issuecomment-6887535610)の4項目を確認した。今回は診断と文書記録のみで、`kit/` と `examples/demo/` は変更していない。既存導入先への影響は「なし」。
+
+### 1. 環境と観測方法
+
+Ubuntu 22.04.4 LTS、Linux 6.8.0-52-generic、Kiro CLI 3.3.0、V3 対話モード。取得した main `6519776` を一時領域へ展開し、同じ main のデモとインストーラーで、取り消し・背景実行・複数呼び出し・回数確認用の4コピーを作った。すべてリモート未設定の使い捨て Git である。
+
+一時プロファイルで読み取り、固定コマンド、診断用テキストファイルの書き込みを許可し、取り消し対象の printf と sleep は ask にした。`--trust-all-tools`、実際の push・削除、拒否された呼び出しの回避は行っていない。
+
+各コピーに Stop と UserPromptSubmit の観測フックを追加した。`.kiro/kiroku/data/diagnostics/boundaries.jsonl` に書くのは `at: string` と `hook_event_name: string` だけで、発話やセッション ID は含めない。実行前後の kiroku フックには一時ラッパーを挟み、元の record.py に同じ標準入力を渡し、標準出力・標準エラー・終了コードをそのまま返した。別の診断ファイルに呼び出し時刻、入力の型、Exit Code の有無、JUnit の状態、test_starts の前後を控えた。配布スクリプトと元の guard_shell.py の内容が main と一致することも確認した。
+
+以下は実ログ・観測ファイル・state・イベント・JUnit を照合した結果である。ツール未呼び出しの拒否や完了申告は実行証拠にしていない。生ログ、発話本文、個別 ID、個人設定、絶対パスは転載していない。
+
+### 2. 確認1：取り消し方ごとの対照表
+
+最初の4行は前回の比較を引き継ぐ。権限規則の拒否、Deny once、通常失敗は今回は再実施していない。フック停止は今回の複数呼び出しの検査でも再確認した。全行の tool_result.success は false。イベント欄は各ターンの prompt を除いた追加記録である。
+
+| ケース | tool_call.status / policyDenial | 同じ toolCallId の interaction_resolved | tool_result.content の特徴 | kiroku-record-tool | events.jsonl の追加記録 |
+|---|---|---|---|---|---|
+| フック停止（前回・今回） | denied / 無し | 無し | 文字列 `"{}"`、Exit Code 無し | 無し | 無し |
+| エージェント規則の拒否（前回） | denied / 有り、source=agent-profile | 無し | `Blocked by a permission rule …`、Exit Code: -1 | 有り | tool_denied |
+| 承認画面の Deny once（前回） | denied / 無し | outcome=selected、selectedOption=reject | `The user rejected this tool call.`、Exit Code: -1 | 有り | recording_gap、reason=unknown_not_run |
+| 通常失敗（前回） | failed / 無し | 無し | 固定の存在しないパスに対する ls エラー、Exit Code: 2 | 有り | tool_failure |
+| 承認画面の Escape（今回） | denied / 無し | outcome=cancelled、selectedOption キー無し | `The tool call was cancelled before it was approved.`、Exit Code: -1 | 有り | tool_cancelled、reason キー無し |
+| 承認画面の Ctrl+C（今回） | denied / 無し | outcome=cancelled、selectedOption キー無し | 同上、Exit Code: -1 | 有り | tool_cancelled、reason キー無し |
+| 承認後、実行中の Ctrl+C（今回） | failed / 無し | 承認時の outcome=selected、selectedOption=accept。中断用の別行は無し | `This tool was interrupted before it reported a result, so it may or may not have taken effect.`、Exit Code 無し | 無し | 無し（prompt のみ） |
+
+今回の固定コマンドは `printf KIROKU_ESC_PROBE`、`printf KIROKU_CTRLC_PROBE`、`sleep 30`。最後のケースは Allow once を選び、実行中の表示になってから Ctrl+C を送った。承認後の待機中に割り込み、正常完了の終了コードは取得していない。中断応答が示すとおり、すべての副作用が取り消されたという意味ではない。
+
+Escape／承認画面 Ctrl+C の interaction_resolved は、`type, toolCallId, outcome, executionId: string / consentRound: number（整数）`。selectedOption は null ではなくキー自体が無かった。承認後の Ctrl+C には承認時の selectedOption=accept が残った。
+
+承認前の取り消し2件のログ行順は、PreToolUse → pending_interaction → interaction_resolved(cancelled) → tool_call(denied) → tool_result → turn_end(cancelled) → kiroku-record-tool だった。**turn_end の後に実行後フックの行が記録された。** 実行中 Ctrl+C は tool_result と turn_end(cancelled) があり、実行後フックの行は無かった。3件とも Stop はログ・観測ファイルの両方で0回。セッション終了まで確認した。
+
+今回の3通りはフック停止と区別できた。ただし、承認前の取り消しは `denied / policyDenial無し / selectedOption=reject無し` にも当たる。**reject だけを除外する条件では足りず、outcome=cancelled の扱いが必要**である。
+
+### 3. 確認2：バックグラウンド実行
+
+一時コピーだけに `diagnostic_run_tests.py` を置いた。開始を診断ファイルへ記録し、固定の12秒待機後に未変更の run_tests.py を実行し、終了を記録するもの。名前は既存設定の `run_tests\.py` に一致する。待機は開始と完了を分離して観測するための試験値で、製品のしきい値ではない。
+
+実際の tool_call.args は `run_in_background=true` だった。フック入力の command は `python3 diagnostic_run_tests.py`、ログの tool_call.args.command は `python3 diagnostic_run_tests.py &` となった。双方の文字列が常に同じとは限らない。
+
+観測した順序は次のとおり。
+
+1. kiroku-record-test-start、guard-shell。test_starts に1件作成。
+2. 診断スクリプトの開始。
+3. ログの tool_call、tool_result。`status=completed / success=true`、content は `Output:` の空出力と `Exit Code: 0`。
+4. kiroku-record-tool。入力の tool_response にも `Exit Code: 0` があった。
+5. Stop、turn_end。
+6. 待機の後にJUnitが生成され、診断スクリプトが終了。
+
+これは診断スクリプトの開始・終了時刻とフック時刻を照合した順序であり、ログ行の並びだけからプロセス開始を推測していない。**PostToolUse と Stop の両時点で、診断スクリプトの観測ファイルには start だけがあり、end はまだ無かった。** つまり背景の処理はまだ完了していなかった。
+
+PostToolUse の直前・直後とも JUnit は未生成で、test_starts は直前1件・直後0件。イベントは `type=test_run / exit_code=0 / results=null / note=report_not_found` だった。その後、本物の JUnit に11件・失敗0・エラー0が生成されたが、セッションを終了するまで、追加の PostToolUse と test_run は無かった（それぞれ計1件のまま）。正常終了コードがあっても、それがテスト完了を意味しないことを確認した。
+
+### 4. 確認3：同じターンの複数呼び出し
+
+両ケースとも、対象の2件がそれぞれ別の toolCallId を持ち、同じ turnId と executionId になった。以下で Pre は kiroku-record-test-start、Guard は guard-shell、Post は kiroku-record-tool、Call／Result はツール行を表す。
+
+| ケース | 実際の呼び出しとログ行順 | 記録 |
+|---|---|---|
+| 正常2件 | Pre → Guard → Pre → Guard → Call(A) → Result(A) → Call(B) → Result(B) → Post → Post → Stop | `printf KIROKU_MULTI_A` と `printf KIROKU_MULTI_B` はともに completed、success=true、Exit Code: 0。イベントは prompt のみ |
+| 停止1件＋正常1件 | Pre → Guard → Call(push) → Result(push) → Pre → Guard → Call(C) → Result(C) → Post → Stop | `git push --force --dry-run` は denied、success=false、content=`"{}"`。`printf KIROKU_MULTI_C` は completed、success=true、Exit Code: 0。イベントは prompt のみ |
+
+混在ケースで、ラッパーの入力にも push の Pre だけ、printf の Pre／Post が残った。止められた push に Post は無い。最初の依頼では Kiro が push をツールに渡さず printf だけ実行したため、そのターンは2件比較の対象外とした。表は、その後に実際の2件を確認できた別ターンの結果である。止められた呼び出し自体の再試行はしていない。
+
+ContextualHookInvoked のキーは前回と同じで、toolCallId やコマンドを持たなかった。operationId は、対応候補のどの tool_call の toolCallId／modelToolUseId／executionId／turnId とも一致しなかった。hookId は同じ定義の発火で共通であり、呼び出し単位の識別には使えない。
+
+正常2件では、ラッパーの時刻が `Pre(A)開始 < Pre(B)開始 < Pre(A)終了`、Post も同様に重なった。**少なくともフック処理には並行の形跡がある。** シェル本体のプロセス実行区間は測っていないため、その同時実行は未確認。ログも呼び出し単位のまとまりではない。混在ケースは順番に対応できそうな並びだったが、それを正常2件や一般の並行実行へ適用する根拠は無い。一時ラッパーでは入力の固定コマンドから対応を確認できても、既存のフック行だけにその情報は無い。
+
+### 5. 確認4：入力数とフックの回数
+
+1つの新規セッションで、通常入力12回と `/hooks` 2回、計14回を送信し、その後に `/quit` を1回送った。メニューは Escape で閉じた。メニューを閉じるキー操作は、新しい発話に数えていない。各入力の前後で観測ファイル・prompt 件数・ログを比較した。
+
+このセッションでは force dry-run の依頼を2回とも Kiro がツール前に拒否した。これらをフック停止に数えず、別の一時診断フック diagnostic-count-block を追加した。固定の `printf KIROKU_COUNT_BLOCK` だけを終了コード2で止めるもの。同じセッションで `/hooks` の一覧に追加を確認し、実呼び出しの denied／content=`"{}"`、Pre の発火と Post の不在を照合した。main の guard-shell は変更していない。
+
+| 入力の種類 | 入力回数 | UserPromptSubmit | Stop | events の prompt |
+|---|---:|---:|---:|---:|
+| 質問のみ・ツール無し | 4 | 4 | 4 | 4 |
+| 正常なシェル実行 | 3 | 3 | 3 | 3 |
+| ファイル書き込み | 2 | 2 | 2 | 2 |
+| Kiro 自身がツール前に拒否 | 2 | 2 | 2 | 2 |
+| 診断フックによる停止 | 1 | 1 | 1 | 1 |
+| `/hooks`（一覧の開閉） | 2 | 0 | 0 | 0 |
+| 終了前までの合計 | 14 | 12 | 12 | 12 |
+| `/quit` の増分 | 1 | 0 | 0 | 0 |
+
+ログ上も user と turn_start は各12件で、スラッシュコマンドは user 行を作らなかった。質問、正常ツール、書き込み、フック停止の**通常終了したターンでは抜けは無かった**。全入力14回を分母にすると12回になる差は、今回の2つのスラッシュコマンドで説明できる。3.2.1 の過去の5回中3回と原因が同じだったかは未確認。
+
+一方、確認1の別セッションでは取り消し3入力に対して UserPromptSubmit=3、prompt=3、Stop=0。通常終了の12/12を、中断ターンにも必ず発火するという保証には使えない。
+
+### 6. 未確認と限界
+
+Windows／IDE／headless、ほかの Kiro バージョン、ほかのスラッシュコマンド、フックのタイムアウト・異常終了、同一コマンドを並行に繰り返す場合は未確認。背景実行は新規JUnitの1回を確認したもので、既存JUnitを持つ場合や、長期実行・失敗する背景処理は未確認。シェル本体の並行実行時間は測っていない。
+
+一時ラッパーの実行時間が加わるため、無計測時のタイミングまで保証するものではない。ContextualHookInvoked の並びは観測したログの行順であり、コマンド実行の全時刻を表すと推測しない。今回もセッションログは文書化された形式とは扱わない。
+
+公式の [Hook triggers](https://kiro.dev/docs/hooks/types/) では Stop は応答を終えた時点と説明される。[CLI Chat](https://kiro.dev/docs/cli/chat/) と [Built-in tools](https://kiro.dev/docs/reference/built-in-tools/) も確認したが、ここで観測した中断経路や背景実行の完了保証を補う根拠とはしていない。製品の修正、更新処理の変更、修正後の振り返りは今回行っていない。
+
+リポジトリの `python3 -B -m unittest discover -s tests` は125件成功した。この自動テストの結果は、上記の Kiro 実機観測とは区別する。
+
+### 7. 所見：決めたいこと1・2・5への影響
+
+**1：閉じる時点。** 通常終了では Stop、次の通常発話では UserPromptSubmit が発火したため、両方を使い期限を保険にする案を支持する材料になる。ただし取り消し3件には Stop が無く、Stop 単独では覆えない。スラッシュコマンドも次の発話の代わりにはならない。さらに承認前取り消しのログでは turn_end の後に Post が記録されたため、ターン終端行だけを見て即座に「実行後フックなし」と断定すると誤る。遅れて来る Post との重複や競合も扱う必要がある。
+
+**2：バックグラウンド。** 今回は PostToolUse の終了コード0が実処理の完了前に返り、開始記録もその時点で消費された。したがって「背景の開始記録を Stop では閉じない」だけでは足りない。起動時の Post をテスト完了として扱わない方式も必要になる。期限だけで扱う案は不明な状態を終わらせる保険にはなるが、後で生成されるJUnitを自動で取り込めるという意味ではない。
+
+**5：二重計上。** policyDenial と selectedOption=reject の除外に加えて、同じ toolCallId の outcome=cancelled を除く必要がある。今回の承認前取り消しは既に tool_cancelled が記録されており、別の拒否として加算すると二重になる。実行中 Ctrl+C は failed であり、denied のフック停止とは別である。一方、フック行と呼び出しの一対一のキーは今回も得られなかった。イベント照合を加える場合も「同じセッション・同じコマンドが1件あれば一括で除外」では、複数回の実行を区別できない。ログの呼び出しIDによる明示的な拒否・取り消しの除外を優先し、確定できない対応は不足として残す必要がある。
+
+以上は実機確認からの所見であり、方針の実装や問題の修正完了を示すものではない。

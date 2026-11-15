@@ -2,6 +2,8 @@
 import json
 import re
 
+from ledger import HEADING, TARGET
+
 
 def facts(data):
     targets = {}
@@ -22,6 +24,8 @@ def facts(data):
             'unread': len(plan['read']) + plan['rest'],
             'test_runs': sum(p['test_runs'] for p in data['periods'].values()),
             'test_results_unknown': len(data['test_result_gaps']),
+            'unrecorded_calls': {kind: sum(r['count'] for r in data['unrecorded_calls'] if r['kind'] == kind)
+                                 for kind in ('blocked', 'interrupted')},
             'targets': targets,
             'harness': [{k: r[k] for k in ('scope', 'path', 'status')} for r in data['harness']],
             'test_configuration': data['test_configuration']}
@@ -47,12 +51,12 @@ def validate(text, expected):
     # 引用した過去の案ではなく、今回の案に属する対象だけを検査する。
     current = False
     for line in text.splitlines():
-        if re.match(r'^###\s+P\d+[.．:：]?\s', line):
+        if HEADING.match(line):
             current = True
         elif line.startswith('#'):
             current = False
         elif current:
-            target = re.search(r'対象の型[：:]\s*`([^`]+)`', line)
-            if target and target.group(1) not in expected['targets']:
-                errors.append('集約にない対象の型：' + target.group(1))
+            target = TARGET.search(line)
+            if target and target.group(1).strip() not in expected['targets']:
+                errors.append('集約にない対象の型：' + target.group(1).strip())
     return errors

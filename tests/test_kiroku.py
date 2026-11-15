@@ -639,6 +639,15 @@ class SummaryTest(Sandbox):
         self.assertEqual(data['pending'][0]['recent'], 4)
         self.assertNotIn('unparsed', aggregate.render(data))
 
+    def test_unquoted_expansion_is_not_merged_with_the_quoted_literal(self):
+        """`*.txt` は展開され、`'*.txt'` は文字列のまま。意味の違う実行を同じ見出しにしない。"""
+        for command in ("printf '%s\\n' *.txt", "printf '%s\\n' '*.txt'", 'ls ~/work', 'cp a.{js,ts} out'):
+            self.shell(command, 1)
+        keys = {r['command_key'] for r in aggregate.aggregate(self.root)['tool_failures']}
+        self.assertEqual(len(keys), 4)
+        self.assertIn("printf '%s\\n' '*.txt'", keys)
+        self.assertIn("printf '%s\\n' *.txt", keys)
+
     def test_restored_content_counts_again_after_an_intervening_write(self):
         for content in ('A', 'B', 'A'):
             self.write('src/app.py', content)

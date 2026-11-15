@@ -80,6 +80,23 @@ class InstallerTest(unittest.TestCase):
             self.assertEqual((root / ".kiro/kiroku/data/events.jsonl").read_text(), "data")
 
 
+class UpdateKeepsLauncherTest(unittest.TestCase):
+    def test_update_without_a_launcher_keeps_the_installed_one(self):
+        """`python` で導入した先を、起動名を指定せずに更新しても、python3 に変えない。"""
+        with tempfile.TemporaryDirectory() as root:
+            for first in ("python", "py -3"):
+                installer.install(root, update=True, python_command=first)
+                installer.install(root, update=True)
+                hooks = json.loads((Path(root) / ".kiro/hooks/kiroku.json").read_text(encoding="utf-8"))
+                self.assertTrue(all(h["action"]["command"].startswith(first + " .kiro/")
+                                    for h in hooks["hooks"]), first)
+                self.assertIn(first + " .kiro/", (Path(root) / ".kiro/agents/kiroku-retro.json").read_text(
+                    encoding="utf-8"))
+            installer.install(root, update=True, python_command="python3")   # 明示すれば変えられる
+            hooks = json.loads((Path(root) / ".kiro/hooks/kiroku.json").read_text(encoding="utf-8"))
+            self.assertTrue(all(h["action"]["command"].startswith("python3 ") for h in hooks["hooks"]))
+
+
 class AdapterTest(Sandbox):
     def test_concurrent_hooks_consume_junit_once_without_corrupting_events(self):
         self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",

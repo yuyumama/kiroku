@@ -90,14 +90,88 @@ class LeftoverStartTest(ReviewSandbox):
         event = self.events()[-1]
         self.assertEqual((event['type'], event['results'], event['note'], event['background']),
                          ('test_run', None, 'background_not_finished', True))
-        self.assertEqual(self.starts(), {})
+        self.assertEqual([s.get('background') for s in self.starts().values()], [True])
+        self.hook({'hook_event_name': 'Stop'})   # ターンが終わっても、裏の処理は続いている
+        self.assertEqual(len(self.starts()), 1)
         data = aggregate.aggregate(self.root, by='all')
         self.assertEqual(data['periods']['全期間']['test_runs'], 0)
         self.assertEqual(len(data['test_result_gaps']), 1)
+        self.assertEqual(data['recording_gaps'], [])
         self.assertIn('バックグラウンドで起動', aggregate.render(data))
-        # あとで生成されたレポートは、次の通常の実行の「実行前の状態」になるだけで、取り込まれない。
+        # 裏の処理がレポートを書き終えたあとの通常の実行は、取り込む。
+        time.sleep(0.02)
         self.write(REPORT, junit([('T', 'background', 'failed')]))
         self.assertEqual(self.run_ok('foreground')['results']['passed'], ['T::foreground'])
+        self.assertEqual(self.starts(), {})
+
+    def test_report_written_by_a_background_run_is_not_given_to_a_later_run(self):
+        """裏の処理がまだレポートを書いていない間に始まった通常の実行には、結果を帰属させない。"""
+        self.pre('pytest', run_in_background=True)
+        self.hook({'hook_event_name': 'PostToolUse', 'tool_name': 'execute_bash',
+                   'tool_input': {'command': 'pytest', 'run_in_background': True},
+                   'tool_response': 'Output:\n\n\nExit Code: 0'})
+        self.pre('pytest -x')
+        time.sleep(0.02)
+        self.write(REPORT, junit([('Review', 'background-result', 'passed')]))   # 裏の処理が書いた
+        self.shell('pytest -x', 2, 'runner did not start')
+        event = self.events()[-1]
+        self.assertEqual((event['results'], event['note']), (None, 'ambiguous_test_run'))
+
+    def test_runs_that_may_write_the_same_report_file_are_ambiguous(self):
+        """レポートの指定が違っても、同じファイルを指しうるなら、結果の帰属を確定しない。"""
+        self.write('.kiro/kiroku/config.json', json.dumps({'tests': [
+            {'match': 'pytest a', 'report': 'reports/*.xml'},
+            {'match': 'pytest b', 'report': 'reports/junit.xml'}]}))
+        self.pre('pytest a')
+        self.session = 'sess_other'
+        self.pre('pytest b')
+        self.write(REPORT, junit([('Review', 'a-result', 'passed')]))
+        self.shell('pytest b', 1)
+        event = [e for e in self.events() if e['type'] == 'test_run'][-1]
+        self.assertEqual((event['results'], event['note']), (None, 'ambiguous_test_run'))
+        import record
+        self.assertFalse(record.may_share_report('reports/junit.xml', 'build/junit.xml'))
+        self.assertTrue(record.may_share_report('build/**/*.xml', 'build/test-results/a.xml'))
+        self.assertTrue(record.may_share_report('reports/*.xml', 'reports/unit/*.xml'))
+        self.assertFalse(record.may_share_report('reports/*.xml', 'build/*.xml'))
+
+    def test_changing_only_file_permissions_does_not_make_an_old_report_new(self):
+        self.write(REPORT, junit([('Review', 'old-run', 'passed')]))
+        path = os.path.join(self.root, REPORT)
+        os.chmod(path, 0o644)
+        self.pre('chmod 600 reports/junit.xml; echo pytest')
+        os.chmod(path, 0o600)
+        self.shell('chmod 600 reports/junit.xml; echo pytest', 0)
+        event = self.events()[-1]
+        self.assertEqual((event['results'], event['note']), (None, 'report_stale'))
+
+    def test_many_repeated_starts_are_closed_with_their_count(self):
+        for _ in range(21):
+            self.pre('pytest')
+        self.hook({'hook_event_name': 'Stop'})
+        gaps = [e for e in self.events() if e['type'] == 'recording_gap']
+        self.assertEqual([g['count'] for g in gaps], [21])
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(sum(g['count'] for g in data['recording_gaps']), 21)
+        self.assertIn('（成功・失敗を判定できない実行：21 件）', aggregate.render(data))
+
+    def test_gap_closed_by_the_retro_prompt_still_belongs_to_development(self):
+        """振り返りを始める発話で閉じた不足は、その前の開発の実行のもの。振り返りの記録として除かない。"""
+        self.pre('pytest')
+        time.sleep(0.02)
+        self.hook({'hook_event_name': 'UserPromptSubmit', 'prompt': '/kiroku-retro'})
+        data = aggregate.aggregate(self.root)
+        self.assertEqual([g['reason'] for g in data['recording_gaps']], ['test_end_missing'])
+        self.assertEqual(data['coverage']['retro_excluded'], 0)
+
+    def test_permission_denial_quoting_cancel_wording_stays_a_denial(self):
+        """権限の規則が引用したコマンドの文字列を、取り消しの文言と取り違えない（実機で再現）。"""
+        text = ('Blocked by a permission rule (deny shell matching "printf \'The user rejected this tool '
+                'call.\'"); the user did not reject it. Source: agent-profile.')
+        self.shell("printf 'The user rejected this tool call.'", -1, text)
+        self.assertEqual(self.events()[-1]['type'], 'tool_denied')
+        self.shell('sleep 99', -1, 'Blocked by a permission rule (deny shell matching "x timed out after y")')
+        self.assertEqual(self.events()[-1]['type'], 'tool_denied')
 
     def test_deny_once_is_a_cancellation_also_for_events_already_recorded(self):
         text = 'The user rejected this tool call.'
@@ -231,11 +305,42 @@ class UnrecordedCallTest(ReviewSandbox):
         self.session_log('sess_retro', rows)
         self.assertEqual(aggregate.aggregate(self.root)['unrecorded_calls'], [])
 
-    def test_unexpected_log_shapes_are_not_counted(self):
+    def test_unexpected_log_shapes_are_shown_as_gaps_not_dropped(self):
+        """判定できない形は、止められたとも決めず、黙って捨てもしない。記録の不足に出す。"""
         odd = self.call('c1', BLOCKED, 'denied', '{}')
         odd[1]['content'] = {}                       # 文字列でない本文
         orphan = self.call('c2', BLOCKED, 'denied', '{}')[:1]   # 結果の無い呼び出し
         other = self.call('c3', BLOCKED, 'rejected', '{}')      # 知らない状態
         self.session_log('sess_odd', [{'type': 'user', 'content': '実行'}] + odd + orphan + other)
-        self.assertEqual(aggregate.aggregate(self.root)['unrecorded_calls'], [])
-        self.assertTrue(os.path.isdir(self.root))
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data['unrecorded_calls'], [])
+        self.assertEqual([g['reason'] for g in data['recording_gaps']], ['unreadable_tool_call'] * 3)
+        self.assertIn('形式が想定と違う', aggregate.render(data))
+
+    def test_call_inside_the_period_is_found_even_when_its_prompt_is_outside(self):
+        directory = self.home / 'sessions' / '0123456789abcdef' / 'sess_edge'
+        directory.mkdir(parents=True)
+        (directory / 'session.json').write_text(json.dumps(
+            {'id': 'sess_edge', 'workspacePaths': [self.root]}), encoding='utf-8')
+        edge = NOW - datetime.timedelta(hours=1)
+        rows = [(edge - datetime.timedelta(seconds=1), {'type': 'user', 'content': '実行'})]
+        rows += [(edge + datetime.timedelta(seconds=1), p) for p in self.call('c1', BLOCKED, 'denied', '{}')]
+        with open(directory / 'messages.jsonl', 'w', encoding='utf-8') as handle:
+            for index, (moment, payload) in enumerate(rows):
+                handle.write(json.dumps({'id': str(index), 'timestamp': moment.isoformat(),
+                                         'payload': payload}, ensure_ascii=False) + '\n')
+        data = aggregate.aggregate(self.root, since=edge)
+        self.assertEqual(data['sessions'], [])
+        self.assertEqual([(r['kind'], r['count']) for r in data['unrecorded_calls']], [('blocked', 1)])
+
+    def test_exit_code_mentioned_inside_the_text_is_not_an_exit_code_line(self):
+        rows = [{'type': 'user', 'content': '実行'}] + self.call(
+            'c1', 'sleep 30', 'failed', 'Diagnostic mentioned Exit Code: 0; no actual exit status')
+        self.session_log('sess_text', rows)
+        found = aggregate.aggregate(self.root)['unrecorded_calls']
+        self.assertEqual([(r['kind'], r['command_key']) for r in found], [('interrupted', 'sleep 30')])
+
+    def test_blocked_and_interrupted_counts_are_part_of_the_report_facts(self):
+        self.session_log('sess_live', self.rows())
+        facts = aggregate.aggregate(self.root)['report_facts']
+        self.assertEqual(facts['unrecorded_calls'], {'blocked': 1, 'interrupted': 1})

@@ -59,6 +59,9 @@ DEFAULT_CONFIG = {
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
+# 実行が完了しなかった呼び出しの応答の先頭（Kiro CLI 3.2.1〜3.3.0 で実測。verification.md）
+DENIED_HEAD = "Blocked by a permission rule"
+CANCELLED_HEADS = ("The tool call was cancelled before it was approved", "The user rejected this tool call")
 
 
 def not_run_kind(output):
@@ -66,14 +69,21 @@ def not_run_kind(output):
 
     文言で確かめられないものは、拒否とは決めつけず recording_gap にする。
     """
-    output = output or ""
+    output = (output or "").strip()
+    # 権限の規則による拒否の応答は、止めた規則（コマンドの文字列）を引用する。引用された文字列を
+    # 取り消しやタイムアウトの文言と取り違えないよう、応答の先頭の形を先に見る。
+    if output.startswith(DENIED_HEAD):
+        return "tool_denied"
     # 承認画面での Escape／Ctrl+C と、Deny once。どちらも人がその場で実行を断ったもの。
-    if "cancelled before it was approved" in output or "The user rejected this tool call" in output:
+    if output.startswith(CANCELLED_HEADS):
+        return "tool_cancelled"
+    # 先頭が切れた古い記録（出力の末尾だけを残したもの）のために、含むかどうかでも見る。
+    if DENIED_HEAD in output:
+        return "tool_denied"
+    if "cancelled before it was approved" in output:
         return "tool_cancelled"
     if TIMEOUT_RE.search(output):
         return "tool_timeout"
-    if "Blocked by a permission rule" in output:
-        return "tool_denied"
     return "recording_gap"
 SECRET_PATTERNS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
@@ -260,14 +270,41 @@ def save_state(retro_dir, state):
 
 
 def report_stamp(root, entry):
-    """レポートの実行前後を比べる。内容が同じ再実行も時刻・置換で区別する。"""
+    """レポートの実行前後を比べる。内容が同じ再実行も、更新時刻・置換で区別する。
+
+    ctime は使わない。権限の変更（chmod）などでも変わり、古い結果を新しい実行のものと取り違える。
+    """
     stamps = []
     for path in sorted(glob.glob(os.path.join(root, entry.get("report") or ""), recursive=True)):
         if os.path.isfile(path):
             stat = os.stat(path)
-            stamps.append([os.path.relpath(path, root), stat.st_mtime_ns,
-                           stat.st_ctime_ns, stat.st_size, stat.st_ino])
+            stamps.append([os.path.relpath(path, root), stat.st_mtime_ns, stat.st_size, stat.st_ino])
     return stamps
+
+
+def same_stamp(stamp):
+    """ctime を含んでいた版（要素が5個）の控えを、今の形にそろえる。"""
+    return [item[:2] + item[3:] if isinstance(item, list) and len(item) == 5 else item
+            for item in stamp if isinstance(item, list)] if isinstance(stamp, list) else []
+
+
+WILDCARDS = "*?["
+
+
+def may_share_report(first, second):
+    """2つのレポートの指定が、同じファイルを指しうるか。確かめられないときは、指しうるとする。"""
+    first, second = (os.path.normpath(p or "").replace(os.sep, "/") for p in (first, second))
+    if first == second:
+        return True
+    plain = [not any(c in p for c in WILDCARDS) for p in (first, second)]
+    if all(plain):
+        return False
+    for path, pattern, is_plain in ((first, second, plain[0]), (second, first, plain[1])):
+        if is_plain:
+            # `**` は階層をまたぐ。fnmatch の `*` は `/` にも当たるので、広めの判定になる。
+            return fnmatch.fnmatch(path, pattern.replace("**/", "*"))
+    heads = [re.split(r"[*?\[]", p, 1)[0].rsplit("/", 1)[0] for p in (first, second)]
+    return heads[0].startswith(heads[1]) or heads[1].startswith(heads[0])
 
 
 def start_key(payload, cwd):
@@ -316,10 +353,19 @@ def close_starts(retro_dir, session_id):
     events = []
     for key in closed:
         start = starts.pop(key)
+        if start.get("background"):
+            starts[key] = start   # バックグラウンドの処理は、ターンが終わっても続いている
+            continue
+        event = {"type": "recording_gap", "tool": start.get("tool"), "reason": "test_end_missing"}
         count = start.get("count")
-        for _ in range(count if isinstance(count, int) and 0 < count <= 20 else 1):
-            events.append({"type": "recording_gap", "tool": start.get("tool"),
-                           "reason": "test_end_missing"})
+        if isinstance(count, int) and not isinstance(count, bool) and count > 1:
+            event["count"] = count   # 同じ実行前記録が重なっていた回数
+        at = start.get("at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            # 閉じた時刻ではなく、実行が始まった時刻。集約はこれで期間と振り返りの前後を決める。
+            event["started_at"] = datetime.datetime.fromtimestamp(
+                at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        events.append(event)
     save_state(retro_dir, state)
     return events
 
@@ -331,13 +377,24 @@ def begin_test(payload, root, cwd, retro_dir, config, session_id=None):
     state = load_state(retro_dir)
     starts = live_starts(state, config)
     key = start_key(payload, cwd)
+    before = report_stamp(root, entry)
     overlap = False
-    for active in starts.values():
-        if active.get("report") == entry.get("report"):
+    for other, active in list(starts.items()):
+        if not may_share_report(active.get("report"), entry.get("report")):
+            continue
+        if active.get("background"):
+            # バックグラウンドで起動した実行。レポートが起動のときから変わっていれば、
+            # 書き終えたとみなして忘れる。変わっていなければ、これから書く可能性がある。
+            if active.get("report") == entry.get("report") and same_stamp(active.get("before")) != before:
+                del starts[other]
+                continue
+        else:
             active["overlap"] = True
-            overlap = True
+        overlap = True
     prior = starts.get(key, {})
-    starts[key] = {"before": report_stamp(root, entry), "report": entry.get("report"),
+    if prior.get("background"):
+        prior = {}
+    starts[key] = {"before": before, "report": entry.get("report"),
                    "count": prior.get("count", 0) + 1, "overlap": overlap, "at": time.time(),
                    "session": session_id, "tool": payload.get("tool_name")}
     save_state(retro_dir, state)
@@ -347,9 +404,15 @@ def finish_test(payload, cwd, retro_dir):
     state = load_state(retro_dir)
     key = start_key(payload, cwd)
     start = state.get("test_starts", {}).get(key)
+    if start is not None and start.get("background"):
+        return None   # 起動だけが記録された実行。終わりの記録とは対応しない
     if start is not None:
         start = dict(start)
-        if start["count"] > 1:
+        if (payload.get("tool_input") or {}).get("run_in_background") is True:
+            # 起動の直後に呼ばれた。処理は続いていて、同じレポートをこれから書く可能性がある。
+            # 記録を消さず、「書き手が残っている」ことを期限まで覚えておく。
+            state["test_starts"][key] = dict(start, background=True, count=1)
+        elif start["count"] > 1:
             state["test_starts"][key]["count"] -= 1
         else:
             del state["test_starts"][key]
@@ -369,15 +432,16 @@ def read_test_report(root, cwd, retro_dir, entry, start=None):
         return None, {}, "report_not_found"
     stamp = report_stamp(root, entry)
     state = load_state(retro_dir)
-    if state.get("reports", {}).get(pattern) == stamp:
+    if same_stamp(state.get("reports", {}).get(pattern)) == stamp:
         return None, {}, "report_stale"
     if start is None:
         return None, {}, "missing_test_start"
     if start.get("overlap") or start.get("report") != pattern:
         return None, {}, "ambiguous_test_run"
-    if start["before"] == stamp:
+    before = same_stamp(start.get("before"))
+    if before == stamp:
         return None, {}, "report_stale"
-    if any(item in start["before"] for item in stamp):
+    if any(item in before for item in stamp):
         return None, {}, "report_partly_stale"
     try:
         results, test_files = parse_junit(root, cwd, files)

@@ -241,7 +241,7 @@ def sessions(root, events, since=None, until=None):
 
 
 SHELL_TOOLS = ("execute_bash", "execute_pwsh")
-EXIT_CODE_LINE = re.compile(r"Exit Code:\s*-?\d+")
+EXIT_CODE_LINE = re.compile(r"(?m)^Exit Code:\s*-?\d+\s*$")   # 応答の、行としての終了コード
 OWN_HOOK_PREFIX = "kiroku-record-"
 
 
@@ -288,15 +288,21 @@ def unrecorded_calls(root, session_ids, since=None, until=None):
     止めたフックと理由はログに無い。同じターンでそれまでに動いたフックの名前を、候補として添える。
     今の定義で実行前（PreToolUse）以外と分かるフックは、実行を止められないので候補から外す。
     定義が見つからないフックは、外さずに残す。
-    ログの形式は文書化されていないので、当てはまらないものは数えない。
+    ログの形式は文書化されていない。完了していないシェル実行のうち、結果の行が無いもの、
+    本文が文字列でないもの、知らない状態のものは、止められたとも中断とも決めず、
+    判定できなかった呼び出しとして別に返す（集約は「記録の不足」に出す）。
+    戻り値は (拾った呼び出し, 判定できなかった呼び出し)。
     """
-    directory, marks, found = sessions_dir(root), retro_marks(root), []
+    directory, marks, found, unknown = sessions_dir(root), retro_marks(root), [], []
     triggers = hook_triggers(root)
     for session in session_ids:
         path = excerpt.find_log(session, directory)
         if not path:
             continue
         try:
+            # 期間の始まりより前から更新されていないログには、期間内の呼び出しは無い。
+            if since and os.path.getmtime(path) < since.timestamp():
+                continue
             rows = excerpt.load(path, types=None)
         except (OSError, UnicodeError):
             continue
@@ -324,27 +330,34 @@ def unrecorded_calls(root, session_ids, since=None, until=None):
             if kind != "tool_call" or payload.get("toolName") not in SHELL_TOOLS:
                 continue
             status, call_id = payload.get("status"), payload.get("toolCallId")
+            if status == "completed":
+                continue
+            moment = excerpt.parse_time(stamp)
+            if moment is None or not _in_period(moment, since, until) or (cutoff and moment >= cutoff):
+                continue
             command = (payload.get("args") or {}).get("command") if isinstance(payload.get("args"), dict) else None
             result = results.get(call_id)
-            if status not in ("denied", "failed") or not isinstance(command, str) or result is None:
+            content = result.get("content") if result else None
+            if not isinstance(command, str) or result is None or not isinstance(content, str):
+                unknown.append({"session_id": session, "ts": moment.isoformat(),
+                                "tool": payload.get("toolName")})
                 continue
-            content = result.get("content")
-            if result.get("success") is not False or not isinstance(content, str) \
-                    or EXIT_CODE_LINE.search(content):
-                continue
+            if EXIT_CODE_LINE.search(content):
+                continue   # 実行後のフックで記録済み
             if "policyDenial" in _kiro_meta(payload):
                 continue
             if any(item.get("outcome") == "cancelled" or item.get("selectedOption") == "reject"
                    for item in resolved.get(call_id, [])):
                 continue
-            moment = excerpt.parse_time(stamp)
-            if moment is None or not _in_period(moment, since, until) or (cutoff and moment >= cutoff):
+            if status not in ("denied", "failed") or result.get("success") is not False:
+                unknown.append({"session_id": session, "ts": moment.isoformat(),
+                                "tool": payload.get("toolName")})
                 continue
             found.append({"session_id": session, "ts": moment.isoformat(),
                           "kind": "blocked" if status == "denied" else "interrupted",
                           "command": mask(command),
                           "hooks": list(hooks[payload.get("turnId")]) if status == "denied" else []})
-    return found
+    return found, unknown
 
 
 def _clip(text, limit):

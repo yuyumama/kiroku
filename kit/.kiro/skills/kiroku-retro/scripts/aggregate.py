@@ -70,6 +70,7 @@ GAP_REASONS = {
     "test_end_missing": "テスト実行の終わりが記録されなかった（別のフックによる停止、または中断の可能性）",
     "unknown_not_run": "実行が完了しなかった理由を判定できない",
     "unknown_shell_response": "シェルの応答から終了コードを読めない",
+    "unreadable_tool_call": "セッションログで完了していないシェル実行だが、結果の行が無いか、形式が想定と違うため判定できない",
 }
 SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "sessions", "facts")
 OUTPUT_CAPS = (12, 6, 3)  # 一覧1つあたりの件数。出力が長すぎるときは、順に小さくする
@@ -175,6 +176,9 @@ def load_events(path):
                         if kind != "recording_gap":
                             event["type"] = kind
                             del event["reason"]
+                    if event.get("started_at"):
+                        # 終わりが記録されなかった実行。閉じた時刻ではなく、始まった時刻で扱う。
+                        event["_time"] = parse_time(event["started_at"])
                     events.append(event)
                 except (ValueError, KeyError, TypeError):
                     continue  # 壊れた行は飛ばす
@@ -526,7 +530,12 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
 
     session_rows = prompts.sessions(root, events, since, until)
     grouped_unrecorded = {}
-    for call in prompts.unrecorded_calls(root, [s["session_id"] for s in session_rows], since, until):
+    # 発話が期間の外でも、呼び出しが期間内なら拾う。対象は、このリポジトリのセッションすべて。
+    known = [s["session_id"] for s in session_rows]
+    known += [s for s in {e.get("session_id") for e in all_events if e.get("session_id")} if s not in known]
+    known += [s for s in prompts.discover(root, prompts.sessions_dir(root)) if s not in known]
+    calls, undetermined = prompts.unrecorded_calls(root, known, since, until)
+    for call in calls:
         entry = grouped_unrecorded.setdefault((call["kind"], command_key(call["command"])), {
             "kind": call["kind"], "command_key": command_key(call["command"]),
             "count": 0, "sessions": set(), "hooks": []})
@@ -557,9 +566,12 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "test_failures": finish(grouped_tests.values()),
         "tool_failures": finish(grouped_tools.values()),
         "coverage": coverage,
-        "recording_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
-                            "reason": e.get("reason"), "tool": e.get("tool")}
-                           for e in events if e.get("type") == "recording_gap"],
+        "recording_gaps": [{"session_id": e.get("session_id"), "ts": e.get("started_at") or e["ts"],
+                            "reason": e.get("reason"), "tool": e.get("tool"),
+                            "count": e["count"] if isinstance(e.get("count"), int) and e["count"] > 0 else 1}
+                           for e in events if e.get("type") == "recording_gap"]
+        + [{"session_id": u["session_id"], "ts": u["ts"], "reason": "unreadable_tool_call",
+            "tool": u["tool"], "count": 1} for u in undetermined],
         "test_result_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
                               "command": e.get("command"), "reason": e.get("note") or 'unknown',
                               "matched": e.get("matched") or 'invocation',
@@ -704,12 +716,14 @@ def render_summary(data, cap):
         lines += more
 
     if data["recording_gaps"]:
-        lines += ["", "## 記録の不足（成功・失敗を判定できない実行：%d 件）" % len(data["recording_gaps"]), ""]
+        lines += ["", "## 記録の不足（成功・失敗を判定できない実行：%d 件）"
+                  % sum(g["count"] for g in data["recording_gaps"]), ""]
         rows, more = capped(data["recording_gaps"], cap, "summary")
         for gap in rows:
-            lines.append("- %s session `%s` tool `%s`: %s%s" % (
+            lines.append("- %s session `%s` tool `%s`: %s%s%s" % (
                 gap["ts"], gap["session_id"], gap["tool"], gap["reason"],
-                "（%s）" % GAP_REASONS[gap["reason"]] if gap["reason"] in GAP_REASONS else ""))
+                "（%s）" % GAP_REASONS[gap["reason"]] if gap["reason"] in GAP_REASONS else "",
+                "、%d 回" % gap["count"] if gap["count"] > 1 else ""))
         lines += more
     return lines
 

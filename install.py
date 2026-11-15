@@ -36,10 +36,29 @@ def config_notes(target):
     return notes
 
 
-def install(target, update=False, python_command="python3"):
+PYTHON_COMMANDS = ("python3", "python", "py -3")
+
+
+def installed_python_command(target):
+    """導入済みのフックが使っている Python の起動名。読めなければ None。"""
+    try:
+        hooks = json.loads((Path(target) / ".kiro/hooks/kiroku.json").read_text(encoding="utf-8"))["hooks"]
+        commands = {hook["action"]["command"] for hook in hooks}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    found = {name for name in PYTHON_COMMANDS for command in commands
+             if isinstance(command, str) and command.startswith(name + " .kiro/")}
+    return found.pop() if len(found) == 1 else None
+
+
+def install(target, update=False, python_command=None):
     target = Path(target).resolve()
     if not target.is_dir():
         raise ValueError("導入先が見つかりません: %s" % target)
+    if python_command is None:
+        # 指定が無い更新では、導入のときに選んだ起動名を引き継ぐ。python3 が無い導入先で
+        # 更新しただけで記録が止まらないようにするため。
+        python_command = (installed_python_command(target) if update else None) or "python3"
     kit = Path(__file__).resolve().parent / "kit"
     files = {}
     for source in sorted(kit.rglob("*")):
@@ -94,7 +113,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target")
     parser.add_argument("--update", action="store_true")
-    parser.add_argument("--python-command", choices=("python3", "python", "py -3"), default="python3")
+    parser.add_argument("--python-command", choices=PYTHON_COMMANDS, default=None,
+                        help="フックと手順で使う Python の起動名。省くと、新規は python3、"
+                             "--update は導入済みの起動名を引き継ぐ")
     args = parser.parse_args()
     try:
         changes = install(args.target, args.update, args.python_command)

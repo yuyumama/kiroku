@@ -49,6 +49,11 @@ class SetupTest(Sandbox):
                                   capture_output=True, text=True)
         body = '### P1. 手順\n- 対象の型：`tool:make test`\n\n```kiroku-facts\n%s\n```\n'
         self.assertEqual(check(body % json.dumps(facts)).returncode, 0)
+        # 見出しの形が少し違っても、台帳が案として受け取るものは検査する。
+        bare = '### P1\n- 対象の型：`tool:printf NEVER_EXECUTED`\n\n```kiroku-facts\n%s\n```\n'
+        unknown = check(bare % json.dumps(facts))
+        self.assertEqual(unknown.returncode, 1)
+        self.assertIn('集約にない対象の型', unknown.stdout)
         facts['events'] = 999
         self.assertEqual(check(body % json.dumps(facts)).returncode, 1)
         facts = data['report_facts']

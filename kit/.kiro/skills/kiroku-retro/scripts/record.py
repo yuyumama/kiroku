@@ -2,9 +2,11 @@
 """kiroku の記録フック。Kiro CLI（V3）のフックから呼ばれ、.kiro/kiroku/data/events.jsonl に追記する。
 
 対応するフック:
+  PreToolUse    テスト実行の前のレポートの状態（state に控える。イベントは書かない）
   PostToolUse   シェル実行の失敗、テスト実行の結果、書き込みツールが触ったファイル
   PostFileSave  エージェントが保存したファイル
   UserPromptSubmit  発話のタイミングのみ（本文は保存しない）
+  Stop          ターンの終わり。終わりの記録が来なかったテスト実行を閉じる
 
 守ること:
   - 標準出力には何も書かない（終了コード 0 の標準出力はエージェントの文脈に入る）。
@@ -57,6 +59,9 @@ DEFAULT_CONFIG = {
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
+# 実行が完了しなかった呼び出しの応答の先頭（Kiro CLI 3.2.1〜3.3.0 で実測。verification.md）
+DENIED_HEAD = "Blocked by a permission rule"
+CANCELLED_HEADS = ("The tool call was cancelled before it was approved", "The user rejected this tool call")
 
 
 def not_run_kind(output):
@@ -64,13 +69,21 @@ def not_run_kind(output):
 
     文言で確かめられないものは、拒否とは決めつけず recording_gap にする。
     """
-    output = output or ""
+    output = (output or "").strip()
+    # 権限の規則による拒否の応答は、止めた規則（コマンドの文字列）を引用する。引用された文字列を
+    # 取り消しやタイムアウトの文言と取り違えないよう、応答の先頭の形を先に見る。
+    if output.startswith(DENIED_HEAD):
+        return "tool_denied"
+    # 承認画面での Escape／Ctrl+C と、Deny once。どちらも人がその場で実行を断ったもの。
+    if output.startswith(CANCELLED_HEADS):
+        return "tool_cancelled"
+    # 先頭が切れた古い記録（出力の末尾だけを残したもの）のために、含むかどうかでも見る。
+    if DENIED_HEAD in output:
+        return "tool_denied"
     if "cancelled before it was approved" in output:
         return "tool_cancelled"
     if TIMEOUT_RE.search(output):
         return "tool_timeout"
-    if "Blocked by a permission rule" in output:
-        return "tool_denied"
     return "recording_gap"
 SECRET_PATTERNS = [
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
@@ -257,14 +270,41 @@ def save_state(retro_dir, state):
 
 
 def report_stamp(root, entry):
-    """レポートの実行前後を比べる。内容が同じ再実行も時刻・置換で区別する。"""
+    """レポートの実行前後を比べる。内容が同じ再実行も、更新時刻・置換で区別する。
+
+    ctime は使わない。権限の変更（chmod）などでも変わり、古い結果を新しい実行のものと取り違える。
+    """
     stamps = []
     for path in sorted(glob.glob(os.path.join(root, entry.get("report") or ""), recursive=True)):
         if os.path.isfile(path):
             stat = os.stat(path)
-            stamps.append([os.path.relpath(path, root), stat.st_mtime_ns,
-                           stat.st_ctime_ns, stat.st_size, stat.st_ino])
+            stamps.append([os.path.relpath(path, root), stat.st_mtime_ns, stat.st_size, stat.st_ino])
     return stamps
+
+
+def same_stamp(stamp):
+    """ctime を含んでいた版（要素が5個）の控えを、今の形にそろえる。"""
+    return [item[:2] + item[3:] if isinstance(item, list) and len(item) == 5 else item
+            for item in stamp if isinstance(item, list)] if isinstance(stamp, list) else []
+
+
+WILDCARDS = "*?["
+
+
+def may_share_report(first, second):
+    """2つのレポートの指定が、同じファイルを指しうるか。確かめられないときは、指しうるとする。"""
+    first, second = (os.path.normpath(p or "").replace(os.sep, "/") for p in (first, second))
+    if first == second:
+        return True
+    plain = [not any(c in p for c in WILDCARDS) for p in (first, second)]
+    if all(plain):
+        return False
+    for path, pattern, is_plain in ((first, second, plain[0]), (second, first, plain[1])):
+        if is_plain:
+            # `**` は階層をまたぐ。fnmatch の `*` は `/` にも当たるので、広めの判定になる。
+            return fnmatch.fnmatch(path, pattern.replace("**/", "*"))
+    heads = [re.split(r"[*?\[]", p, 1)[0].rsplit("/", 1)[0] for p in (first, second)]
+    return heads[0].startswith(heads[1]) or heads[1].startswith(heads[0])
 
 
 def start_key(payload, cwd):
@@ -292,21 +332,73 @@ def live_starts(state, config):
     return state["test_starts"]
 
 
-def begin_test(payload, root, cwd, retro_dir, config):
+def close_starts(retro_dir, session_id):
+    """このセッションで、終わりの記録が来ないまま残った実行前記録を閉じる。
+
+    別のフックに止められた実行や、実行中に中断された実行では PostToolUse が呼ばれない。
+    残したままにすると、同じレポートを使う次のテスト実行が「重複」と判定されるので、
+    ターンの終わり（Stop）と次の発話（UserPromptSubmit）で閉じ、記録の不足として残す。
+    セッションの分からない記録（この処理を入れる前の版が書いたもの）は、期限に任せる。
+    """
+    if not session_id:
+        return []
+    state = load_state(retro_dir)
+    starts = state.get("test_starts")
+    if not isinstance(starts, dict):
+        return []
+    closed = [key for key, value in starts.items()
+              if isinstance(value, dict) and value.get("session") == session_id]
+    if not closed:
+        return []
+    events = []
+    for key in closed:
+        start = starts.pop(key)
+        if start.get("background"):
+            starts[key] = start   # バックグラウンドの処理は、ターンが終わっても続いている
+            continue
+        event = {"type": "recording_gap", "tool": start.get("tool"), "reason": "test_end_missing"}
+        count = start.get("count")
+        if isinstance(count, int) and not isinstance(count, bool) and count > 1:
+            event["count"] = count   # 同じ実行前記録が重なっていた回数
+        at = start.get("at")
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            # 閉じた時刻ではなく、実行が始まった時刻。集約はこれで期間と振り返りの前後を決める。
+            event["started_at"] = datetime.datetime.fromtimestamp(
+                at, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        events.append(event)
+    save_state(retro_dir, state)
+    return events
+
+
+def begin_test(payload, root, cwd, retro_dir, config, session_id=None):
     entry = commands.test_entry((payload.get("tool_input") or {}).get("command"), config)
     if entry is None:
         return
     state = load_state(retro_dir)
     starts = live_starts(state, config)
     key = start_key(payload, cwd)
+    before = report_stamp(root, entry)
     overlap = False
-    for active in starts.values():
-        if active.get("report") == entry.get("report"):
+    for other, active in list(starts.items()):
+        if not may_share_report(active.get("report"), entry.get("report")):
+            continue
+        if active.get("background"):
+            # バックグラウンドで起動した実行。ほかの実行が書いたと分かっている状態（seen）から
+            # レポートが変わっていれば、裏の処理が書き終えたとみなして忘れる。
+            # 変わっていなければ、これから書く可能性がある。
+            seen = active.get("seen", active.get("before"))
+            if active.get("report") == entry.get("report") and same_stamp(seen) != before:
+                del starts[other]
+                continue
+        else:
             active["overlap"] = True
-            overlap = True
+        overlap = True
     prior = starts.get(key, {})
-    starts[key] = {"before": report_stamp(root, entry), "report": entry.get("report"),
-                   "count": prior.get("count", 0) + 1, "overlap": overlap, "at": time.time()}
+    if prior.get("background"):
+        prior = {}
+    starts[key] = {"before": before, "report": entry.get("report"),
+                   "count": prior.get("count", 0) + 1, "overlap": overlap, "at": time.time(),
+                   "session": session_id, "tool": payload.get("tool_name")}
     save_state(retro_dir, state)
 
 
@@ -314,14 +406,38 @@ def finish_test(payload, cwd, retro_dir):
     state = load_state(retro_dir)
     key = start_key(payload, cwd)
     start = state.get("test_starts", {}).get(key)
+    if start is not None and start.get("background"):
+        return None   # 起動だけが記録された実行。終わりの記録とは対応しない
     if start is not None:
         start = dict(start)
-        if start["count"] > 1:
+        if (payload.get("tool_input") or {}).get("run_in_background") is True:
+            # 起動の直後に呼ばれた。処理は続いていて、同じレポートをこれから書く可能性がある。
+            # 記録を消さず、「書き手が残っている」ことを期限まで覚えておく。
+            state["test_starts"][key] = dict(start, background=True, count=1)
+        elif start["count"] > 1:
             state["test_starts"][key]["count"] -= 1
         else:
             del state["test_starts"][key]
         save_state(retro_dir, state)
     return start
+
+
+def note_report_seen(root, retro_dir, entry):
+    """通常の実行が終わった時点のレポートの状態を、バックグラウンドの記録に控える。
+
+    裏の処理が動いている間に通常の実行がレポートを書き換えても、それを「裏の処理が
+    書き終えた」と取り違えないため。次の実行の前にこの状態から変わっていれば、
+    通常の実行のあとで誰か（裏の処理）が書いたと分かる。
+    """
+    state = load_state(retro_dir)
+    changed = False
+    for active in (state.get("test_starts") or {}).values():
+        if isinstance(active, dict) and active.get("background") \
+                and active.get("report") == entry.get("report"):
+            active["seen"] = report_stamp(root, entry)
+            changed = True
+    if changed:
+        save_state(retro_dir, state)
 
 
 def read_test_report(root, cwd, retro_dir, entry, start=None):
@@ -336,15 +452,16 @@ def read_test_report(root, cwd, retro_dir, entry, start=None):
         return None, {}, "report_not_found"
     stamp = report_stamp(root, entry)
     state = load_state(retro_dir)
-    if state.get("reports", {}).get(pattern) == stamp:
+    if same_stamp(state.get("reports", {}).get(pattern)) == stamp:
         return None, {}, "report_stale"
     if start is None:
         return None, {}, "missing_test_start"
     if start.get("overlap") or start.get("report") != pattern:
         return None, {}, "ambiguous_test_run"
-    if start["before"] == stamp:
+    before = same_stamp(start.get("before"))
+    if before == stamp:
         return None, {}, "report_stale"
-    if any(item in start["before"] for item in stamp):
+    if any(item in before for item in stamp):
         return None, {}, "report_partly_stale"
     try:
         results, test_files = parse_junit(root, cwd, files)
@@ -377,13 +494,22 @@ def shell_events(payload, root, cwd, retro_dir, config):
     entry, how = commands.test_match(command, config)
     if entry is not None and exit_code != -1:
         head, dirty, truncated = worktree_state(root, config)
-        results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
+        background = tool_input.get("run_in_background") is True
+        if background:
+            # バックグラウンドの実行では、処理が終わる前にこのフックが呼ばれる。終了コードは
+            # 起動の成否で、レポートもまだ書かれていない。結果は読まず、未完了として残す。
+            results, test_files, note = None, {}, "background_not_finished"
+        else:
+            results, test_files, note = read_test_report(root, cwd, retro_dir, entry, start)
+            note_report_seen(root, retro_dir, entry)
         event = {
             "type": "test_run", "command": mask(command), "exit_code": exit_code,
             "head": head, "dirty": dirty, "results": results, "test_files": test_files,
         }
         if how == "text":
             event["matched"] = "text"  # 起動先ではなく文面で一致。実行か言及かは、ここでは決めない
+        if background:
+            event["background"] = True
         if truncated:
             event["dirty_truncated"] = True
         vcs = vcs_in_progress(root)
@@ -492,13 +618,17 @@ def main():
             text = payload.get("prompt")
             if not isinstance(text, str):
                 text = os.environ.get("USER_PROMPT") or ""
+            # 次の発話が来たなら、前のターンの実行は終わっている。
+            events = close_starts(retro_dir, session_id)
             # 振り返りの起動そのものは記録しない。
             if text.lstrip().startswith("/kiroku-retro"):
                 mark_retro(retro_dir, session_id, now())
             elif text.strip():
-                events = [{"type": "prompt"}]
+                events.append({"type": "prompt"})
+        elif hook == "Stop":
+            events = close_starts(retro_dir, session_id)
         elif hook == "PreToolUse" and tool in ("execute_bash", "execute_pwsh"):
-            begin_test(payload, root, cwd, retro_dir, config)
+            begin_test(payload, root, cwd, retro_dir, config, session_id)
         elif hook == "PostToolUse" and tool in ("execute_bash", "execute_pwsh"):
             command = (payload.get("tool_input") or {}).get("command")
             if commands.own_script(command) == 'aggregate.py':

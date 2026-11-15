@@ -23,6 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from record import mask, find_root, load_config  # noqa: E402
 
 SHOWN_TYPES = ("user", "assistant", "tool_call", "tool_result")
+# 読み込んで持つ種別。会話の表示に使うものと、実行されなかった呼び出しの判定に使うもの。
+KEPT_TYPES = SHOWN_TYPES + ("interaction_resolved", "ContextualHookInvoked")
+_CACHE = {}   # 1回の実行の中で、同じログを読み直さない
 
 
 def find_log(session_id, sessions_dir=None):
@@ -59,7 +62,20 @@ def parse_time(value):
         return None
 
 
-def load(path, issues=None):
+def load(path, issues=None, types=SHOWN_TYPES):
+    """ログの行を読む。types に None を渡すと、持っている種別（KEPT_TYPES）をすべて返す。"""
+    stat = os.stat(path)
+    key = (os.path.abspath(path), stat.st_mtime_ns, stat.st_size)
+    if key not in _CACHE:
+        found = []
+        _CACHE[key] = (_read(path, found), found)
+    rows, found = _CACHE[key]
+    if issues is not None:
+        issues.extend(found)
+    return [row for row in rows if types is None or row[1].get("type") in types]
+
+
+def _read(path, issues):
     rows = []
     with open(path, encoding="utf-8-sig") as handle:
         for number, line in enumerate(handle, 1):
@@ -78,7 +94,7 @@ def load(path, issues=None):
                 if issues is not None:
                     issues.append("invalid_payload:line_%d" % number)
                 continue
-            if payload.get("type") in SHOWN_TYPES:
+            if payload.get("type") in KEPT_TYPES:
                 rows.append((row.get("timestamp"), payload))
     return rows
 

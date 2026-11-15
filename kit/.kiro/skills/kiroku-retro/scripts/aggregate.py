@@ -55,6 +55,23 @@ RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
 TOOL_KINDS = (("tool_failure", "tool", "ツール失敗"), ("tool_cancelled", "cancelled", "人による取り消し"),
               ("tool_timeout", "timeout", "タイムアウト"), ("tool_denied", "denied", "権限の規則による拒否"))
+# 実行後のフックが呼ばれず、記録に残らなかったシェル実行。セッションログから拾う。
+UNRECORDED_KINDS = (
+    ("blocked", "実行前に止められた呼び出し",
+     "フックの記録には無く、セッションログから拾ったものです。止めたフックと理由はログに残らないため未確定です。"
+     "候補のフックを原因と書くときは、そのスクリプトを読んで確かめてください。"
+     "追跡の対象（対象の型）にはなりません。"),
+    ("interrupted", "実行中に中断された呼び出し",
+     "フックの記録には無く、セッションログから拾ったものです。実行が始まったあとに中断されたもので、"
+     "承認されなかった実行（人による取り消し）とは別です。途中まで実行された可能性があります。"
+     "追跡の対象（対象の型）にはなりません。"),
+)
+GAP_REASONS = {
+    "test_end_missing": "テスト実行の終わりが記録されなかった（別のフックによる停止、または中断の可能性）",
+    "unknown_not_run": "実行が完了しなかった理由を判定できない",
+    "unknown_shell_response": "シェルの応答から終了コードを読めない",
+    "unreadable_tool_call": "セッションログで完了していないシェル実行だが、結果の行が無いか、形式が想定と違うため判定できない",
+}
 SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "sessions", "facts")
 OUTPUT_CAPS = (12, 6, 3)  # 一覧1つあたりの件数。出力が長すぎるときは、順に小さくする
 VCS_ACTIONS = ("merge", "pull", "rebase", "checkout", "reset", "cherry-pick", "revert",
@@ -153,6 +170,15 @@ def load_events(path):
                         event["type"] = not_run_kind(event.get("output_tail"))
                         if event["type"] == "recording_gap":
                             event["reason"] = "unknown_not_run"
+                    elif event.get("type") == "recording_gap" and event.get("reason") == "unknown_not_run":
+                        # 記録の時点で種類を決められなかったもの。今の判定で読み直す。
+                        kind = not_run_kind(event.get("output_tail"))
+                        if kind != "recording_gap":
+                            event["type"] = kind
+                            del event["reason"]
+                    if event.get("started_at"):
+                        # 終わりが記録されなかった実行。閉じた時刻ではなく、始まった時刻で扱う。
+                        event["_time"] = parse_time(event["started_at"])
                     events.append(event)
                 except (ValueError, KeyError, TypeError):
                     continue  # 壊れた行は飛ばす
@@ -439,7 +465,10 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         kind = event.get("type")
         if kind == "test_run":
             # 文面だけで一致し、結果も取り込めなかったものは、実行か言及か分からないので数えない。
-            if event.get("matched") != "text" or event.get("results") is not None:
+            # バックグラウンドで起動しただけのものも、終わったかどうか分からないので数えない。
+            unknown = event.get("results") is None and (
+                event.get("matched") == "text" or event.get("background"))
+            if not unknown:
                 row["test_runs"] += 1
         elif kind == "prompt":
             row["prompts"] += 1
@@ -500,6 +529,21 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         return sorted(rows, key=lambda r: (-r["count"], r.get("test_id") or r.get("command_key")))
 
     session_rows = prompts.sessions(root, events, since, until)
+    grouped_unrecorded = {}
+    # 発話が期間の外でも、呼び出しが期間内なら拾う。対象は、このリポジトリのセッションすべて。
+    known = [s["session_id"] for s in session_rows]
+    known += [s for s in {e.get("session_id") for e in all_events if e.get("session_id")} if s not in known]
+    known += [s for s in prompts.discover(root, prompts.sessions_dir(root)) if s not in known]
+    calls, undetermined = prompts.unrecorded_calls(root, known, since, until)
+    for call in calls:
+        entry = grouped_unrecorded.setdefault((call["kind"], command_key(call["command"])), {
+            "kind": call["kind"], "command_key": command_key(call["command"]),
+            "count": 0, "sessions": set(), "hooks": []})
+        entry["count"] += 1
+        entry["sessions"].add(call["session_id"])
+        entry["hooks"] += [name for name in call["hooks"] if name not in entry["hooks"]]
+        if entry.get("last_ts") is None or call["ts"] >= entry["last_ts"]:
+            entry.update(last_ts=call["ts"], last_session=call["session_id"], last_command=call["command"])
     first = all_events[0]["_time"] if all_events else None
     log_only = [s for s in session_rows if not s["recorded"]]
     before = sum(1 for s in log_only if first and s["last_activity"]
@@ -522,12 +566,16 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "test_failures": finish(grouped_tests.values()),
         "tool_failures": finish(grouped_tools.values()),
         "coverage": coverage,
-        "recording_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
-                            "reason": e.get("reason"), "tool": e.get("tool")}
-                           for e in events if e.get("type") == "recording_gap"],
+        "recording_gaps": [{"session_id": e.get("session_id"), "ts": e.get("started_at") or e["ts"],
+                            "reason": e.get("reason"), "tool": e.get("tool"),
+                            "count": e["count"] if isinstance(e.get("count"), int) and e["count"] > 0 else 1}
+                           for e in events if e.get("type") == "recording_gap"]
+        + [{"session_id": u["session_id"], "ts": u["ts"], "reason": "unreadable_tool_call",
+            "tool": u["tool"], "count": 1} for u in undetermined],
         "test_result_gaps": [{"session_id": e.get("session_id"), "ts": e["ts"],
                               "command": e.get("command"), "reason": e.get("note") or 'unknown',
-                              "matched": e.get("matched") or 'invocation'}
+                              "matched": e.get("matched") or 'invocation',
+                              "background": bool(e.get("background"))}
                              for e in events if e.get("type") == "test_run" and e.get("results") is None],
         "test_configuration": [{k: mask(t.get(k)) for k in ('match', 'report', 'format')}
                                for t in load_config(root)['tests']],
@@ -543,6 +591,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "pending": pending,
         "rejected": rejected,
         "sessions": session_rows,
+        "unrecorded_calls": finish(grouped_unrecorded.values()),
         "reading_plan": reading_plan(session_rows, load_config(root)["retro_read_chars"]),
         "fix_candidates": candidates,
         "fix_excluded": excluded,
@@ -583,13 +632,17 @@ def render(data, show_prompts=False, section=None, cap=None):
         lines += render_review(data, cap)
     if want("summary"):
         lines += render_summary(data, cap)
-    if data["event_count"]:
-        if want("tests"):
-            lines += render_tests(data, cap)
-        if want("tools"):
+    recorded = bool(data["event_count"])
+    if want("tests") and recorded:
+        lines += render_tests(data, cap)
+    if want("tools"):
+        if recorded:
             lines += render_tools(data, cap)
-        if want("files"):
-            lines += render_files(data, cap)
+        # フックの記録が1件も無いセッションでも、止められた呼び出しはログから出す。
+        if recorded or data["unrecorded_calls"]:
+            lines += render_unrecorded(data, cap)
+    if want("files") and recorded:
+        lines += render_files(data, cap)
     if want("harness"):
         lines += render_harness(data, cap)
     if want("sessions"):
@@ -657,16 +710,20 @@ def render_summary(data, cap):
         for row in rows:
             lines.append('- %s session `%s`: %s%s。コマンド `%s`' % (
                 row['ts'], row['session_id'], row['reason'],
-                '（文面で一致。テストの実行か、名前への言及かは未確認）' if row['matched'] == 'text' else '',
+                '（バックグラウンドで起動。終わる前に記録されたので、成否は未確認）' if row['background']
+                else '（文面で一致。テストの実行か、名前への言及かは未確認）' if row['matched'] == 'text' else '',
                 shorten(row['command'], 200)))
         lines += more
 
     if data["recording_gaps"]:
-        lines += ["", "## 記録の不足（成功・失敗を判定できない実行：%d 件）" % len(data["recording_gaps"]), ""]
+        lines += ["", "## 記録の不足（成功・失敗を判定できない実行：%d 件）"
+                  % sum(g["count"] for g in data["recording_gaps"]), ""]
         rows, more = capped(data["recording_gaps"], cap, "summary")
         for gap in rows:
-            lines.append("- %s session `%s` tool `%s`: %s" % (
-                gap["ts"], gap["session_id"], gap["tool"], gap["reason"]))
+            lines.append("- %s session `%s` tool `%s`: %s%s%s" % (
+                gap["ts"], gap["session_id"], gap["tool"], gap["reason"],
+                "（%s）" % GAP_REASONS[gap["reason"]] if gap["reason"] in GAP_REASONS else "",
+                "、%d 回" % gap["count"] if gap["count"] > 1 else ""))
         lines += more
     return lines
 
@@ -712,6 +769,25 @@ def render_tools(data, cap):
             if row["last_output_tail"]:
                 lines.append("  - 出力の末尾：")
                 lines += ["    > " + text[:200] for text in row["last_output_tail"].splitlines()[-tail_lines:]]
+        lines += more
+    return lines
+
+
+def render_unrecorded(data, cap):
+    lines = []
+    for kind, title, note in UNRECORDED_KINDS:
+        found = [r for r in data["unrecorded_calls"] if r["kind"] == kind]
+        lines += ["", "## %s（%d 種類）" % (title, len(found)), "", note, ""]
+        if not found:
+            lines.append("なし")
+        rows, more = capped(found, cap, "tools")
+        for row in rows:
+            lines.append("- `%s`：%d 回、%d セッション。最後は %s（session `%s`）" % (
+                row["command_key"], row["count"], row["sessions"], row["last_ts"], row["last_session"]))
+            lines.append("  - コマンド：`%s`" % shorten(row["last_command"], 300))
+            if kind == "blocked":
+                lines.append("  - 同じターンでそれまでに動いた実行前のフック（候補。止めたフックとは限らない）：%s" % (
+                    "、".join("`%s`" % name for name in row["hooks"]) or "記録なし"))
         lines += more
     return lines
 

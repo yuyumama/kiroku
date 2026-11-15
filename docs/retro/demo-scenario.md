@@ -12,7 +12,7 @@ kiroku を入れて数回やり取りし、振り返りが既存のハーネス�
 
 テスト結果の記録まで検証する回では、`python3 run_tests.py` を実行するよう依頼します。`make test` の失敗はハーネスの不整合を見つける材料ですが、代わりにJUnitを生成しない `python3 -m unittest` を使うだけでは、kirokuのテスト分類を確認したことにはなりません。
 
-導入後、`doctor.py --command "python3 run_tests.py"` で設定を診断し、Kiroの `/hooks` で実行前フックを含む4本を確認します。振り返りは `kiro-cli --agent kiroku-retro` で別セッションを起動します。レポート保存後はskillの `--check-report` が成功したことと、本文の根拠を確認します。
+導入後、`doctor.py --command "python3 run_tests.py"` で設定を診断し、Kiroの `/hooks` で実行前フックとターンの終わりのフックを含む5本を確認します。振り返りは `kiro-cli --agent kiroku-retro` で別セッションを起動します。レポート保存後はskillの `--check-report` が成功したことと、本文の根拠を確認します。
 
 Python の標準ライブラリだけで動きます。追加のパッケージは要りません。
 
@@ -39,7 +39,7 @@ sh ~/kiroku/install.sh . && git add -A && git commit -m init
 ```
 
 以前の `~/kiroku-demo` が残っている場合は、先に別名に変えるか削除します。
-Kiro を起動して `/hooks` を入力し、`kiroku-record-` の4本と、`check-python-syntax`、`guard-shell` が出ることを確かめます。
+Kiro を起動して `/hooks` を入力し、`kiroku-record-` の5本と、`check-python-syntax`、`guard-shell` が出ることを確かめます。
 
 ## 会話の例
 

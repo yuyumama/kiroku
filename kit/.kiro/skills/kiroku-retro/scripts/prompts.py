@@ -8,6 +8,7 @@ import collections
 import glob
 import json
 import os
+import re
 
 import excerpt
 from record import load_config, load_state, mask
@@ -237,6 +238,126 @@ def sessions(root, events, since=None, until=None):
     for row in rows:
         del row["_activity"]
     return rows
+
+
+SHELL_TOOLS = ("execute_bash", "execute_pwsh")
+EXIT_CODE_LINE = re.compile(r"(?m)^Exit Code:\s*-?\d+\s*$")   # 応答の、行としての終了コード
+OWN_HOOK_PREFIX = "kiroku-record-"
+
+
+def _kiro_meta(payload):
+    meta = payload.get("_meta")
+    kiro = meta.get("kiro") if isinstance(meta, dict) else None
+    return kiro if isinstance(kiro, dict) else {}
+
+
+def hook_triggers(root):
+    """フックの定義ファイルから、{フック名: トリガー（小文字）} を読む。
+
+    プロジェクト内（.kiro/hooks/）と、ユーザー共通（~/.kiro/hooks/、KIRO_HOME があればその配下）。
+    セッションログのフックの記録には、どのトリガーで動いたかが無い。実行を止められるのは
+    実行前（PreToolUse）のフックだけなので、候補を絞るために定義から引く。
+    """
+    home = os.environ.get("KIRO_HOME") or os.path.join(os.path.expanduser("~"), ".kiro")
+    found = {}
+    for directory in (os.path.join(home, "hooks"), os.path.join(root, ".kiro", "hooks")):
+        for path in sorted(glob.glob(os.path.join(glob.escape(directory), "*.json"))):
+            try:
+                with open(path, encoding="utf-8-sig") as handle:
+                    hooks = json.load(handle).get("hooks")
+            except (OSError, ValueError, AttributeError):
+                continue
+            for hook in hooks if isinstance(hooks, list) else []:
+                if isinstance(hook, dict) and isinstance(hook.get("name"), str) \
+                        and isinstance(hook.get("trigger"), str):
+                    found[hook["name"]] = hook["trigger"].lower()
+    return found
+
+
+def unrecorded_calls(root, session_ids, since=None, until=None):
+    """実行後のフックが呼ばれなかったシェル実行を、セッションログから拾う。
+
+    別のフックが実行前に止めた呼び出しと、実行中に中断された呼び出しでは、PostToolUse が
+    呼ばれず、events.jsonl に何も残らない。ログには残るので、集約のときにここで数える。
+
+    拾うのは、次をすべて満たすものだけ（Kiro CLI 3.3.0 で実測した形。verification.md）。
+      - シェル実行の tool_call で、状態が denied または failed
+      - 対応する tool_result の本文に Exit Code の行が無い（あるものは PostToolUse で記録済み）
+      - 権限の規則による拒否（policyDenial）ではない
+      - 承認画面での取り消し・拒否（interaction_resolved の cancelled／reject）ではない
+    止めたフックと理由はログに無い。同じターンでそれまでに動いたフックの名前を、候補として添える。
+    今の定義で実行前（PreToolUse）以外と分かるフックは、実行を止められないので候補から外す。
+    定義が見つからないフックは、外さずに残す。
+    ログの形式は文書化されていない。完了していないシェル実行のうち、結果の行が無いもの、
+    本文が文字列でないもの、知らない状態のものは、止められたとも中断とも決めず、
+    判定できなかった呼び出しとして別に返す（集約は「記録の不足」に出す）。
+    戻り値は (拾った呼び出し, 判定できなかった呼び出し)。
+    """
+    directory, marks, found, unknown = sessions_dir(root), retro_marks(root), [], []
+    triggers = hook_triggers(root)
+    for session in session_ids:
+        path = excerpt.find_log(session, directory)
+        if not path:
+            continue
+        try:
+            # 期間の始まりより前から更新されていないログには、期間内の呼び出しは無い。
+            if since and os.path.getmtime(path) < since.timestamp():
+                continue
+            rows = excerpt.load(path, types=None)
+        except (OSError, UnicodeError):
+            continue
+        cutoff = retro_start([r for r in rows if r[1].get("type") in excerpt.SHOWN_TYPES],
+                             marks.get(session))
+        results, resolved = {}, {}
+        for _, payload in rows:
+            call_id = payload.get("toolCallId")
+            if not isinstance(call_id, str):
+                continue
+            if payload.get("type") == "tool_result":
+                results[call_id] = payload
+            elif payload.get("type") == "interaction_resolved":
+                resolved.setdefault(call_id, []).append(payload)
+        hooks = collections.defaultdict(list)   # ターンごとの、それまでに動いたフックの名前
+        for stamp, payload in rows:
+            kind = payload.get("type")
+            if kind == "ContextualHookInvoked":
+                name = payload.get("name")
+                if isinstance(name, str) and not name.startswith(OWN_HOOK_PREFIX) \
+                        and triggers.get(name, "pretooluse") == "pretooluse" \
+                        and name not in hooks[payload.get("turnId")]:
+                    hooks[payload.get("turnId")].append(name)
+                continue
+            if kind != "tool_call" or payload.get("toolName") not in SHELL_TOOLS:
+                continue
+            status, call_id = payload.get("status"), payload.get("toolCallId")
+            if status == "completed":
+                continue
+            moment = excerpt.parse_time(stamp)
+            if moment is None or not _in_period(moment, since, until) or (cutoff and moment >= cutoff):
+                continue
+            command = (payload.get("args") or {}).get("command") if isinstance(payload.get("args"), dict) else None
+            result = results.get(call_id)
+            content = result.get("content") if result else None
+            if not isinstance(command, str) or result is None or not isinstance(content, str):
+                unknown.append({"session_id": session, "ts": moment.isoformat(),
+                                "tool": payload.get("toolName")})
+                continue
+            if EXIT_CODE_LINE.search(content):
+                continue   # 実行後のフックで記録済み
+            if "policyDenial" in _kiro_meta(payload):
+                continue
+            if any(item.get("outcome") == "cancelled" or item.get("selectedOption") == "reject"
+                   for item in resolved.get(call_id, [])):
+                continue
+            if status not in ("denied", "failed") or result.get("success") is not False:
+                unknown.append({"session_id": session, "ts": moment.isoformat(),
+                                "tool": payload.get("toolName")})
+                continue
+            found.append({"session_id": session, "ts": moment.isoformat(),
+                          "kind": "blocked" if status == "denied" else "interrupted",
+                          "command": mask(command),
+                          "hooks": list(hooks[payload.get("turnId")]) if status == "denied" else []})
+    return found, unknown
 
 
 def _clip(text, limit):

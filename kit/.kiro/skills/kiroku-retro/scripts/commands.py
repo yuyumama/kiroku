@@ -13,6 +13,10 @@ import shlex
 TOKEN = re.compile(r'''\s*(?:(?P<op>&&|\|\||>>|>&|<&|[;&|<>()])|(?P<word>(?:[^\s'"\\;&|<>()]+|\\.|'[^']*'|"(?:\\.|[^"\\])*")+))''')
 
 
+QUOTED = re.compile(r'''\\.|'[^']*'|"(?:\\.|[^"\\])*"''')
+UNQUOTED_GLOB = re.compile(r'[*?\[{]')
+
+
 def parse(command):
     if not isinstance(command, str) or any(c in command for c in ('\n', '\r', '$', '`')):
         return None
@@ -32,8 +36,9 @@ def parse(command):
             else:
                 raw = match.group('word')
                 words = shlex.split(raw, comments=False)
-                if len(words) != 1 or raw.startswith('#'):
-                    return None
+                if len(words) != 1 or raw.startswith('#') or raw.startswith('~') \
+                        or UNQUOTED_GLOB.search(QUOTED.sub('', raw)):
+                    return None   # ファイル名の展開（*.txt、~/x、{a,b}）は、引用した文字列と意味が違う
                 parts.append(('word', words[0]))
                 last_raw, last_end = raw, match.end()
     except ValueError:

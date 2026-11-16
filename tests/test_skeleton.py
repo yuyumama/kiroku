@@ -89,7 +89,8 @@ class SkeletonTest(ReviewSandbox):
         appended = filled.replace("## 様子見\n\nなし", "## 様子見\n\n%s\n特になし" % skeleton.slot("無ければ「なし」"))
         self.assertEqual(self.check(path, appended).returncode, 1)
         self.assertEqual(self.check(path, filled.replace("```kiroku-facts\n", "")).returncode, 1)
-        self.assertLess(len(filled.splitlines()), 60)   # 検証値は1行。本文を埋もれさせない
+        lines = filled.splitlines()   # 検証値は1行。本文を埋もれさせない
+        self.assertEqual(lines.index("```", lines.index("```kiroku-facts")) - lines.index("```kiroku-facts"), 2)
         self.assertRegex(filled, r"- 対象期間：\d{4}-\d\d-\d\d \d\d:\d\d 〜 \d{4}-\d\d-\d\d \d\d:\d\d（UTC）")
         self.assertIn("消えているか、書き換えられています", self.check(path, cases["中断の行を消した"]).stdout)
 

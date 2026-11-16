@@ -50,6 +50,7 @@ import excerpt  # noqa: E402
 import commands  # noqa: E402
 import reportcheck  # noqa: E402
 import skeleton  # noqa: E402
+import citations  # noqa: E402
 from record import load_config, mask, not_run_kind  # noqa: E402
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
@@ -1080,15 +1081,17 @@ def main(argv=None):
             name = name[:-3] if name.endswith('.md') else name
             data = aggregate(root, start, end, before_report=name)
             errors = reportcheck.validate(body, data['report_facts'])
-            if skeleton.MARK in body:
+            if skeleton.version(body):
                 errors += skeleton.validate(body, skeleton.build(root, data, GAP_REASONS))
+            if skeleton.version(body) >= 2:
+                errors += citations.validate(root, body)
         except (OSError, ValueError, TypeError, KeyError) as exc:
             errors = ['レポートを検査できません：' + str(exc)]
         for error in errors:
             print(mask(error))
         if not errors:
-            print('検証値、対象の型、スクリプトが書いた部分は記録と一致します。'
-                  '本文の意味・提案の妥当性は別に確認してください。')
+            print('検証値、対象の型、スクリプトが書いた部分は記録と一致し、引用は元の会話・ファイルに実在します。'
+                  '引用の解釈、本文の意味、提案の妥当性は別に確認してください。')
         return 1 if errors else 0
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else now

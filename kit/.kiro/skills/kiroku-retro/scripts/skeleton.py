@@ -12,7 +12,11 @@ import os
 import re
 from pathlib import Path
 
-MARK = "<!-- kiroku-report:1 -->"   # この形のレポートであることの目印。検査はこの行があるものだけを対象にする
+# この形のレポートであることの目印。数字は形式の版。
+#   1：骨組みをスクリプトが書く（最初の形。期間と検証値の表記が違うので、行の照合はしない）
+#   2：型と改善案の主張に引用を付け、検査が引用の実在を確かめる
+MARK = "<!-- kiroku-report:2 -->"
+MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
 SLOT = re.compile(r"【ここに書く[^】]*】")
 OWN_FILES = (".kiro/skills/kiroku-retro/", ".kiro/hooks/kiroku.json", ".kiro/agents/kiroku-retro.json",
              ".kiro/kiroku/")
@@ -24,9 +28,15 @@ def slot(hint=""):
     return "【ここに書く%s】" % ("：" + hint if hint else "")
 
 
+def version(text):
+    """骨組みの形式の版。骨組みから作ったレポートでなければ 0。"""
+    found = MARK_RE.search(text)
+    return int(found.group(1)) if found else 0
+
+
 def is_draft(text):
     """骨組みのまま、書いていない欄が残っているレポートか。"""
-    return MARK in text and SLOT.search(text) is not None
+    return version(text) > 0 and SLOT.search(text) is not None
 
 
 def _display(root, scope, path):
@@ -142,11 +152,11 @@ def build(root, data, reasons=None):
         "",
         "## 観測した型・継続方針",
         "",
-        slot("型ごとに `### 1. …` の見出しで書く。無ければ「なし」"),
+        slot("型ごとに `### 1. …` の見出しで書く。事実を述べる行には引用を付ける。無ければ「なし」"),
         "",
         "## ハーネスへの改善案（プロジェクト内）",
         "",
-        slot("案ごとに `### P1. …` の見出しで書く。無ければ「なし」"),
+        slot("案ごとに `### P1. …` の見出しで書く。既存のファイルを変える案には、そのファイルの引用を付ける。無ければ「なし」"),
         "",
         "## ハーネスへの改善案（ユーザー共通）",
         "",
@@ -204,6 +214,8 @@ def validate(report, expected):
     """保存したレポートに、骨組みのスクリプトが書いた部分が、順番どおり残っているかを確かめる。"""
     errors = []
     lines = report.splitlines()
+    if version(report) < version(expected):
+        expected = ""   # 以前の版の骨組み。表記が違うので、行の照合はせず、欄の残りだけを見る
     left = SLOT.findall(report)
     if left:
         errors.append("欄の目印が %d 個残っています。内容を書き足すのではなく、目印（【ここに書く…】）ごと"

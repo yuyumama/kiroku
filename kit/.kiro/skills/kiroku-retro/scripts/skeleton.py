@@ -6,6 +6,7 @@
 文章の意味と、改善案の妥当性は、ここでは判定しない。
 """
 import collections
+import datetime
 import json
 import os
 import re
@@ -35,6 +36,19 @@ def _display(root, scope, path):
         return prefix + Path(path).relative_to(base).as_posix()
     except ValueError:
         return str(path)
+
+
+def _moment(value, missing):
+    """人が読むための時刻。分まで、UTC。正確な値は、末尾の検証値にある。"""
+    if not value:
+        return missing
+    try:
+        moment = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return moment.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
 def _harness_rows(root, data):
@@ -108,7 +122,7 @@ def build(root, data, reasons=None):
         MARK,
         "# 振り返り %s" % day,
         "",
-        "- 対象期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"),
+        "- 対象期間：%s 〜 %s（UTC）" % (_moment(data["since"], "最初"), _moment(data["until"], "現在")),
         "- イベント数、セッション数：%d 件、%d セッション（フックの記録あり %d、ログのみ %d）" % (
             data["event_count"], cover["sessions"], cover["recorded"], cover["log_only"]),
         "- 未読のセッション：%d 件" % (len(plan["read"]) + plan["rest"]),
@@ -161,8 +175,10 @@ def build(root, data, reasons=None):
         "",
         slot("上への補足と、利用者に確かめたいこと。無ければ「なし」"),
         "",
+        "照合用の検証値です（スクリプトが書いたもの。読む必要はありません）。",
+        "",
         "```kiroku-facts",
-        json.dumps(data["report_facts"], ensure_ascii=False, indent=2),
+        json.dumps(data["report_facts"], ensure_ascii=False),   # 1行にする。人が読む部分を埋もれさせない
         "```",
         "",
     ]
@@ -190,7 +206,8 @@ def validate(report, expected):
     lines = report.splitlines()
     left = SLOT.findall(report)
     if left:
-        errors.append("書いていない欄が %d 個残っています。該当が無ければ「なし」と書いてください：%s"
+        errors.append("欄の目印が %d 個残っています。内容を書き足すのではなく、目印（【ここに書く…】）ごと"
+                      "置き換えてください。該当が無ければ「なし」に置き換えます：%s"
                       % (len(left), "、".join(left[:3])))
     position = 0
     for part in fixed_parts(expected):

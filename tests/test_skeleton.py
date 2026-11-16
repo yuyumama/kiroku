@@ -84,7 +84,13 @@ class SkeletonTest(ReviewSandbox):
         for label, body in cases.items():
             done = self.check(path, body)
             self.assertEqual(done.returncode, 1, label + done.stdout)
-        self.assertIn("書いていない欄", self.check(path, cases["欄を残した"]).stdout)
+        self.assertIn("目印（【ここに書く…】）ごと", self.check(path, cases["欄を残した"]).stdout)
+        # 実機で起きた形：内容を書き足したが、目印を消していない。検証値の囲みを消した。
+        appended = filled.replace("## 様子見\n\nなし", "## 様子見\n\n%s\n特になし" % skeleton.slot("無ければ「なし」"))
+        self.assertEqual(self.check(path, appended).returncode, 1)
+        self.assertEqual(self.check(path, filled.replace("```kiroku-facts\n", "")).returncode, 1)
+        self.assertLess(len(filled.splitlines()), 60)   # 検証値は1行。本文を埋もれさせない
+        self.assertRegex(filled, r"- 対象期間：\d{4}-\d\d-\d\d \d\d:\d\d 〜 \d{4}-\d\d-\d\d \d\d:\d\d（UTC）")
         self.assertIn("消えているか、書き換えられています", self.check(path, cases["中断の行を消した"]).stdout)
 
     def test_unread_file_in_the_table_contradicts_none_in_the_header(self):

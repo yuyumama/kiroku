@@ -21,6 +21,7 @@ import sys
 sys.dont_write_bytecode = True  # 導入先に __pycache__ を作らない
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from record import find_root  # noqa: E402
+import skeleton  # noqa: E402
 
 HEADING = re.compile(r"^###\s+(P\d+)[.．:：]?\s*(.*)$")
 TARGET = re.compile(r"対象の型[：:]\s*`([^`]+)`")
@@ -32,12 +33,26 @@ def data_dir(root):
     return os.path.join(root, ".kiro", "kiroku", "data")
 
 
-def latest_report(root):
-    """案が0件のファイルも含む、最新のレポート名。"""
+def _is_draft(path):
+    """骨組みのまま、書き終えていないレポートか。書きかけは、レポートとして数えない。"""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return skeleton.is_draft(handle.read())
+    except (OSError, UnicodeError):
+        return False
+
+
+def latest_report(root, before=None):
+    """案が0件のファイルも含む、最新のレポート名。書きかけの骨組みは除く。
+
+    before を渡すと、その名前より前のレポートの中で最新のものを返す。
+    """
     directory = os.path.join(data_dir(root), "reports")
     try:
         names = [n[:-3] for n in os.listdir(directory)
-                 if n.endswith(".md") and os.path.isfile(os.path.join(directory, n))]
+                 if n.endswith(".md") and os.path.isfile(os.path.join(directory, n))
+                 and (before is None or n[:-3] < before)
+                 and not _is_draft(os.path.join(directory, n))]
     except OSError:
         return None
     return max(names) if names else None
@@ -71,9 +86,12 @@ def proposals(root):
         current = None
         try:
             with open(os.path.join(directory, name), encoding="utf-8") as handle:
-                lines = handle.read().splitlines()
+                text = handle.read()
         except OSError:
             continue
+        if skeleton.is_draft(text):
+            continue   # 書きかけの骨組み。欄の説明に出てくる見出しを、案として読まない
+        lines = text.splitlines()
         for line in lines:
             heading = HEADING.match(line)
             if heading:
@@ -105,8 +123,10 @@ def decisions(root):
     return latest
 
 
-def pending(root):
+def pending(root, before=None):
     """最新のレポートの案のうち、採用も見送りも記録されていないもの。
+
+    before を渡すと、その名前のレポートを書く前の時点での「最新」を使う。
 
     それより古いレポートの未判断の案は、次の振り返りが引き継ぐか外すかを決めた後なので、対象にしない。
     これにより、判断するときは最新のレポートだけを見ればよい。
@@ -115,7 +135,7 @@ def pending(root):
     if not found:
         return []
     known = decisions(root)
-    latest = latest_report(root)
+    latest = latest_report(root, before)
     return [p for p in found if p["report"] == latest and p["id"] not in known]
 
 

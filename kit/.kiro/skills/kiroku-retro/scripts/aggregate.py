@@ -49,6 +49,7 @@ import ledger  # noqa: E402
 import excerpt  # noqa: E402
 import commands  # noqa: E402
 import reportcheck  # noqa: E402
+import skeleton  # noqa: E402
 from record import load_config, mask, not_run_kind  # noqa: E402
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
@@ -390,7 +391,7 @@ def period_key(moment, by):
 
 
 def aggregate(root, since=None, until=None, by="week", with_prompts=False,
-              prompt_offset=0, prompt_limit=20):
+              prompt_offset=0, prompt_limit=20, before_report=None):
     repo = Repo(root)
     data_dir = os.path.join(root, ".kiro", "kiroku", "data")
     events = load_events(os.path.join(data_dir, "events.jsonl"))
@@ -441,7 +442,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     adopted, rejected = ledger.tracking(root, occurrences, min(starts) if starts else None,
                                         datetime.datetime.now(datetime.timezone.utc))
     pending = []
-    for proposal in ledger.pending(root):
+    for proposal in ledger.pending(root, before_report):
         times = occurrences(proposal["target"], proposal["report"]) if proposal["target"] else None
         recent = None if times is None else sum(
             1 for t in times if (since is None or t >= since) and (until is None or t < until))
@@ -1010,6 +1011,33 @@ def render_session(view):
     return "\n".join(lines) + "\n"
 
 
+def new_report(root, data):
+    """レポートの骨組みを保存先に作る。書きかけの骨組みは作り直し、書き始めたものは上書きしない。"""
+    directory = os.path.join(root, ".kiro", "kiroku", "data", "reports")
+    name = datetime.datetime.now().strftime("%Y-%m-%d-%H%M") + ".md"
+    path = os.path.join(directory, name)
+    text = skeleton.build(root, data, GAP_REASONS)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            existing = handle.read()
+    except OSError:
+        existing = None
+    if existing is not None and len(skeleton.SLOT.findall(existing)) != len(skeleton.SLOT.findall(text)):
+        print("%s は書き始められています。上書きしません。このファイルを書き終えるか、1分待って実行してください。"
+              % os.path.relpath(path, root))
+        return 1
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    shown = os.path.relpath(path, root).replace(os.sep, "/")
+    print("レポートの骨組みを作りました：%s" % shown)
+    print("- 書くのは「【ここに書く…】」の欄だけです。欄を、内容で置き換えます。該当が無ければ「なし」と書きます。")
+    print("- それ以外の行は、スクリプトが記録から書いたものです。消したり、言い換えたり、まとめ直したりしません。")
+    print("- 欄は %d 個あります。書き終えたら、次で検査します。" % len(skeleton.SLOT.findall(text)))
+    print("  aggregate.py --check-report %s" % shown)
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="kiroku の記録を集約する")
     parser.add_argument("--root", default=None, help="リポジトリのルート（既定は現在の git リポジトリ）")
@@ -1019,6 +1047,8 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
     parser.add_argument("--require-agent", action="store_true", help="専用エージェントの起動を確認してから進む")
     parser.add_argument("--check-report", help="レポートの検証値と対象の型を記録と照合する")
+    parser.add_argument("--new-report", action="store_true",
+                        help="レポートの骨組みを保存先に作る。事実の部分はスクリプトが書く")
     parser.add_argument("--section", choices=SECTIONS, help="この節だけを、件数を絞らずに出す")
     parser.add_argument("--session", help="このセッションだけを要約表示する")
     parser.add_argument("--user-chars", type=int, default=1500, help="要約表示で、発話1件の最大文字数（既定 1500）")
@@ -1046,14 +1076,19 @@ def main(argv=None):
             declared = reportcheck.extract(body)
             start = parse_bound(declared['since'], now) if declared['since'] else None
             end = parse_bound(declared['until'], now) if declared['until'] else None
-            expected = aggregate(root, start, end)['report_facts']
-            errors = reportcheck.validate(body, expected)
+            name = os.path.basename(args.check_report)
+            name = name[:-3] if name.endswith('.md') else name
+            data = aggregate(root, start, end, before_report=name)
+            errors = reportcheck.validate(body, data['report_facts'])
+            if skeleton.MARK in body:
+                errors += skeleton.validate(body, skeleton.build(root, data, GAP_REASONS))
         except (OSError, ValueError, TypeError, KeyError) as exc:
             errors = ['レポートを検査できません：' + str(exc)]
         for error in errors:
             print(mask(error))
         if not errors:
-            print('検証値と対象の型は記録と一致します。本文の意味・提案の妥当性は別に確認してください。')
+            print('検証値、対象の型、スクリプトが書いた部分は記録と一致します。'
+                  '本文の意味・提案の妥当性は別に確認してください。')
         return 1 if errors else 0
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else now
@@ -1069,6 +1104,8 @@ def main(argv=None):
         return
     data = aggregate(root, since, until, args.by, args.prompts,
                      args.prompt_offset, args.prompt_limit)
+    if args.new_report:
+        return new_report(root, data)
     if args.json:
         json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")

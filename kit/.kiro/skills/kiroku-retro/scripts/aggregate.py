@@ -51,7 +51,8 @@ import commands  # noqa: E402
 import reportcheck  # noqa: E402
 import skeleton  # noqa: E402
 import citations  # noqa: E402
-from record import load_config, mask, not_run_kind  # noqa: E402
+import reads  # noqa: E402
+from record import load_config, load_state, mask, not_run_kind, recording_lock, save_state  # noqa: E402
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
@@ -1017,7 +1018,10 @@ def new_report(root, data):
     directory = os.path.join(root, ".kiro", "kiroku", "data", "reports")
     name = datetime.datetime.now().strftime("%Y-%m-%d-%H%M") + ".md"
     path = os.path.join(directory, name)
-    text = skeleton.build(root, data, GAP_REASONS)
+    session = os.environ.get("KIRO_SESSION_ID")
+    if session and not re.fullmatch(r"[A-Za-z0-9._-]+", session):
+        session = None
+    text = skeleton.build(root, data, GAP_REASONS, session)
     try:
         with open(path, encoding="utf-8") as handle:
             existing = handle.read()
@@ -1030,6 +1034,15 @@ def new_report(root, data):
     os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
+    if session:
+        data_dir = os.path.join(root, ".kiro", "kiroku", "data")
+        with recording_lock(data_dir):
+            state = load_state(data_dir)
+            made = state.get("report_sessions")
+            if not isinstance(made, dict):
+                made = state["report_sessions"] = {}
+            made[name[:-3]] = session
+            save_state(data_dir, state)
     shown = os.path.relpath(path, root).replace(os.sep, "/")
     print("レポートの骨組みを作りました：%s" % shown)
     print("- 書くのは「【ここに書く…】」の欄だけです。欄を、内容で置き換えます。該当が無ければ「なし」と書きます。")
@@ -1071,6 +1084,7 @@ def main(argv=None):
         return 1
     now = datetime.datetime.now(datetime.timezone.utc)
     if args.check_report:
+        notices = []
         try:
             with open(args.check_report, encoding='utf-8') as handle:
                 body = handle.read()
@@ -1082,13 +1096,19 @@ def main(argv=None):
             data = aggregate(root, start, end, before_report=name)
             errors = reportcheck.validate(body, data['report_facts'])
             if skeleton.version(body):
-                errors += skeleton.validate(body, skeleton.build(root, data, GAP_REASONS))
+                # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
+                # レポートの中の記載ではなく、控えのほうで作り直して比べる。
+                made_by = (load_state(os.path.join(root, ".kiro", "kiroku", "data"))
+                           .get("report_sessions") or {}).get(name, reads.session_of(body))
+                errors += skeleton.validate(body, skeleton.build(root, data, GAP_REASONS, made_by))
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
+                unread, notices = reads.validate(root, body)
+                errors += unread
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            errors = ['レポートを検査できません：' + str(exc)]
-        for error in errors:
-            print(mask(error))
+            errors, notices = ['レポートを検査できません：' + str(exc)], []
+        for line in errors + notices:
+            print(mask(line))
         if not errors:
             print('検証値、対象の型、スクリプトが書いた部分は記録と一致し、引用は元の会話・ファイルに実在します。'
                   '引用の解釈、本文の意味、提案の妥当性は別に確認してください。')

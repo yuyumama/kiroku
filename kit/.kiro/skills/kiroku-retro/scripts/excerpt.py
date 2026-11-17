@@ -24,7 +24,7 @@ from record import mask, find_root, load_config  # noqa: E402
 
 SHOWN_TYPES = ("user", "assistant", "tool_call", "tool_result")
 # 読み込んで持つ種別。会話の表示に使うものと、実行されなかった呼び出しの判定に使うもの。
-KEPT_TYPES = SHOWN_TYPES + ("interaction_resolved", "ContextualHookInvoked")
+KEPT_TYPES = SHOWN_TYPES + ("interaction_resolved", "ContextualHookInvoked", "steering_inclusion")
 _CACHE = {}   # 1回の実行の中で、同じログを読み直さない
 
 

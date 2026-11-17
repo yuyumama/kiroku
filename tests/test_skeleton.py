@@ -251,3 +251,106 @@ class CitationTest(SkeletonTest):
             "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n", "")
         self.assertEqual(self.check(path, old).returncode, 0)
 
+
+
+class ReadRecordTest(SkeletonTest):
+    """表の「確認済み」を、振り返り自身のセッションログの読み取りと照合する。
+
+    ログの形は Kiro CLI 3.3.0 で実測したもの。ここでは模している。
+    """
+    RETRO = "sess_retro"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.environ.pop, "KIRO_SESSION_ID", None)
+        os.environ["KIRO_SESSION_ID"] = self.RETRO
+        self.write("AGENTS.md", "共通の決まり\n")
+
+    def retro_log(self, rows):
+        directory = self.home / "sessions" / "0123456789abcdef" / self.RETRO
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": self.RETRO, "workspacePaths": [self.root], "agentMode": "kiroku-retro"}), encoding="utf-8")
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, payload in enumerate(rows):
+                handle.write(json.dumps({"id": str(index), "timestamp": "2026-11-17T00:00:%02dZ" % index,
+                                         "payload": payload}, ensure_ascii=False) + "\n")
+
+    def call(self, call_id, name, args, success=True, meta=None):
+        return [{"type": "tool_call", "toolCallId": call_id, "toolName": name, "status": "approved",
+                 "args": args, "_meta": meta or {}},
+                {"type": "tool_result", "toolCallId": call_id, "success": success, "content": "…"}]
+
+    def read(self, call_id, relative, success=True):
+        return self.call(call_id, "read_file", {"path": os.path.join(self.root, relative),
+                                                "offset": None, "limit": None}, success)
+
+    def made(self):
+        return self.call("new", "execute_bash", {"command": "python3 .kiro/skills/kiroku-retro/scripts/"
+                                                              "aggregate.py --since 7d --new-report --require-agent"})
+
+    def confirm(self, text, *names):
+        for name in names:
+            text = text.replace("| `%s` | あり | %s |" % (name, skeleton.slot("確認済み／未確認")),
+                                "| `%s` | あり | 確認済み |" % name)
+        return text
+
+    def checked(self, rows, *names):
+        self.retro_log(rows)
+        for stale in (self.data / "reports").glob("*.md"):
+            stale.unlink()
+        path, text = self.new_report()
+        self.assertIn("<!-- kiroku-session:%s -->" % self.RETRO, text)
+        body = self.fill(self.confirm(text, *names), state="未確認").replace(
+            "- 読めなかった範囲（未確認）：なし", "- 読めなかった範囲（未確認）：表のとおり")
+        done = self.check(path, body)
+        return done.returncode, done.stdout
+
+    def test_files_read_in_this_retro_can_be_confirmed(self):
+        rows = self.made() + self.read("r1", ".kiro/steering/testing.md")
+        code, out = self.checked(rows, ".kiro/steering/testing.md")
+        self.assertEqual(code, 0, out)
+
+    def test_confirmed_without_a_read_fails(self):
+        code, out = self.checked(self.made(), ".kiro/steering/testing.md")
+        self.assertEqual(code, 1)
+        self.assertIn("本文を開いた記録がありません", out)
+
+    def test_failed_reads_listings_and_searches_are_not_reads(self):
+        rows = self.made() + self.read("r1", ".kiro/steering/testing.md", success=False)
+        rows += self.call("l1", "list_directory", {"path": os.path.join(self.root, ".kiro/steering")})
+        rows += self.call("g1", "grep_search", {"query": "make test", "includePattern": ".kiro/steering/testing.md"})
+        code, out = self.checked(rows, ".kiro/steering/testing.md")
+        self.assertEqual(code, 1, out)
+
+    def test_skill_loading_and_automatic_context_count_as_reads(self):
+        skill = Path(self.root, ".kiro/skills/add-category/SKILL.md").as_uri()
+        rows = self.made() + self.call("s1", "load_resource", {"id": "skill::add-category"},
+                                       meta={"kiro": {"disclosedContext": {"uri": skill}}})
+        rows.append({"type": "steering_inclusion",
+                     "documents": [Path(self.root, ".kiro/steering/testing.md").as_uri()]})
+        code, out = self.checked(rows, ".kiro/skills/add-category/SKILL.md", ".kiro/steering/testing.md")
+        self.assertEqual(code, 0, out)
+
+    def test_cannot_check_is_reported_but_not_a_failure(self):
+        """ログがまだ今の実行まで届いていない、読めない場合は、照合できないと知らせるだけにする。"""
+        code, out = self.checked(self.read("r1", ".kiro/steering/release.md"), ".kiro/steering/testing.md")
+        self.assertEqual(code, 0, out)
+        self.assertIn("照合はできませんでした", out)
+        os.environ["KIRO_SESSION_ID"] = "sess_nolog"
+        for stale in (self.data / "reports").glob("*.md"):
+            stale.unlink()
+        path, text = self.new_report()
+        done = self.check(path, self.fill(self.confirm(text, ".kiro/steering/testing.md"), state="未確認").replace(
+            "- 読めなかった範囲（未確認）：なし", "- 読めなかった範囲（未確認）：表のとおり"))
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("ログを読めません", done.stdout)
+
+    def test_session_line_cannot_be_changed_to_another_session(self):
+        rows = self.made() + self.read("r1", ".kiro/steering/testing.md")
+        self.retro_log(rows)
+        path, text = self.new_report()
+        body = self.fill(text).replace(self.RETRO, "sess_other")
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("書き換えられています", done.stdout)

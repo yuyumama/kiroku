@@ -123,13 +123,15 @@ def _gap_lines(data, reasons):
     return lines or ["- スクリプトが検出した記録の不足はありません。"]
 
 
-def build(root, data, reasons=None):
-    """集約から、レポートの骨組みを作る。同じ集約からは、いつも同じ文面になる。"""
+def build(root, data, reasons=None, session=None):
+    """集約から、レポートの骨組みを作る。同じ集約からは、いつも同じ文面になる。
+
+    session は、振り返りをしているセッション。「確認済み」の照合に使うので、骨組みに控える。
+    """
     plan, cover = data["reading_plan"], data["coverage"]
     rows, own = _harness_rows(root, data)
     day = (data["until"] or "")[:10] or "期間の終わりなし"
-    lines = [
-        MARK,
+    lines = [MARK] + (["<!-- kiroku-session:%s -->" % session] if session else []) + [
         "# 振り返り %s" % day,
         "",
         "- 対象期間：%s 〜 %s（UTC）" % (_moment(data["since"], "最初"), _moment(data["until"], "現在")),

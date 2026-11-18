@@ -193,7 +193,7 @@ IDE の内部保存場所は決め打ちしません。Export Chat で保存し�
 {"sessions_dir": ".kiro/kiroku/data/exports"}
 ```
 
-対応する配置は `<sessions_dir>/<session_id>/messages.jsonl`、その間に1階層ある配置、または `sessions_dir` 自体がセッション ID のディレクトリである配置です。
+対応する配置は `<sessions_dir>/<session_id>/messages.jsonl`、その間に1階層ある配置、または `sessions_dir` 自体がセッション ID のディレクトリである配置です。どの配置でも、`session.json` の作業場所がこのリポジトリを指していれば、集約のセッション一覧に出ます（以前は、`sessions_dir` 自体がセッションのディレクトリの配置は、ID を指定した要約では読めても一覧に出ませんでした）。
 絶対パスも指定できます。ZIP は自動展開しません。本文形式の実機互換性は別途確認が必要です。
 
 発話を全部読むと量が多すぎるため、次の3つで量を抑えます。

@@ -262,7 +262,9 @@ def discover(root, directory=None):
         base = os.path.join(home, "sessions")
     base, target = glob.escape(base), os.path.realpath(root)
     found = []
-    for pattern in (os.path.join(base, "*", "session.json"), os.path.join(base, "*", "*", "session.json")):
+    # sessions_dir 自体がセッションのディレクトリである配置（excerpt.find_log が読める配置）も探す。
+    for pattern in (os.path.join(base, "session.json"), os.path.join(base, "*", "session.json"),
+                    os.path.join(base, "*", "*", "session.json")):
         for path in glob.glob(pattern):
             try:
                 with open(path, encoding="utf-8-sig") as handle:

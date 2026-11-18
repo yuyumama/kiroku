@@ -4,7 +4,12 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import shlex
 import shutil
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True   # 配布元の kit/ にも __pycache__ を作らない（record.py を読み込むため）
 
 
 def default_config():
@@ -13,12 +18,12 @@ def default_config():
     spec = importlib.util.spec_from_file_location("kiroku_record", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.DEFAULT_CONFIG, module.ADDITIVE_KEYS
+    return module.DEFAULT_CONFIG, module.ADDITIVE_KEYS, module.COUNT_KEYS
 
 
 def config_notes(target):
     """導入先の config.json について、知らせておくことを返す。"""
-    defaults, additive = default_config()
+    defaults, additive, counts = default_config()
     try:
         custom = json.loads((Path(target) / ".kiro/kiroku/config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -33,6 +38,13 @@ def config_notes(target):
     for key in additive:
         if key in custom:
             notes.append("config.json の %s は、既定値に足して使います。既定値は常に有効です。" % key)
+    for key in counts:
+        value = custom.get(key)
+        if key in custom and value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            notes.append("config.json の %s = %s は使えません（0 以上の整数）。既定値 %s で動きます。"
+                         "0 にすると、何も残しません。" % (
+                             key, json.dumps(value, ensure_ascii=False), defaults[key]))
     return notes
 
 
@@ -49,6 +61,45 @@ def installed_python_command(target):
     found = {name for name in PYTHON_COMMANDS for command in commands
              if isinstance(command, str) and command.startswith(name + " .kiro/")}
     return found.pop() if len(found) == 1 else None
+
+
+def python_works(command):
+    """起動名が Python 3.9 以降として動くか。実行ファイルがあるだけでは、動くとみなさない。"""
+    parts = command.split(" ")
+    if not shutil.which(parts[0]):
+        return False
+    try:
+        done = subprocess.run(parts + ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"],
+                              capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def runner_notes(target):
+    """導入済みのフックの起動名が、この環境で動かないときの注意。動けば空。
+
+    指定の無い更新は起動名を引き継ぐ。その起動名が環境から無くなっていると、フックが動かず、
+    記録が黙って止まる。フックは Kiro の環境で動くので、ここで動かなくても動く場合がある。
+    代わりに案内する起動名も、実際に起動して確かめたものだけにする。
+    """
+    command = installed_python_command(target)
+    if command is None or python_works(command):
+        return []
+    others = [name for name in PYTHON_COMMANDS if name != command and python_works(name)]
+    lines = ["注意：導入済みのフックは Python を '%s' で起動しますが、この環境では Python 3.9 以降として動きません。"
+             % command,
+             "  Kiro の環境でも動かなければ、フックが動かず、記録が止まります。"]
+    if others:
+        # install.sh は python3 で起動するので、python3 が動かない環境では使えない。確かめた起動名で
+        # install.py を直接呼ぶ。
+        script = shlex.quote(str(Path(__file__).resolve()))
+        lines += ["  動くことを確かめた起動名を指定して、もう一度更新してください。例：",
+                  "    %s %s <導入先> --update --python-command '%s'" % (others[0], script, others[0]),
+                  "    install.ps1 -Target <導入先> -Update -PythonCommand '%s'" % others[0]]
+    else:
+        lines.append("  この環境では、python3、python、py -3 のどれも Python 3.9 以降として動きませんでした。")
+    return lines
 
 
 def install(target, update=False, python_command=None):
@@ -132,6 +183,9 @@ def main():
         print("導入先は、この kiroku と同じ内容です。")
     if changes["そのまま（導入先の設定）"]:
         for line in config_notes(args.target):
+            print(line)
+    if args.update and args.python_command is None:
+        for line in runner_notes(args.target):
             print(line)
     print("完了。テスト結果の記録は .kiro/kiroku/config.json の tests を設定してください。")
 

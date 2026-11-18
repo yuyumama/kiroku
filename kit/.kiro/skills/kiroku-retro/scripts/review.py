@@ -64,7 +64,8 @@ def summarize(root, since, until):
     lines += ["", "- 書き直し候補：%d 件" % len(data["rework_candidates"]),
               "- 人間の手直し候補：%d 件（merge などで除いたもの %d 件）" % (
                   len(data["fix_candidates"]), len(data["fix_excluded"])),
-              "- 判定できなかったシェル実行（recording_gap）：%d 件" % len(data["recording_gaps"]),
+              # 1件の記録が、重なった複数回の実行を表すことがある（count）。回数で数える。
+              "- 判定できなかったシェル実行（recording_gap）：%d 件" % sum(g["count"] for g in data["recording_gaps"]),
               "- 記録処理のエラー（record-errors.log）：%d 行" % count_lines(
                   os.path.join(root, ".kiro", "kiroku", "data", "record-errors.log"))]
 
@@ -76,8 +77,9 @@ def summarize(root, since, until):
                   len(sessions), sum(1 for s in sessions if s["recorded"]),
                   sum(1 for s in sessions if not s["recorded"])),
               "- ログの状態：%s" % ("、".join("%s %d" % item for item in sorted(logs.items())) or "なし"),
-              "- 振り返りノート：あり %d、ノートの後に発話あり %d、未読 %d" % (
-                  noted["fresh"], noted["stale"], noted["none"]),
+              "- 振り返りノート：あり %d、ノートの後に発話あり %d、読んだ範囲の外に発話あり %d、"
+              "ノートを読めない %d、未読 %d" % (
+                  noted["fresh"], noted["stale"], noted["uncovered"], noted["broken"], noted["none"]),
               "- 発話：合計 %d 件、%d 文字" % (sum(s["prompts"] for s in sessions),
                                          sum(s["prompt_chars"] for s in sessions))]
 
@@ -92,22 +94,27 @@ def summarize(root, since, until):
 
     proposals = ledger.proposals(root)
     known = ledger.decisions(root)
+    ambiguous = ledger.duplicated(proposals)
     by_kind = collections.defaultdict(collections.Counter)
     for proposal in proposals:
+        if proposal["id"] in ambiguous:
+            continue   # 同じ ID の案が複数ある。判断をどの案にも対応づけない（下に件数だけ出す）
         decision = known.get(proposal["id"], {}).get("decision", "undecided")
         target = known.get(proposal["id"], {}).get("target") or proposal["target"] or ""
         by_kind[target.split(":", 1)[0] if ":" in target else "対象の型なし"][decision] += 1
     verdicts = collections.Counter(row["verdict"] for row in data["adopted"])
-    reports = os.path.join(root, ".kiro", "kiroku", "data", "reports")
     lines += ["", "## 改善案と、その後", "",
-              "- レポート：%d 個、案：%d 件" % (
-                  len([n for n in os.listdir(reports) if n.endswith(".md")]) if os.path.isdir(reports) else 0,
-                  len(proposals)),
+              "- レポート：%d 個（ほかに書きかけの骨組み %d 個）、案：%d 件" % (
+                  ledger.report_count(root) + (len(proposals),)),
               "", "| 対象の型の種類 | 採用 | 見送り | 未判断 |", "|---|---|---|---|"]
     for kind, counts in sorted(by_kind.items()):
         lines.append("| %s | %d | %d | %d |" % (kind, counts["adopted"], counts["rejected"], counts["undecided"]))
     if not by_kind:
         lines.append("| （案なし） | 0 | 0 | 0 |")
+    if ambiguous:
+        lines.append("")
+        lines.append("番号が重複した案：%d 件（%d 個の番号）。採用・見送りの数と追跡から外しています。" % (
+            sum(1 for p in proposals if p["id"] in ambiguous), len(ambiguous)))
     lines += ["", "- 採用した案の追跡：%s" % ("、".join("%s %d" % item for item in sorted(verdicts.items())) or "なし"),
               "- 見送った案のうち、その後も発生があるもの：%d 件" % sum(
                   1 for row in data["rejected"] if row["after"])]
@@ -127,14 +134,14 @@ def main(argv=None):
     parser.add_argument("--root", default=None, help="リポジトリのルート（既定は現在の git リポジトリ）")
     parser.add_argument("--since", default="14d", help="開始。14d のような日数、日付、または all（既定 14d）")
     args = parser.parse_args(argv)
-    root = args.root
-    if root is None:
-        top = aggregate.Repo(os.getcwd()).git("rev-parse", "--show-toplevel")
-        root = top.strip() if top else os.getcwd()
+    root, refused = aggregate.script_root(args.root)
+    if refused:
+        print(refused)
+        return 1
     now = datetime.datetime.now(datetime.timezone.utc)
     since = aggregate.parse_bound(args.since, now) if args.since not in ("all", "") else None
     sys.stdout.write(summarize(root, since, now))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

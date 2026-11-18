@@ -125,6 +125,23 @@ def find_root(cwd):
     return top.strip() if top and top.strip() else cwd
 
 
+def script_root(given):
+    """集約・台帳のスクリプトが読み書きするリポジトリ。(ルート, 拒否の理由) を返す。
+
+    スクリプトが書くのは、すべてルートの下の .kiro/kiroku/data。シェルの許可規則は引数を制限できない
+    （kiro.dev/docs/permissions/ の Pattern matching）ので、Kiro のセッションの中（KIRO_SESSION_ID がある）
+    では、--root を現在のリポジトリ以外に向けさせない。人がいない実行でも、書き込み先がこのリポジトリに
+    収まるようにするため。Kiro の外（人の端末）では、これまでどおり --root を受け付ける。
+    """
+    current = find_root(os.getcwd())
+    if given is None:
+        return current, None
+    if os.environ.get("KIRO_SESSION_ID") and os.path.realpath(given) != os.path.realpath(current):
+        return None, ("Kiro のセッションの中では、--root に現在のリポジトリ以外を指定できません"
+                      "（指定 %s、現在 %s）。--root を省いて実行してください。" % (given, current))
+    return given, None
+
+
 # 導入先の設定に「足す」項目。既定の値は常に効き、設定に書いた値はそこに加わる。
 # 古い版の既定値が設定ファイルに残っていても、新しい既定値が隠れないようにするため。
 ADDITIVE_KEYS = ("write_tools", "ignore_paths")
@@ -146,6 +163,23 @@ def load_config(root):
         elif value is not None or key not in DEFAULT_CONFIG:
             config[key] = value
     return config
+
+
+# 0 以上の整数で指定する項目。0 は「残さない」。範囲外や数でない値は、既定値で動く。
+COUNT_KEYS = ("output_tail_chars",)
+
+
+def count_setting(config, key):
+    """0 以上の整数の設定値。不正な値（負数、数でない値、真偽値）は既定値に戻す。"""
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return DEFAULT_CONFIG[key]
+    return value
+
+
+def tail_text(text, limit):
+    """末尾の limit 文字。0 なら空文字（[-0:] は全体になるので、使わない）。"""
+    return text[-limit:] if limit > 0 else ""
 
 
 def now():
@@ -485,7 +519,7 @@ def shell_events(payload, root, cwd, retro_dir, config):
     output = response[:found.start()] if found else response
     if output.startswith("Output:\n"):
         output = output[len("Output:\n"):]
-    tail = mask(output.rstrip())[-config["output_tail_chars"]:]
+    tail = tail_text(mask(output.rstrip()), count_setting(config, "output_tail_chars"))
 
     if exit_code is None:
         return [{"type": "recording_gap", "tool": payload.get("tool_name"),
@@ -528,8 +562,10 @@ def shell_events(payload, root, cwd, retro_dir, config):
     if exit_code == -1:
         # 完了しなかった呼び出し。人による取り消し、タイムアウト、権限の規則による拒否を分ける。
         kind = not_run_kind(output)
+        # judged：応答の全体（先頭を含む）で種類を決めた印。出力の末尾は切り詰めて残すので、
+        # 集約は末尾から決め直さず、この種類をそのまま使う（印の無い古い記録だけを決め直す）。
         event = {"type": kind, "tool": payload.get("tool_name"),
-                 "command": mask(command), "output_tail": tail}
+                 "command": mask(command), "output_tail": tail, "judged": "response"}
         if kind == "recording_gap":
             event["reason"] = "unknown_not_run"
         return [event]

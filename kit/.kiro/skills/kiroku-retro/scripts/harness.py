@@ -1,7 +1,38 @@
 """比較対象の所在と、steering の重さを出す。設定本文・秘密値は集約出力に複製しない。"""
 import re
 import os
+import subprocess
 from pathlib import Path
+
+# git が使えないときに、AGENTS.md を探さないディレクトリ。最初の値で、根拠は薄い。
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+KIROKU_DATA = ".kiro/kiroku/"
+
+
+def agents_files(root):
+    """リポジトリ内の AGENTS.md（直下とサブディレクトリ）。Kiro はサブディレクトリのものも常に読み込む。
+
+    git が使えれば、追跡しているファイルと、無視されていない未追跡のファイルから探す。
+    使えなければ、ディレクトリを辿る（SKIP_DIRS は辿らない）。kiroku の生データの中は見ない。
+    """
+    found = []
+    try:
+        done = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
+                              capture_output=True, timeout=60)
+        names = done.stdout.decode("utf-8", "replace").split("\0") if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        names = None
+    if names is not None:
+        found = sorted({n for n in names if n and n.split("/")[-1] == "AGENTS.md"
+                        and not n.startswith(KIROKU_DATA)})
+    else:
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+            relative = Path(directory).relative_to(root).as_posix()
+            if "AGENTS.md" in files and not (relative + "/").startswith(KIROKU_DATA):
+                found.append("AGENTS.md" if relative == "." else relative + "/AGENTS.md")
+        found.sort()
+    return [Path(root) / name for name in found]
 
 
 def inventory(root):
@@ -27,6 +58,26 @@ def inventory(root):
             except OSError:
                 row["status"] = "unreadable"
             result.append(row)
+        if scope == "project":
+            # AGENTS.md はディレクトリにまとまっていないので、リポジトリ内のすべてを1つの所在として出す。
+            # ユーザー共通の AGENTS.md は ~/.kiro/steering/ に置くので、steering の所在に含まれる。
+            # added_in：この所在を出すようになった、レポートの形式の版。以前の版のレポートの検査では除く。
+            row = {"scope": scope, "path": str(Path(root) / "AGENTS.md"), "status": "absent", "files": [],
+                   "added_in": 3}
+            try:
+                Path(root).stat()
+                steering = (Path(root) / ".kiro" / "steering").resolve()
+                for path in agents_files(root):
+                    try:
+                        path.stat()
+                    except FileNotFoundError:
+                        continue   # 追跡されているが、作業ツリーから消えたもの
+                    if not path.resolve().is_relative_to(steering):
+                        row["files"].append(str(path))
+                row["status"] = "present" if row["files"] else "absent"
+            except OSError:
+                row["status"] = "unreadable"
+            result.append(row)
     return result
 
 
@@ -47,9 +98,11 @@ def steering_weight(root):
             for name in sorted(names):
                 if name.lower().endswith(".md"):
                     files.append((scope, Path(directory) / name))
-    agents = Path(root) / "AGENTS.md"
-    if agents.is_file():
-        files.append(("project", agents))
+    seen = {path.resolve() for _, path in files}
+    for agents in agents_files(root):   # 直下とサブディレクトリ。steering の中にあるものは数え済み
+        if agents.is_file() and agents.resolve() not in seen:
+            seen.add(agents.resolve())
+            files.append(("project", agents))
     rows = []
 
     def display(scope, path):

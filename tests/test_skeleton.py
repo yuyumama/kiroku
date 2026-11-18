@@ -3,10 +3,13 @@
 エージェントが欄を埋める操作は、ここでは文字列の置き換えで模している。Kiro と LLM の実際の
 書き方は確かめていない。
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from test_kiroku import KIT, aggregate
@@ -22,6 +25,20 @@ OLD_REPORT = "### P1. 以前の案\n- 対象の型：`tool:make test`\n"
 PROPOSAL = ("### P1. テストの実行方法を直す\n\n- 対象の型：`tool:make test`\n"
             "- 対象のファイル：`.kiro/steering/testing.md`\n"
             "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n- 変更の内容：…")
+
+
+OLD_VERSION = "0499158"   # 版2の骨組みを作っていた main（PR #13 の前）
+REPO = Path(__file__).resolve().parents[1]
+
+
+def old_scripts(destination):
+    """以前の版のスクリプトを git の履歴から取り出す。履歴が無ければ None。"""
+    archive = subprocess.run(["git", "-C", str(REPO), "archive", OLD_VERSION, "kit/.kiro/skills/kiroku-retro/scripts"],
+                             capture_output=True)
+    if archive.returncode != 0:
+        return None
+    subprocess.run(["tar", "-x", "-C", str(destination)], input=archive.stdout, check=True)
+    return destination / "kit/.kiro/skills/kiroku-retro/scripts"
 
 
 class SkeletonTest(ReviewSandbox):
@@ -41,7 +58,7 @@ class SkeletonTest(ReviewSandbox):
 
     def cli(self, *args, script=AGGREGATE):
         return subprocess.run([sys.executable, script, "--root", self.root] + list(args),
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=self.root)
 
     def new_report(self):
         done = self.cli("--since", "7d", "--new-report")
@@ -105,6 +122,49 @@ class SkeletonTest(ReviewSandbox):
         self.assertRegex(filled, r"- 対象期間：\d{4}-\d\d-\d\d \d\d:\d\d 〜 \d{4}-\d\d-\d\d \d\d:\d\d（UTC）")
         self.assertIn("消えているか、書き換えられています", self.check(path, cases["中断の行を消した"]).stdout)
 
+    def test_slots_replaced_with_nothing_are_not_a_finished_report(self):
+        """Issue #12 指摘6：目印だけを空文字に置き換えると、全欄が空でも検査を通り、最新のレポートになった。"""
+        self.report("2026-11-01-0900", OLD_REPORT)
+        path, text = self.new_report()
+        self.assertIn("- 載せなかった案と理由：【ここに書く", text)
+        self.assertIn("- 補足と、利用者に確かめたいこと：【ここに書く", text)
+        emptied = skeleton.SLOT.sub("", text)
+        done = self.check(path, emptied)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("欄が空のままです", done.stdout)
+        for field in ("読んだセッション", "観測した型・継続方針", "様子見", "載せなかった案と理由",
+                      "`.kiro/steering/testing.md`"):
+            self.assertIn(field, done.stdout)
+        self.assertTrue(skeleton.is_draft(emptied))
+        self.assertEqual(aggregate.ledger.latest_report(self.root), "2026-11-01-0900")
+        # 欄の一部だけが空でも同じ。「なし」と明記した欄は受け付ける。
+        one_blank = self.fill(text).replace("## 様子見\n\nなし\n", "## 様子見\n\n")
+        self.assertEqual(self.check(path, one_blank).returncode, 1)
+        self.assertEqual(aggregate.ledger.latest_report(self.root), "2026-11-01-0900")
+        self.assertEqual(self.check(path, self.fill(text)).returncode, 0)
+        self.assertEqual(aggregate.ledger.latest_report(self.root), path.stem)
+        # 表の列を消したものも空欄として扱う。
+        broken = self.fill(text).replace("| あり | 確認済み | なし |", "| あり | 確認済み |", 1)
+        self.assertIn("列が 4 個", self.check(path, broken).stdout)
+
+    def test_second_format_reports_keep_their_reading(self):
+        """版2のレポート（見出しの行が無い）は、版2の骨組みと検証値で比べる。書き終えたものは書き終えたまま。"""
+        data = aggregate.as_version(aggregate.aggregate(self.root, aggregate.parse_bound(
+            "7d", aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc))), 2)
+        text = skeleton.build(self.root, data, aggregate.GAP_REASONS, os.environ.get("KIRO_SESSION_ID"), version=2)
+        self.assertTrue(text.startswith("<!-- kiroku-report:2 -->"))
+        self.assertNotIn("補足と、利用者に確かめたいこと：", text)
+        self.assertNotIn("`AGENTS.md`", text)
+        path = self.data / "reports" / "2026-11-10-0900.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = self.fill(text)
+        self.assertFalse(skeleton.is_draft(old))
+        done = self.check(path, old)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        # 版2でも、スクリプトが書いた行は照合する。
+        self.assertEqual(self.check(path, old.replace("- イベント数、セッション数：1 件", "- イベント数、セッション数：3 件")
+                                    ).returncode, 1)
+
     def test_unread_file_in_the_table_contradicts_none_in_the_header(self):
         path, text = self.new_report()
         done = self.check(path, self.fill(text, state="未確認"))   # 冒頭は「なし」になる
@@ -131,16 +191,140 @@ class SkeletonTest(ReviewSandbox):
     def test_new_report_replaces_an_untouched_draft_but_not_a_started_one(self):
         path, text = self.new_report()
         self.assertEqual(self.cli("--since", "7d", "--new-report").returncode, 0)   # 手を付けていない
+        self.assertEqual(sorted((self.data / "reports").glob("*.md")), [path])
         started = text.replace(skeleton.slot("無ければ「なし」"), "なし", 1)
         path.write_text(started, encoding="utf-8")
         again = self.cli("--since", "7d", "--new-report")
-        if sorted((self.data / "reports").glob("*.md"))[-1] == path:   # 同じ分のうちに実行できた場合
-            self.assertEqual(again.returncode, 1)
-            self.assertIn("上書きしません", again.stdout)
-            self.assertEqual(path.read_text(encoding="utf-8"), started)
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertEqual(path.read_text(encoding="utf-8"), started)   # 書き始めたものは残る
+        if path.stem in again.stdout:   # 同じ分のうちに実行できた場合
+            self.assertIn("上書きせず、別の名前で作りました", again.stdout)
+        self.assertEqual(len(list((self.data / "reports").glob("*.md"))), 2)
+
+    def same_minute(self, path):
+        """次の骨組みの名前の候補を、既存の骨組みと同じ分から始める。"""
+        original = aggregate.report_names
+        self.addCleanup(setattr, aggregate, "report_names", original)
+        aggregate.report_names = lambda moment: [path.stem] + original(moment)[1:]
+
+    def make_in_process(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return aggregate.new_report(self.root, aggregate.aggregate(self.root))
+
+    def test_new_report_keeps_edits_even_when_the_slot_count_happens_to_match(self):
+        """Issue #12 指摘4：2欄を書き、表が1行減ると、目印の数が偶然そろって上書きしていた。"""
+        self.write(".kiro/steering/release.md", "リリース手順\n")
+        path, text = self.new_report()
+        state = skeleton.slot("確認済み／未確認")
+        role = skeleton.slot("役割と読み込みの条件")
+        kept = "| プロジェクト内 | `.kiro/steering/testing.md` | あり | %s | %s |" % (state, role)
+        edited = text.replace(kept, "| プロジェクト内 | `.kiro/steering/testing.md` | あり | 確認済み | テストの手順 |")
+        path.write_text(edited, encoding="utf-8")
+        os.remove(os.path.join(self.root, ".kiro/steering/release.md"))
+        # 同じ分のうちに作り直す状況を、時刻に頼らずに作る。
+        self.same_minute(path)
+        self.assertEqual(self.make_in_process(), 0)
+        self.assertEqual(path.read_text(encoding="utf-8"), edited)
+        made = sorted((self.data / "reports").glob("*.md"))
+        self.assertEqual(len(made), 2)
+        self.assertNotIn("release.md", made[-1].read_text(encoding="utf-8"))
+        self.assertGreater(made[-1].stem, path.stem)   # 新しいほうが最新として並ぶ
+
+    def test_two_retros_in_the_same_minute_get_separate_files(self):
+        path, _ = self.new_report()
+        self.addCleanup(os.environ.pop, "KIRO_SESSION_ID", None)
+        os.environ["KIRO_SESSION_ID"] = "sess_other_retro"
+        self.same_minute(path)
+        self.assertEqual(self.make_in_process(), 0)
+        self.assertEqual(len(list((self.data / "reports").glob("*.md"))), 2)   # 他の振り返りの骨組みは使わない
+
+    def test_same_proposal_number_twice_fails_the_check_and_cannot_be_adopted(self):
+        """Issue #12 指摘3：プロジェクト内とユーザー共通の両方に P1 があると、採否がどの案か決まらない。"""
+        path, text = self.new_report()
+        user = "### P1. ユーザー共通の手順を直す\n\n- 対象の型：`tool:make test`\n- 変更の内容：…"
+        marker = "## ハーネスへの改善案（ユーザー共通）\n\n"
+        filled = self.fill(text)
+        start = filled.index(marker) + len(marker)
+        body = filled[:start] + user + filled[filled.index("\n", start):]
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("案の番号 P1 が 2 回", done.stdout)
+        self.assertIn("テストの実行方法を直す／ユーザー共通の手順を直す", done.stdout)
+        # 検査を通さずに保存されたレポート（旧版を含む）でも、台帳は判断を記録しない。
+        adopt = self.cli("adopt", "P1", script=LEDGER)
+        self.assertEqual(adopt.returncode, 1, adopt.stdout)
+        self.assertIn("記録しません", adopt.stdout)
+        self.assertFalse((self.data / "ledger.jsonl").exists())
+        # 以前の版が記録してしまった判断は、どちらの案のものか推測して表示しない。
+        self.decide(path.stem + "#P1", "adopted", 1, target="tool:make test")
+        listing = self.cli("list", script=LEDGER).stdout
+        self.assertEqual(listing.count("番号が重複"), 2, listing)
+        self.assertNotIn("[採用]", listing)
+        # PR #13 のレビュー指摘3：見直し用の要約と集約の追跡でも、この判断を数えない。
+        summary = self.cli(script=os.path.join(os.path.dirname(AGGREGATE), "review.py")).stdout
+        self.assertNotIn("| tool |", summary)   # 以前は「採用 2」と数えていた
+        self.assertIn("番号が重複した案：2 件（1 個の番号）", summary)
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["adopted"], [])
+        self.assertEqual(data["ambiguous_decisions"], [path.stem + "#P1"])
+        self.assertIn("追跡から外しています", aggregate.render(data))
+        # 通し番号に直せば検査を通り、記録できる。
+        fixed = body.replace("### P1. ユーザー共通", "### P2. ユーザー共通")
+        self.assertEqual(self.check(path, fixed).returncode, 0)
+        self.assertEqual(self.cli("adopt", "P2", script=LEDGER).returncode, 0)
+
+    def test_report_checked_by_the_previous_version_still_passes(self):
+        """PR #13 のレビュー指摘1：以前の版で検査を通った版2のレポートが、更新しただけで不一致になった。"""
+        import tempfile
+        import shutil
+        work = Path(tempfile.mkdtemp(prefix="kiroku-old-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        scripts = old_scripts(work)
+        if scripts is None:
+            self.skipTest("以前の版（%s）が git の履歴にありません" % OLD_VERSION)
+        self.write("app/AGENTS.md", "app の決まり\n")
+        # 以前の版が書いたノート（要約表示で見せた期間の控えが無い）。PR #13 の再レビュー指摘1。
+        self.note("sess_live", [], shown=False)
+        # 期間内の1回の指摘と、期間の外の同じ話題の継続方針。版2は候補にした（再々レビュー指摘1）。
+        self.log("sess_in", ["報告は結論から書いて"], days_ago=1)
+        self.log("sess_out", ["今後も報告は必ず結論から書くこと"], days_ago=20)
+        self.note("sess_in", [{"kind": "correction", "topic": "報告順", "summary": "結論から",
+                               "quote": "報告は結論から書いて", "index": 0, "context": "未確認"}], shown=False)
+        self.note("sess_out", [{"kind": "standing_policy", "topic": "報告順", "summary": "結論から",
+                                "quote": "今後も報告は必ず結論から書くこと", "index": 0, "context": "未確認"}],
+                  shown=False)
+        future = time.time() + 3600
+        for name in ("sess_live", "sess_in", "sess_out"):
+            os.utime(self.data / "notes" / (name + ".json"), (future, future))
+        old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        path = sorted((self.data / "reports").glob("*.md"))[-1]
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<!-- kiroku-report:2 -->"))
+        self.assertIn('"topic:報告順"', text)
+        # 版2の検査は、案の番号の重複も、目印を消しただけの空欄も見なかった。
+        user = "### P1. ユーザー共通の手順\n\n- 対象の型：`tool:make test`"
+        filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+        marker = "## ハーネスへの改善案（ユーザー共通）\n\n"
+        start = filled.index(marker) + len(marker)
+        filled = filled[:start] + user + filled[filled.index("\n", start):]
+        filled = filled.replace("## 様子見\n\nなし\n", "## 様子見\n\n")
+        path.write_text(filled, encoding="utf-8")
+        before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
+        self.assertEqual(before.returncode, 0, before.stdout)
+        self.assertIn("- 未読のセッション：0 件", filled)
+        self.assertFalse(skeleton.is_draft(filled))   # 書き終えたレポートは、更新しても書き終えたまま
+        after = self.cli("--check-report", str(path))
+        self.assertEqual(after.returncode, 0, after.stdout)
+        # 振り返りで読むセッションは、今の判定で決める（以前の版のノートは読み直す）。
+        self.assertIn("sess_live", aggregate.aggregate(self.root)["reading_plan"]["read"])
+        # 版3では、期間の外の継続方針で候補にしない。
+        self.assertNotIn("topic:報告順", aggregate.aggregate(self.root, aggregate.parse_bound(
+            "7d", aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc)))["report_facts"]["targets"])
+        self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
 
     def test_reports_without_the_mark_are_checked_by_the_previous_rules(self):
-        facts = aggregate.aggregate(self.root)["report_facts"]
+        facts = aggregate.as_version(aggregate.aggregate(self.root), 0)["report_facts"]
         path = self.data / "reports" / "2026-11-10-0900.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         body = "### P1. 手順\n- 対象の型：`tool:make test`\n\n```kiroku-facts\n%s\n```\n" % json.dumps(facts)
@@ -246,8 +430,11 @@ class CitationTest(SkeletonTest):
         self.assertIn("ログを読めない", out)
 
     def test_first_format_reports_are_not_held_to_the_citation_rules(self):
-        path, text = self.new_report()
-        old = self.fill(text).replace(skeleton.MARK, "<!-- kiroku-report:1 -->").replace(
+        path, _ = self.new_report()
+        data = aggregate.as_version(aggregate.aggregate(self.root, aggregate.parse_bound(
+            "7d", aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc))), 1)
+        text = skeleton.build(self.root, data, aggregate.GAP_REASONS, version=2)
+        old = self.fill(text).replace("<!-- kiroku-report:2 -->", "<!-- kiroku-report:1 -->").replace(
             "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n", "")
         self.assertEqual(self.check(path, old).returncode, 0)
 

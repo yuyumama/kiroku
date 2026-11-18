@@ -41,7 +41,9 @@ def extract(text):
     return value
 
 
-def validate(text, expected):
+def validate(text, expected, numbers=True):
+    """numbers は、案の番号の重複を不一致にするか。版2までのレポートは、そのころの規則どおり見ない
+    （台帳は、どの版のレポートでも、重複した番号への判断を記録しない）。"""
     errors = []
     try:
         if extract(text) != expected:
@@ -50,13 +52,21 @@ def validate(text, expected):
         errors.append('kiroku-facts を読み取れません。集約の検証値をそのまま使ってください。')
     # 引用した過去の案ではなく、今回の案に属する対象だけを検査する。
     current = False
+    titles = {}
     for line in text.splitlines():
-        if HEADING.match(line):
+        heading = HEADING.match(line)
+        if heading:
             current = True
+            titles.setdefault(heading.group(1), []).append(heading.group(2).strip())
         elif line.startswith('#'):
             current = False
         elif current:
             target = TARGET.search(line)
             if target and target.group(1).strip() not in expected['targets']:
                 errors.append('集約にない対象の型：' + target.group(1).strip())
+    for number, names in titles.items() if numbers else ():
+        if len(names) > 1:
+            # 同じ番号の案が複数あると、「P1 は採用」がどの案のことか決まらない。
+            errors.append('案の番号 %s が %d 回使われています。プロジェクト内とユーザー共通を通して、'
+                          'P1 からの通し番号にしてください：%s' % (number, len(names), '／'.join(names)))
     return errors

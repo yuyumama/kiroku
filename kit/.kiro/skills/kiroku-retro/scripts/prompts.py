@@ -9,9 +9,10 @@ import glob
 import json
 import os
 import re
+import time
 
 import excerpt
-from record import load_config, load_state, mask
+from record import load_config, load_state, mask, recording_lock, save_state
 import commands
 
 DUPLICATE_WINDOW = 8    # 同じ発話の二重記録とみなす、ログ上の距離（項目数）
@@ -31,26 +32,49 @@ def notes_dir(root):
     return os.path.join(root, ".kiro", "kiroku", "data", "notes")
 
 
+def _agent_of(path):
+    """ログの隣の session.json に記録されたプロファイル名。無ければ推測せず None。"""
+    try:
+        with open(os.path.join(os.path.dirname(path), 'session.json'), encoding='utf-8-sig') as handle:
+            meta = json.load(handle)
+        agent = meta.get('agentMode')
+        return agent if isinstance(agent, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def session_agent(root, session):
     """session.json に記録されたプロファイル名。無ければ推測せず None。"""
     path = excerpt.find_log(session, sessions_dir(root)) if session else None
-    if path:
-        try:
-            with open(os.path.join(os.path.dirname(path), 'session.json'), encoding='utf-8-sig') as handle:
-                meta = json.load(handle)
-            agent = meta.get('agentMode')
-            if isinstance(agent, str):
-                return agent
-        except (OSError, ValueError, AttributeError):
-            pass
-    return None
+    return _agent_of(path) if path else None
+
+
+def running_session_log(root, session):
+    """実行中のセッション（振り返りそのもの）のログ。
+
+    sessions_dir は過去の開発セッションを探す場所（IDE のエクスポートなど）。実行中のセッションの
+    ログは Kiro の既定の置き場に書かれるので、sessions_dir に無ければそちらも見る（CLI で実測した置き場）。
+    """
+    if not session:
+        return None
+    configured = sessions_dir(root)
+    return (excerpt.find_log(session, configured) if configured else None) or excerpt.find_log(session, None)
 
 
 def execution_context(root):
-    """現在のセッションのプロファイルを確認する。取れないときは未確認。"""
+    """現在のセッションのプロファイルを確認する。取れないときは未確認とし、どの確認に失敗したかを返す。"""
     session = os.environ.get('KIRO_SESSION_ID')
-    agent = session_agent(root, session)
-    return {'session_id': session, 'agent': agent,
+    path = running_session_log(root, session)
+    agent = _agent_of(path) if path else None
+    if not session:
+        reason = 'KIRO_SESSION_ID がありません（Kiro の外で実行したか、この環境では渡されない）'
+    elif not path:
+        reason = 'セッション %s のログが、sessions_dir にも Kiro の既定の置き場にもありません' % session
+    elif agent is None:
+        reason = 'セッションのメタデータ（session.json）に agentMode がありません'
+    else:
+        reason = None
+    return {'session_id': session, 'agent': agent, 'reason': reason,
             'status': 'unverified' if agent is None else 'verified' if agent == 'kiroku-retro' else 'wrong_agent'}
 
 
@@ -90,6 +114,88 @@ def duplicates(rows):
         else:
             recent.append((index, folded))
     return found
+
+
+SHOWN_LIMIT = 50   # セッションごとに控える、要約表示した範囲の数。最初の値で、根拠は薄い
+
+
+def record_shown(root, session, since, until):
+    """要約表示（aggregate.py --session）で見せた期間を控える。
+
+    ノートが「読み終えた」とみなせるのは、ノートを書く前に、この範囲で見せた発話だけ。
+    期間を広げたときに、前回の範囲の外にあった発話を既読と取り違えないために使う。
+    控えるのは時刻だけで、会話の本文は保存しない。
+    """
+    data_dir = os.path.join(root, ".kiro", "kiroku", "data")
+    entry = [since.isoformat() if since else None, until.isoformat() if until else None, time.time()]
+    with recording_lock(data_dir):
+        state = load_state(data_dir)
+        shown = state.get("shown_ranges")
+        if not isinstance(shown, dict):
+            shown = state["shown_ranges"] = {}
+        ranges = shown.get(session) if isinstance(shown.get(session), list) else []
+        shown[session] = (ranges + [entry])[-SHOWN_LIMIT:]
+        save_state(data_dir, state)
+
+
+def shown_ranges(root):
+    """{session_id: [(開始 or None, 終わり or None, 見せた時刻), ...]}。読めない項目は飛ばす。"""
+    shown = load_state(os.path.join(root, ".kiro", "kiroku", "data")).get("shown_ranges")
+    result = {}
+    for session, ranges in (shown.items() if isinstance(shown, dict) else []):
+        for item in ranges if isinstance(ranges, list) else []:
+            try:
+                start, end, at = item
+                start = excerpt.parse_time(start) if start else None
+                end = excerpt.parse_time(end) if end else None
+                if not isinstance(at, (int, float)) or isinstance(at, bool):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            result.setdefault(session, []).append((start, end, float(at)))
+    return result
+
+
+NOTE_TOLERANCE = 2   # 秒。ファイルの更新時刻の粒度（FAT などは2秒）
+
+
+def note_state(path, moments, ranges):
+    """ノートの状態。none／broken／fresh／stale／uncovered。
+
+    fresh は、期間内の発話がすべて、ノートを書く前に要約表示で見せた範囲に入っているもの。
+    stale は、見せていない発話が、すべてノートを書いた後のもの。
+    uncovered は、ノートより前の発話に、見せた記録の無いものがあるもの（期間を広げた、
+    範囲の記録が無い以前の版のノート、など）。読み直しの対象にする。
+    """
+    if not os.path.isfile(path):
+        return "none"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
+            return "broken"
+        written = os.path.getmtime(path)
+    except (OSError, ValueError):
+        return "broken"
+    before = [(start, end) for start, end, at in ranges if at <= written + NOTE_TOLERANCE]
+    unread = [m for m in moments
+              if not any((start is None or m >= start) and (end is None or m < end) for start, end in before)]
+    if not unread:
+        return "fresh"
+    if all(m.timestamp() > written for m in unread):
+        return "stale"
+    return "uncovered"
+
+
+def legacy_note_state(path, latest):
+    """版2までの既読の判定。ノートがあり、ノートを書いた後に発話が無ければ fresh。
+
+    以前の版で作ったレポートを検査するとき、その版が数えた未読の数を再現するために使う。
+    振り返りで読むセッションの判定には使わない（note_state を使う）。
+    """
+    if not os.path.isfile(path):
+        return "none"
+    return "stale" if latest and latest.timestamp() > os.path.getmtime(path) else "fresh"
 
 
 def retro_marks(root):
@@ -186,6 +292,7 @@ def sessions(root, events, since=None, until=None):
     """
     directory = sessions_dir(root)
     marks = retro_marks(root)
+    shown = shown_ranges(root)
     last_event = {}
     for event in events:
         if event.get("session_id"):
@@ -197,7 +304,7 @@ def sessions(root, events, since=None, until=None):
         row = {"session_id": session, "agent": session_agent(root, session),
                "last_event": last_event.get(session), "recorded": recorded,
                "log": "ok", "prompts": 0, "prompt_chars": 0, "note": "none"}
-        latest = None
+        latest, moments = None, []
         path = excerpt.find_log(session, directory)
         if not path:
             row["log"] = "missing_log"
@@ -220,16 +327,16 @@ def sessions(root, events, since=None, until=None):
                 if text and _in_period(moment, since, until):
                     row["prompts"] += 1
                     row["prompt_chars"] += len(text)
+                    moments.append(moment)
                     latest = moment if latest is None or moment > latest else latest
             if messages is not None and issues:
                 row["log"] = "partial_log"
         if not recorded and not row["prompts"]:
             continue  # ログだけのセッションは、期間内に発話があるものだけを載せる
-        note = os.path.join(notes_dir(root), session + ".json")
-        if os.path.isfile(note):
-            # ノートを書いた後に発話が増えていれば、読み直しが要る。
-            written = os.path.getmtime(note)
-            row["note"] = "stale" if latest and latest.timestamp() > written else "fresh"
+        # ノートを書いた後に発話が増えた、または要約表示で見せていない発話があれば、読み直しが要る。
+        note_path = os.path.join(notes_dir(root), session + ".json")
+        row["note"] = note_state(note_path, moments, shown.get(session, []))
+        row["note_v2"] = legacy_note_state(note_path, latest)   # 以前の版のレポートの検査に使う
         activity = [m for m in (excerpt.parse_time(row["last_event"]) if recorded else None, latest) if m]
         row["_activity"] = max(activity) if activity else None
         row["last_activity"] = row["_activity"].isoformat() if row["_activity"] else None
@@ -429,12 +536,19 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
     return result
 
 
-def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=2000):
+def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=2000, session_ids=None):
+    """全発話を全文でページ表示する。
+
+    session_ids を渡すと、そのセッションを対象にする（集約のセッション一覧と同じ集合。
+    フックの記録が無く、ログだけがあるセッションも含む）。渡さなければ、記録に出たセッション。
+    """
     if offset < 0 or size < 1 or chunk_chars < 1:
         raise ValueError("offset は0以上、size/chunk_chars は1以上が必要です")
     directory = sessions_dir(root)
     chunks, coverage = [], []
-    session_ids = sorted({e["session_id"] for e in events if e.get("session_id")})
+    if session_ids is None:
+        session_ids = {e["session_id"] for e in events if e.get("session_id")}
+    session_ids = sorted(set(session_ids))
     marks = retro_marks(root)
     for session in session_ids:
         status = {"session_id": session, "status": "ok", "issues": [], "prompts": 0}

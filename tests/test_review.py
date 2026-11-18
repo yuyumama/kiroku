@@ -1,11 +1,14 @@
 """ノートの照合、台帳、セッションの探索、steering の重さのテスト。"""
+import contextlib
 import datetime
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -40,7 +43,10 @@ class ReviewSandbox(Sandbox):
                                          "payload": {"type": "user", "content": text}},
                                         ensure_ascii=False) + "\n")
 
-    def note(self, session, findings):
+    def note(self, session, findings, shown=True):
+        """ノートを書く。shown なら、その前に要約表示で全期間を見せたことにする（振り返りの手順どおり）。"""
+        if shown:
+            aggregate.prompts.record_shown(self.root, session, None, None)
         directory = self.data / "notes"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / (session + ".json")).write_text(
@@ -95,6 +101,22 @@ class NotesTest(ReviewSandbox):
         self.note("sess_a", [finding("今後は必ずコミット前に lint を通すこと", "コミット前のlint",
                                      "standing_policy")])
         self.assertTrue(aggregate.aggregate(self.root)["topics"][0]["candidate"])
+
+    def test_policy_stated_after_the_period_does_not_promote_a_past_single_finding(self):
+        """Issue #12 指摘7：期間の後の継続方針が、期間内の1回の指摘を型に変えていた。"""
+        self.log("sess_old", ["テストは make test で回して"], days_ago=10)
+        self.note("sess_old", [finding("テストは make test で回して")])
+        since, until = NOW - datetime.timedelta(days=14), NOW - datetime.timedelta(days=7)
+        self.assertFalse(aggregate.aggregate(self.root, since, until)["topics"][0]["candidate"])
+        self.log("sess_new", ["今後もテストは必ず make test で回すこと"], days_ago=1)
+        self.note("sess_new", [finding("今後もテストは必ず make test で回すこと", kind="standing_policy")])
+        data = aggregate.aggregate(self.root, since, until)
+        topic = data["topics"][0]
+        self.assertEqual((topic["candidate"], topic["sessions"], topic["all_sessions"]), (False, 1, 2))
+        self.assertEqual(topic["period_kinds"], ["correction"])
+        self.assertNotIn("topic:テスト実行コマンド", data["report_facts"]["targets"])
+        # 方針が期間内にあれば、これまでどおり1回でも候補になる。
+        self.assertTrue(aggregate.aggregate(self.root, since)["topics"][0]["candidate"])
 
     def test_fabricated_quote_is_rejected(self):
         self.log("sess_a", ["テストを実行して"])
@@ -233,6 +255,155 @@ class LedgerTest(ReviewSandbox):
         self.assertIn("見送った案（1 件）", aggregate.render(data))
 
 
+class AppliedTest(ReviewSandbox):
+    """Issue #12 機能追加：反映日を人の申告なしに決め、反映後に観測できた作業量を出す。"""
+
+    backdate = LedgerTest.backdate
+
+    def setUp(self):
+        super().setUp()
+        self.write(".kiro/steering/build.md", "ビルドの手順\n")
+        self.commit_at(13, "steering")   # レポートより前からあるファイル
+        stamp = (NOW - datetime.timedelta(days=13)).timestamp()
+        os.utime(os.path.join(self.root, ".kiro/steering/build.md"), (stamp, stamp))
+        self.made = (NOW - datetime.timedelta(days=12)).astimezone().strftime("%Y-%m-%d-%H%M")
+        self.report(self.made, "<!-- kiroku-report:3 -->\n### P1. ビルド前に依存を入れる\n"
+                               "- 対象の型：`tool:npm run build`\n"
+                               "- 対象のファイル：`.kiro/steering/build.md`、`.kiro/hooks/deps.json`（新規）\n")
+        self.backdate(11, 3)
+        self.decide(self.made + "#P1", "adopted", 10, "tool:npm run build")
+
+    def commit_at(self, days_ago, message):
+        when = days_ago if isinstance(days_ago, datetime.datetime) else NOW - datetime.timedelta(days=days_ago)
+        stamp = when.isoformat()
+        env = dict(os.environ, GIT_COMMITTER_DATE=stamp, GIT_AUTHOR_DATE=stamp)
+        subprocess.run(["git", "-C", self.root, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.root, "commit", "-q", "-m", message], check=True, env=env)
+
+    def row(self):
+        return aggregate.aggregate(self.root, since=None)["adopted"][0]
+
+    def test_unchanged_target_file_is_not_called_applied(self):
+        row = self.row()
+        self.assertEqual(row["files"], [".kiro/steering/build.md", ".kiro/hooks/deps.json"])
+        self.assertIsNone(row["applied_at"])
+        self.assertEqual(row["verdict"], "対象のファイルに変更なし（反映を確認できない）")
+        self.assertIn("反映は未確認", aggregate.render(aggregate.aggregate(self.root, since=None)))
+
+    def test_first_commit_after_the_report_is_the_applied_date(self):
+        self.write(".kiro/steering/build.md", "ビルドの前に npm ci を実行する\n")
+        self.commit_at(6, "反映")
+        self.backdate(8, 2)   # 採用の後、反映の前の失敗は「反映前」に数える
+        self.backdate(1, 0)
+        with open(self.data / "events.jsonl", "a", encoding="utf-8") as handle:   # 反映後の別の作業
+            handle.write(json.dumps({"type": "prompt", "session_id": "s2", "v": 2,
+                                     "ts": (NOW - datetime.timedelta(days=2)).isoformat()}) + "\n")
+        row = self.row()
+        self.assertEqual(row["split"], "反映")
+        self.assertTrue(row["applied_basis"].startswith("コミット "), row["applied_basis"])
+        self.assertAlmostEqual(aggregate.parse_time(row["applied_at"]).timestamp(),
+                               (NOW - datetime.timedelta(days=6)).timestamp(), delta=2)
+        self.assertEqual((row["before"], row["after"], row["verdict"]), (5, 0, "再発なし"))
+        self.assertEqual(row["observed"], {"unit": "フックの記録があるセッション", "count": 1,
+                                           "note": "実行総数は不明"})
+        text = aggregate.render(aggregate.aggregate(self.root, since=None))
+        self.assertIn("反映前 5 回", text)
+        self.assertIn("反映後の観測：フックの記録があるセッション 1（実行総数は不明）", text)
+
+    def test_commit_before_the_report_in_the_same_minute_is_not_the_applied_date(self):
+        """PR #13 のレビュー指摘2：名前の分の頭を作成時刻とみなし、作る前の同じ分のコミットを反映としていた。"""
+        minute = datetime.datetime.strptime(self.made, "%Y-%m-%d-%H%M").astimezone()
+        state_path = self.data / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        state["report_made"] = {self.made: (minute + datetime.timedelta(seconds=40)).isoformat()}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.write(".kiro/steering/build.md", "作る前の変更\n")
+        self.commit_at(minute + datetime.timedelta(seconds=15), "作る前")
+        self.assertIsNone(self.row()["applied_at"])
+        self.write(".kiro/steering/build.md", "作った後の変更\n")
+        self.commit_at(minute + datetime.timedelta(minutes=2), "作った後")
+        applied = aggregate.parse_time(self.row()["applied_at"])
+        self.assertEqual(applied, (minute + datetime.timedelta(minutes=2)).astimezone(datetime.timezone.utc))
+        # 正確な時刻の控えが無い以前のレポートは、名前の分の終わりを基準にする。同じ分のコミットは数えない。
+        state_path.write_text("{}", encoding="utf-8")
+        self.assertEqual(aggregate.parse_time(self.row()["applied_at"]), applied)
+        self.assertEqual(aggregate.ledger.report_time(self.root, self.made), minute + datetime.timedelta(minutes=1))
+
+    def test_commit_in_the_same_second_after_the_report_is_the_applied_date(self):
+        """PR #13 の再レビュー指摘2：作った直後の同じ秒のコミットを、反映に数えていなかった。"""
+        self.write(".kiro/hooks/deps.json", "{}")
+        self.commit_at(13, "レポートより前の状態")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(aggregate.new_report(self.root, aggregate.aggregate(self.root)), 0)
+        name = sorted((self.data / "reports").glob("*.md"))[-1].stem
+        made = aggregate.ledger.report_made(self.root, name)
+        self.assertTrue(made["exact"])
+        self.assertRegex(made["head"], r"^[0-9a-f]{40}$")
+        self.report(name, "<!-- kiroku-report:3 -->\n### P1. 依存を入れる\n- 対象の型：`tool:npm run build`\n"
+                          "- 対象のファイル：`.kiro/hooks/deps.json`\n")
+        self.decide(name + "#P1", "adopted", 0, "tool:npm run build")
+        self.write(".kiro/hooks/deps.json", '{"hooks": []}')
+        self.commit_at(datetime.datetime.fromtimestamp(int(made["at"].timestamp()), datetime.timezone.utc),
+                       "作った直後、同じ秒")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == name + "#P1"][0]
+        self.assertIsNotNone(row["applied_at"])
+        self.assertNotIn("判別できない", row["applied_basis"])
+        # HEAD の控えが無ければ、時刻では前後を判別できないと書く。
+        state = json.loads((self.data / "state.json").read_text(encoding="utf-8"))
+        state.pop("report_heads")
+        (self.data / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == name + "#P1"][0]
+        self.assertIn("作る前か後かは判別できない", row["applied_basis"])
+        # PR #13 の再々レビュー指摘2：判別できないコミットしか無ければ、反映の日にせず、判定を保留する。
+        self.assertIsNone(row["applied_at"])
+        self.assertEqual(row["verdict"], "反映の前後を判別できない（判定を保留）")
+        self.assertIn("反映は判別できない", aggregate.render(aggregate.aggregate(self.root, since=None)))
+
+    def test_commit_exactly_at_the_end_of_the_named_minute_counts_for_old_reports(self):
+        minute = datetime.datetime.strptime(self.made, "%Y-%m-%d-%H%M").astimezone()
+        self.write(".kiro/steering/build.md", "次の分の頭の変更\n")
+        self.commit_at(minute + datetime.timedelta(minutes=1), "次の分の頭")
+        self.assertEqual(aggregate.parse_time(self.row()["applied_at"]),
+                         (minute + datetime.timedelta(minutes=1)).astimezone(datetime.timezone.utc))
+
+    def test_new_report_keeps_the_exact_creation_time(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(aggregate.new_report(self.root, aggregate.aggregate(self.root)), 0)
+        name = sorted((self.data / "reports").glob("*.md"))[-1].stem
+        made = aggregate.ledger.report_time(self.root, name)
+        self.assertLess(abs((made - datetime.datetime.now(datetime.timezone.utc)).total_seconds()), 60)
+        self.assertNotEqual(made.second + made.microsecond, 0)   # 分の頭ではなく、作った時刻
+
+    def test_uncommitted_change_uses_the_file_time_and_no_activity_is_not_no_recurrence(self):
+        self.write(".kiro/hooks/deps.json", "{}")   # 新規のファイル。未コミット
+        stamp = (NOW - datetime.timedelta(days=5)).timestamp()
+        os.utime(os.path.join(self.root, ".kiro/hooks/deps.json"), (stamp, stamp))
+        row = self.row()
+        self.assertIn("コミットされていない変更", row["applied_basis"])
+        # 反映後に作業が1件も無い。発生0回でも「再発なし」とは言わない。
+        self.assertEqual((row["after"], row["observed"]["count"], row["verdict"]), (0, 0, "反映後の観測なし"))
+
+    def test_proposal_without_target_files_keeps_the_adoption_date(self):
+        """以前の版のレポート（対象のファイルの行が無い）は、採用の時刻で比べ、そのことを表示する。"""
+        self.backdate(12, 2)
+        self.decide("r#P1", "adopted", 7, "tool:npm run build")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == "r#P1"][0]
+        self.assertEqual((row["split"], row["applied_at"]), ("採用", None))
+        self.assertEqual(row["verdict"], "採用後の観測なし")   # 採用後に作業が無い（Issue の例）
+        self.assertIn("反映日は不明", aggregate.render(aggregate.aggregate(self.root, since=None)))
+
+    def test_test_target_counts_runs_that_include_the_test(self):
+        self.data.mkdir(parents=True, exist_ok=True)
+        with open(self.data / "events.jsonl", "a", encoding="utf-8") as handle:
+            for days, ids in ((3, ["t::a"]), (2, ["t::b"]), (1, ["t::a", "t::b"])):
+                handle.write(json.dumps({"type": "test_run", "session_id": "s", "v": 2, "exit_code": 0,
+                                         "results": {"passed": ids}, "head": None, "dirty": {},
+                                         "ts": (NOW - datetime.timedelta(days=days)).isoformat()}) + "\n")
+        self.decide("r#P2", "adopted", 4, "test:t::a")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == "r#P2"][0]
+        self.assertEqual(row["observed"], {"unit": "そのテストを含むテスト実行", "count": 2, "note": None})
+
+
 class DiscoveryTest(ReviewSandbox):
     def test_session_agent_is_available_in_summary_and_report_facts(self):
         self.log('sess_actor', ['今後の完了報告は短くしてください'])
@@ -305,6 +476,32 @@ class SteeringWeightTest(ReviewSandbox):
         (steering / "big.md").write_text("あ" * 9000, encoding="utf-8")
         self.assertIn("目安の 8000 文字を超えています", aggregate.render(aggregate.aggregate(self.root)))
 
+    def test_agents_md_in_subdirectories_is_counted_and_compared(self):
+        """Issue #12 改善：Kiro はサブディレクトリの AGENTS.md も常に読み込む（kiro.dev/docs/steering/#agentsmd）。"""
+        self.write("app/AGENTS.md", "app の決まり\n")
+        self.write("vendor/AGENTS.md", "無視される\n")
+        self.write(".gitignore", ".kiro/kiroku/data/\nreports/\nvendor/\n")
+        data = aggregate.aggregate(self.root)
+        rows = {r["display"]: r for r in data["steering"]["files"]}
+        self.assertEqual(set(rows), {"app/AGENTS.md"})
+        self.assertEqual((rows["app/AGENTS.md"]["inclusion"], data["steering"]["always_total"]), ("always", 9))
+        entry = [e for e in data["harness"] if e["path"].endswith("AGENTS.md")]
+        self.assertEqual([(e["status"], [Path(f).name for f in e["files"]]) for e in entry],
+                         [("present", ["AGENTS.md"])])
+        self.assertIn("| プロジェクト内 | `app/AGENTS.md` | あり |", aggregate.skeleton.build(self.root, data))
+        self.write("AGENTS.md", "ルートの決まり\n")
+        self.write(".kiro/steering/AGENTS.md", "steering の中\n")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(sorted(r["display"] for r in data["steering"]["files"]),
+                         [".kiro/steering/AGENTS.md", "AGENTS.md", "app/AGENTS.md"])   # 二重に数えない
+        table = aggregate.skeleton.build(self.root, data)
+        self.assertEqual(table.count("`.kiro/steering/AGENTS.md`"), 1)
+        self.assertIn("| プロジェクト内 | `AGENTS.md` | あり |", table)
+
+    def test_missing_agents_md_is_listed_as_absent(self):
+        self.assertIn("| プロジェクト内 | `AGENTS.md` | なし | — | — |",
+                      aggregate.skeleton.build(self.root, aggregate.aggregate(self.root)))
+
     def test_no_steering(self):
         self.assertIn("steering と AGENTS.md はありません", aggregate.render(aggregate.aggregate(self.root)))
 
@@ -339,11 +536,28 @@ class ReviewSummaryTest(ReviewSandbox):
             self.assertNotIn(secret, text)
         self.assertIn("| ツール失敗 | 1 | 1 | 0 | 3 |", text)
         self.assertIn("トピック：1 個（型の候補 1 個）", text)
-        self.assertIn("レポート：1 個、案：2 件", text)
+        self.assertIn("レポート：1 個（ほかに書きかけの骨組み 0 個）、案：2 件", text)
         self.assertIn("| topic | 1 | 0 | 0 |", text)
         self.assertIn("| tool | 0 | 0 | 1 |", text)
         self.assertIn("セッション：3 件（記録あり 1、ログのみ 2）", text)
         self.assertIn("常時読み込みの合計：70 文字", text)
+
+    def test_gap_counts_and_drafts_are_counted_like_the_aggregate(self):
+        """Issue #12 指摘10：重なった3回の実行を1件と表示し、書きかけの骨組みをレポートに数えていた。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("review", os.path.join(KIT, "review.py"))
+        review = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(review)
+        for _ in range(3):
+            self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",
+                       "tool_input": {"command": "pytest -q --junitxml=%s" % "reports/junit.xml"}})
+        self.hook({"hook_event_name": "Stop"})
+        data = aggregate.aggregate(self.root)
+        self.assertEqual([(g["reason"], g["count"]) for g in data["recording_gaps"]], [("test_end_missing", 3)])
+        self.report("2026-11-10-0900", "<!-- kiroku-report:3 -->\n# 振り返り\n\n- 読んだセッション：【ここに書く】\n")
+        text = review.summarize(self.root, None, NOW + datetime.timedelta(minutes=1))
+        self.assertIn("判定できなかったシェル実行（recording_gap）：3 件", text)
+        self.assertIn("レポート：0 個（ほかに書きかけの骨組み 1 個）", text)
 
     def test_summary_runs_on_an_empty_repository(self):
         done = subprocess.run([sys.executable, os.path.join(KIT, "review.py"), "--root", self.root],
@@ -402,6 +616,89 @@ class ReadingPlanTest(ReviewSandbox):
         self.assertIn("未読のセッションはありません", aggregate.render(data))
 
 
+class LogOnlyTest(ReviewSandbox):
+    def test_conversation_without_hook_records_is_read_and_paged(self):
+        """Issue #12 改善：記録が0件でもログの会話は読む対象になり、全文ページにも出る。"""
+        self.log("sess_question", ["この関数の使い方を教えて"])
+        data = aggregate.aggregate(self.root, NOW - datetime.timedelta(days=7), with_prompts=True)
+        self.assertEqual(data["event_count"], 0)
+        self.assertEqual(data["reading_plan"]["read"], ["sess_question"])
+        page = data["prompt_page"]
+        self.assertEqual([c["session_id"] for c in page["chunks"]], ["sess_question"])
+        self.assertEqual(page["coverage"][0]["status"], "ok")
+        self.assertIn("ログのみ 1 件", aggregate.render(data))
+
+
+class ScriptRootTest(ReviewSandbox):
+    """Issue #12 改善：許可したスクリプトの引数で、別のリポジトリに書かせない。"""
+
+    def run_script(self, name, *args, session="sess_retro"):
+        env = dict(os.environ)
+        env.pop("KIRO_SESSION_ID", None)
+        if session:
+            env["KIRO_SESSION_ID"] = session
+        return subprocess.run([sys.executable, os.path.join(KIT, name)] + list(args),
+                              capture_output=True, text=True, cwd=self.root, env=env)
+
+    def test_root_outside_the_current_repository_is_refused_inside_kiro(self):
+        other = Path(tempfile.mkdtemp(prefix="kiroku-other-"))
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        for name, args in (("aggregate.py", ["--new-report"]), ("ledger.py", ["list"]), ("review.py", [])):
+            done = self.run_script(name, "--root", str(other), *args)
+            self.assertEqual(done.returncode, 1, name + done.stdout + done.stderr)
+            self.assertIn("--root に現在のリポジトリ以外を指定できません", done.stdout)
+        self.assertFalse((other / ".kiro").exists())   # 何も書いていない
+        # 現在のリポジトリを指す --root と、--root の省略は通る。
+        self.assertEqual(self.run_script("ledger.py", "--root", self.root, "list").returncode, 0)
+        self.assertEqual(self.run_script("ledger.py", "list").returncode, 0)
+        # Kiro の外（人の端末）では、これまでどおり別のリポジトリを指定できる。
+        self.assertEqual(self.run_script("ledger.py", "--root", str(other), "list", session=None).returncode, 0)
+
+
+class NoteCoverageTest(ReviewSandbox):
+    """Issue #12 指摘8：ノートが読み終えたとみなすのは、ノートの前に要約表示で見せた範囲の発話だけ。"""
+
+    def show(self, session, since):
+        with contextlib.redirect_stdout(io.StringIO()):
+            aggregate.main(["--root", self.root, "--since", since, "--session", session])
+
+    def test_widening_the_period_brings_back_prompts_outside_the_range_read(self):
+        directory = self.home / "sessions" / "0123456789abcdef" / "sess_wide"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": "sess_wide", "workspacePaths": [self.root]}), encoding="utf-8")
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, days in enumerate((20, 1)):
+                stamp = (NOW - datetime.timedelta(days=days)).isoformat()
+                handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": {
+                    "type": "user", "content": "依頼 %d" % index}}, ensure_ascii=False) + "\n")
+        self.show("sess_wide", "7d")
+        self.note("sess_wide", [], shown=False)
+        week = aggregate.aggregate(self.root, NOW - datetime.timedelta(days=7))
+        self.assertEqual((week["sessions"][0]["note"], week["reading_plan"]["read"]), ("fresh", []))
+        month = aggregate.aggregate(self.root, NOW - datetime.timedelta(days=30))
+        self.assertEqual(month["sessions"][0]["prompts"], 2)
+        self.assertEqual(month["sessions"][0]["note"], "uncovered")
+        self.assertEqual(month["reading_plan"]["read"], ["sess_wide"])
+        self.assertIn("読んだ範囲の外に発話あり", aggregate.render(month))
+        # 広げた期間で見せ直してからノートを書き直せば、読み終えたことになる。
+        self.show("sess_wide", "30d")
+        time.sleep(0.05)
+        self.note("sess_wide", [], shown=False)
+        self.assertEqual(aggregate.aggregate(self.root, NOW - datetime.timedelta(days=30))
+                         ["sessions"][0]["note"], "fresh")
+
+    def test_a_note_that_cannot_be_read_is_read_again(self):
+        self.log("sess_a", ["依頼その1"])
+        self.note("sess_a", [])
+        (self.data / "notes" / "sess_a.json").write_text("{壊れた", encoding="utf-8")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["sessions"][0]["note"], "broken")
+        self.assertEqual(data["reading_plan"]["read"], ["sess_a"])
+        self.assertIn("ノートを読めない", aggregate.render(data))
+
+
 class ConfigTest(ReviewSandbox):
     def test_stale_defaults_in_config_do_not_hide_new_defaults(self):
         """古い版の既定値が config.json に残っていても、新しい既定値が効く。"""
@@ -429,6 +726,13 @@ class ConfigTest(ReviewSandbox):
         self.assertIn("retro_read_chars = 50000", text)
         self.assertIn("write_tools は、既定値に足して使います", text)
         self.assertNotIn("tests =", text)
+        self.assertNotIn("使えません", text)
+        for value in (-1, "100", 1.5):
+            self.write(".kiro/kiroku/config.json", json.dumps({"output_tail_chars": value}))
+            text = "\n".join(installer.config_notes(self.root))
+            self.assertIn("output_tail_chars = %s は使えません" % json.dumps(value), text)
+        self.write(".kiro/kiroku/config.json", json.dumps({"output_tail_chars": 0}))
+        self.assertNotIn("使えません", "\n".join(installer.config_notes(self.root)))
 
 
 class RetroFeedbackTest(ReviewSandbox):

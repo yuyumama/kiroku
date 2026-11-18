@@ -1,8 +1,11 @@
 """製品の実機試験ではなく、導入とログアダプターの契約を検証する。"""
+import contextlib
 import datetime
+import io
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -81,6 +84,44 @@ class InstallerTest(unittest.TestCase):
 
 
 class UpdateKeepsLauncherTest(unittest.TestCase):
+    def test_update_warns_when_the_inherited_launcher_is_missing(self):
+        """PR #13 のレビュー：引き継いだ起動名が動かないと、フックが黙って動かなくなる。
+        再レビュー指摘3：代わりに案内する起動名も、実際に起動して確かめる。"""
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as bin_dir:
+            installer.install(root, python_command="python3")
+            # python3 は無く、python は終了コード1で終わる偽物、py は本物の Python を呼ぶ。
+            fake = Path(bin_dir) / "python"
+            fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            launcher = Path(bin_dir) / "py"
+            launcher.write_text('#!/bin/sh\nif [ "$1" = "-3" ]; then shift; fi\nexec "%s" "$@"\n' % sys.executable,
+                                encoding="utf-8")
+            fake.chmod(0o755)
+            launcher.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertFalse(installer.python_works("python"))
+                self.assertTrue(installer.python_works("py -3"))
+                text = "\n".join(installer.runner_notes(root))
+            self.assertIn("'python3' で起動しますが、この環境では Python 3.9 以降として動きません", text)
+            self.assertIn("--update --python-command 'py -3'", text)
+            # 再々レビュー指摘3：install.sh は python3 を呼ぶので、確かめた起動名で install.py を直接呼ぶ。
+            self.assertNotIn("sh install.sh", text)
+            posix = [line.strip() for line in text.splitlines() if "install.py" in line][0]
+            self.assertTrue(posix.startswith("py -3 "), posix)
+            with tempfile.TemporaryDirectory() as again:
+                installer.install(again, python_command="python3")
+                command = shlex.split(posix.replace("<導入先>", shlex.quote(again)))
+                with patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ.get("PATH", "")}):
+                    done = subprocess.run(command, capture_output=True, text=True, cwd=again,
+                                          env=dict(os.environ, PATH=bin_dir))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                hooks = json.loads((Path(again) / ".kiro/hooks/kiroku.json").read_text(encoding="utf-8"))
+                self.assertTrue(all(h["action"]["command"].startswith("py -3 ") for h in hooks["hooks"]))
+            self.assertNotIn("--python-command 'python'", text)
+            launcher.unlink()
+            with patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertIn("どれも Python 3.9 以降として動きませんでした", "\n".join(installer.runner_notes(root)))
+            self.assertEqual(installer.runner_notes(root), [])   # 本物の python3 がある環境では何も出さない
+
     def test_update_without_a_launcher_keeps_the_installed_one(self):
         """`python` で導入した先を、起動名を指定せずに更新しても、python3 に変えない。"""
         with tempfile.TemporaryDirectory() as root:
@@ -206,7 +247,7 @@ class AdapterTest(Sandbox):
         ]
         with open(log_dir / "messages.jsonl", "w", encoding="utf-8") as handle:
             for index, payload in enumerate(rows):
-                stamp = (now + datetime.timedelta(seconds=index)).isoformat()
+                stamp = (now - datetime.timedelta(minutes=1) + datetime.timedelta(seconds=index)).isoformat()
                 handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload}) + "\n")
 
         view = aggregate.prompts.distill(self.root, self.session)
@@ -232,6 +273,10 @@ class AdapterTest(Sandbox):
         note.write_text('{"findings": []}', encoding="utf-8")
         future = (now + datetime.timedelta(hours=1)).timestamp()
         os.utime(note, (future, future))
+        # 要約表示で見せた記録の無いノート（以前の版が書いたもの）は、読み直しの対象にする。
+        self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "uncovered")
+        with contextlib.redirect_stdout(io.StringIO()):
+            aggregate.main(["--root", self.root, "--since", "7d", "--session", self.session])
         self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "fresh")
         os.utime(note, (now.timestamp() - 3600, now.timestamp() - 3600))
         self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "stale")
@@ -247,3 +292,27 @@ class AdapterTest(Sandbox):
     def test_session_id_cannot_select_unrelated_logs(self):
         self.assertIsNone(excerpt.find_log("../private", self.root))
         self.assertIsNone(excerpt.find_log("*", self.root))
+
+
+class PowerShellWrapperTest(unittest.TestCase):
+    """Issue #12 指摘5：-Update だけで、python の無い環境でも共通のインストーラーまで届くこと。
+
+    PowerShell を実行していない。スクリプトの文面だけを確かめる（実行での確認は未検証）。
+    """
+
+    def test_wrappers_search_for_a_python_when_none_is_given(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("install.ps1", "uninstall.ps1"):
+            raw = (root / name).read_bytes()
+            self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), name)   # Windows PowerShell 5.1 が UTF-8 と読むため
+            text = raw.decode("utf-8-sig")
+            self.assertIn("foreach ($candidate in @('python', 'py -3', 'python3'))", text, name)
+            self.assertIn("sys.version_info >= (3, 9)", text, name)
+            self.assertIn("$launcher = if ($explicit) { $PythonCommand } else { Find-KirokuPython }", text, name)
+            self.assertIn("CommandNotFoundException", text, name)
+            # PR #13 のレビュー指摘4：明示した起動名にも、同じ起動確認をする。
+            self.assertIn("$problem = Test-KirokuPython $PythonCommand", text, name)
+            self.assertIn("を使えません：$problem", text, name)
+            self.assertNotIn("& $runner[0] @arguments", text, name)   # 既定の python で直接起動しない
+        install = (root / "install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("if ($explicit -or -not $Update) {\n    $arguments += @('--python-command', $launcher)", install)

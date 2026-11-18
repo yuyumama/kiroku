@@ -34,6 +34,7 @@
 import argparse
 import collections
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -52,7 +53,8 @@ import reportcheck  # noqa: E402
 import skeleton  # noqa: E402
 import citations  # noqa: E402
 import reads  # noqa: E402
-from record import load_config, load_state, mask, not_run_kind, recording_lock, save_state  # noqa: E402
+from record import (load_config, load_state, mask, not_run_kind, recording_lock, save_state,  # noqa: E402
+                    script_root)
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
@@ -168,7 +170,9 @@ def load_events(path):
                 try:
                     event = json.loads(line)
                     event["_time"] = parse_time(event["ts"])
-                    if event.get("type") == "tool_denied":
+                    if event.get("judged") == "response":
+                        pass   # 記録の時点で、応答の全体から種類を決めてある。切り詰めた末尾で決め直さない
+                    elif event.get("type") == "tool_denied":
                         # 古い版は、終了コード -1 のうち取り消し以外をすべて拒否として記録していた。
                         event["type"] = not_run_kind(event.get("output_tail"))
                         if event["type"] == "recording_gap":
@@ -440,9 +444,33 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             return [f["_time"] for f in all_failures if f["class"] == REGRESSION and f["test_id"] == name]
         return None
 
+    read_after = {}
+
+    def exposure(target, start):
+        """境目の後に、その型が起こりうる作業をどれだけ観測できたか。発生しなかったことと、
+        作業が無かったことを分けるために使う。数えられない型は None。"""
+        kind, _, name = (target or "").partition(":")
+        if kind == "test":
+            # そのテストを含む、結果を取り込めたテスト実行。成功も数える。
+            count = sum(1 for e in all_events if e.get("type") == "test_run" and e["_time"] >= start
+                        and name in all_ids(e))
+            return {"unit": "そのテストを含むテスト実行", "count": count, "note": None}
+        if kind in ("tool", "denied", "cancelled", "timeout"):
+            # 成功したコマンドは記録しないので、実行の総数は分からない。記録のあるセッションを数える。
+            count = len({e.get("session_id") for e in all_events if e["_time"] >= start})
+            return {"unit": "フックの記録があるセッション", "count": count, "note": "実行総数は不明"}
+        if kind == "topic":
+            # 発話があり、ノートで読み終えたセッション。読んでいないセッションでは、起きたかが分からない。
+            key = start.isoformat()
+            if key not in read_after:
+                read_after[key] = sum(1 for s in prompts.sessions(root, all_events, start, None)
+                                      if s["prompts"] and s["note"] == "fresh")
+            return {"unit": "発話を読み終えたセッション", "count": read_after[key], "note": None}
+        return None
+
     starts = [e["_time"] for e in all_events[:1]] + [f["_time"] for f in findings if f["_time"]]
     adopted, rejected = ledger.tracking(root, occurrences, min(starts) if starts else None,
-                                        datetime.datetime.now(datetime.timezone.utc))
+                                        datetime.datetime.now(datetime.timezone.utc), exposure)
     pending = []
     for proposal in ledger.pending(root, before_report):
         times = occurrences(proposal["target"], proposal["report"]) if proposal["target"] else None
@@ -584,13 +612,15 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                                for t in load_config(root)['tests']],
         "execution_context": prompts.execution_context(root),
         "rework_candidates": rework_candidates(events),
-        "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit)
+        "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit,
+                                    session_ids=[s["session_id"] for s in session_rows])
         if with_prompts else None,
         "harness": harness.inventory(root),
         "steering": harness.steering_weight(root),
         "topics": notes.topics(findings, since, until),
         "note_problems": note_problems,
         "adopted": adopted,
+        "ambiguous_decisions": ledger.ambiguous_decisions(root),
         "pending": pending,
         "rejected": rejected,
         "sessions": session_rows,
@@ -834,7 +864,8 @@ def render_harness(data, cap):
     return lines + render_steering(data["steering"])
 
 
-NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり"}
+NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり",
+               "uncovered": "読んだ範囲の外に発話あり", "broken": "ノートを読めない"}
 STEERING_GUIDE_CHARS = 8000  # 常時読み込みの目安。超えたら、足す前に分割や条件付きを検討する
 
 
@@ -850,6 +881,10 @@ def render_steering(weight):
         if weight["always_total"] > STEERING_GUIDE_CHARS else ""
     lines += ["", "常時読み込みの合計：%d 文字（プロジェクト内 %d、ユーザー共通 %d）%s" % (
         weight["always_total"], weight["always_chars"]["project"], weight["always_chars"]["user"], note)]
+    if any(row["display"].endswith("/AGENTS.md") and not row["display"].startswith(("~", ".kiro/"))
+           for row in weight["files"]):
+        lines.append("サブディレクトリの AGENTS.md は、公式資料で常に読み込むとされているものです。"
+                     "そのセッションで実際に読み込まれたかは、ここでは確かめていません。")
     return lines
 
 
@@ -905,7 +940,7 @@ def render_review(data, cap=None):
     candidates = [t for t in topics if t["candidate"]]
     lines = ["", "## 会話からの型の候補（%d 件）" % len(candidates), "",
              "振り返りノートの引用をログと照合し、%d つ以上の別のセッションに出たトピックです。"
-             "継続的な方針は1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
+             "期間内に述べた継続的な方針は、1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
     if not candidates:
         lines.append("なし")
     for topic in candidates:
@@ -913,7 +948,7 @@ def render_review(data, cap=None):
             if topic["unsure_only_sessions"] else ""
         lines.append("- `topic:%s`：%d セッション%s、%d 回（%s）。%s" % (
             topic["topic"], topic["sessions"], unsure, topic["count"],
-            "、".join(notes.KINDS[k] for k in topic["kinds"]), topic["summary"]))
+            "、".join(notes.KINDS[k] for k in topic["period_kinds"]), topic["summary"]))
         for example in topic["examples"]:
             lines.append("  - session `%s` index=%s 「%s」" % (
                 example["session_id"], example["index"], shorten(example["quote"], 120)))
@@ -939,16 +974,32 @@ def render_review(data, cap=None):
         lines.append("なし")
     adopted, more_adopted = capped(data["adopted"], cap, "review")
     for row in adopted:
+        split = row.get("split", "採用")
         if row["before"] is None:
             counts = row["verdict"]
         elif row["verdict"] == "まだ日が浅い":
-            counts = "採用から %s 日。まだ日が浅い（%d 日後から判定）" % (row["after_days"], ledger.YOUNG_DAYS)
+            counts = "%sから %s 日。まだ日が浅い（%d 日後から判定）" % (split, row["after_days"], ledger.YOUNG_DAYS)
         else:
-            counts = "採用前 %d 回／%s 日、採用後 %d 回／%s 日。%s" % (
-                row["before"], row["before_days"], row["after"], row["after_days"], row["verdict"])
-        lines.append("- `%s` %s（対象の型 `%s`、採用 %s）：%s" % (
-            row["id"], row["title"], row["target"], row["decided_at"], counts))
+            counts = "%s前 %d 回／%s 日、%s後 %d 回／%s 日。%s" % (
+                split, row["before"], row["before_days"], split, row["after"], row["after_days"], row["verdict"])
+        if row.get("observed"):
+            counts += "。%s後の観測：%s %d%s" % (split, row["observed"]["unit"], row["observed"]["count"],
+                                            "（%s）" % row["observed"]["note"] if row["observed"]["note"] else "")
+        if row.get("applied_at"):
+            applied = "、反映 %s（%s）" % (row["applied_at"], row["applied_basis"])
+        elif row.get("files") and row.get("applied_basis"):
+            applied = "、反映は判別できない（%s）" % row["applied_basis"]
+        elif row.get("files"):
+            applied = "、反映は未確認（対象のファイルに、レポートの後の変更なし）"
+        else:
+            applied = "、反映日は不明（対象のファイルの記載なし。採用の時刻で比べる）"
+        lines.append("- `%s` %s（対象の型 `%s`、採用 %s%s）：%s" % (
+            row["id"], row["title"], row["target"], row["decided_at"], applied, counts))
     lines += more_adopted
+    if data.get("ambiguous_decisions"):
+        lines += ["", "番号が重複した案への判断（%s）は、どの案のものか決まらないので、追跡から外しています。"
+                  "レポートの番号を通し番号に直してから、判断を記録し直してください。"
+                  % "、".join("`%s`" % key for key in data["ambiguous_decisions"])]
     if data["pending"]:
         lines += ["", "## 前回のレポートの未判断の案（%d 件）" % len(data["pending"]), "",
                   "最新のレポートにあり、採用も見送りも記録されていない案です。"
@@ -1013,37 +1064,108 @@ def render_session(view):
     return "\n".join(lines) + "\n"
 
 
+MAX_REPORT_SUFFIX = 9   # 同じ秒に作る骨組みの数の上限（名前の並びを崩さないため、1桁まで）
+
+
+def report_names(moment):
+    """骨組みの名前の候補。分、秒、秒＋番号の順。どれも文字列の大小で時刻の順に並ぶ。"""
+    minute = moment.strftime("%Y-%m-%d-%H%M")
+    second = minute + moment.strftime("%S")
+    return [minute, second] + ["%s-%d" % (second, n) for n in range(2, MAX_REPORT_SUFFIX + 1)]
+
+
+def as_version(data, version):
+    """集約を、以前の版のレポートが作られたときの形にそろえる。検証値と骨組みの再現に使う。
+
+    目印の無いレポート（0）と版1・版2のときは、検証値と骨組みに効く次の3つを、その版のときの形に戻す。
+      - 版3で足した所在（サブディレクトリを含む AGENTS.md）を除く。
+      - 未読の数を、版2までの既読の判定（ノートを書いた後に発話が無ければ既読）で数え直す。
+      - 会話からの型の候補を、版2までの判定（期間の外の継続方針も例外にする）で決め直す。
+    更新しただけで、以前に検査を通ったレポートが不一致にならないようにするため。
+    振り返りで読むセッションは、これまでどおり今の判定で決める（この関数は検査だけに使う）。
+    """
+    if version >= skeleton.VERSION:
+        return data
+    harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
+    sessions = [dict(row, note=row.get("note_v2", row["note"])) for row in data["sessions"]]
+    plan = reading_plan([dict(row) for row in sessions], data["reading_plan"]["budget"])
+    topics = sorted((dict(row, candidate=row.get("candidate_v2", row["candidate"])) for row in data["topics"]),
+                    key=notes.order)   # 骨組みの検証値の行は、版2のときの並びで書かれている
+    shaped = dict(data, harness=harness_rows, sessions=sessions, reading_plan=plan, topics=topics)
+    shaped["report_facts"] = reportcheck.facts(shaped)
+    return shaped
+
+
 def new_report(root, data):
-    """レポートの骨組みを保存先に作る。書きかけの骨組みは作り直し、書き始めたものは上書きしない。"""
+    """レポートの骨組みを保存先に作る。
+
+    同じ名前のファイルがあるとき、作り直すのは、このセッションが作ったまま手を付けていない骨組み
+    （作った時点の内容と一致するもの）だけ。それ以外は上書きせず、別の名前で作る。
+    作成は排他的に行い、同時に始めた2回の振り返りが同じファイルを使わないようにする。
+    """
     directory = os.path.join(root, ".kiro", "kiroku", "data", "reports")
-    name = datetime.datetime.now().strftime("%Y-%m-%d-%H%M") + ".md"
-    path = os.path.join(directory, name)
+    data_dir = os.path.join(root, ".kiro", "kiroku", "data")
     session = os.environ.get("KIRO_SESSION_ID")
     if session and not re.fullmatch(r"[A-Za-z0-9._-]+", session):
         session = None
     text = skeleton.build(root, data, GAP_REASONS, session)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            existing = handle.read()
-    except OSError:
-        existing = None
-    if existing is not None and len(skeleton.SLOT.findall(existing)) != len(skeleton.SLOT.findall(text)):
-        print("%s は書き始められています。上書きしません。このファイルを書き終えるか、1分待って実行してください。"
-              % os.path.relpath(path, root))
-        return 1
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    if session:
-        data_dir = os.path.join(root, ".kiro", "kiroku", "data")
-        with recording_lock(data_dir):
-            state = load_state(data_dir)
-            made = state.get("report_sessions")
-            if not isinstance(made, dict):
-                made = state["report_sessions"] = {}
-            made[name[:-3]] = session
-            save_state(data_dir, state)
-    shown = os.path.relpath(path, root).replace(os.sep, "/")
+    chosen, skipped = None, []
+    with recording_lock(data_dir):
+        state = load_state(data_dir)
+        made = state.get("report_sessions") if isinstance(state.get("report_sessions"), dict) else {}
+        drafts = state.get("report_drafts") if isinstance(state.get("report_drafts"), dict) else {}
+        for name in report_names(datetime.datetime.now()):
+            path = os.path.join(directory, name + ".md")
+            try:
+                with open(path, "x", encoding="utf-8") as handle:
+                    handle.write(text)
+                chosen = name
+                break
+            except FileExistsError:
+                pass
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    existing = handle.read()
+            except OSError:
+                existing = None
+            untouched = existing is not None and drafts.get(name) == hashlib.sha256(
+                existing.encode("utf-8")).hexdigest() and made.get(name) == session
+            if untouched:
+                with open(path + ".tmp", "w", encoding="utf-8") as handle:
+                    handle.write(text)
+                os.replace(path + ".tmp", path)
+                chosen = name
+                break
+            skipped.append(name)
+        if chosen is None:
+            print("骨組みを作れませんでした。同じ時刻のレポートが多すぎます。1分待って実行してください。")
+            return 1
+        drafts[chosen] = digest
+        state["report_drafts"] = drafts
+        # 作った正確な時刻。名前は分（または秒）までなので、反映の判定の基準にはこちらを使う。
+        made_at = state.get("report_made") if isinstance(state.get("report_made"), dict) else {}
+        made_at[chosen] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        state["report_made"] = made_at
+        # そのときの HEAD。反映の判定で、同じ秒のコミットの前後を時刻に頼らず決めるのに使う。
+        head = Repo(root).git("rev-parse", "--verify", "--quiet", "HEAD")
+        heads = state.get("report_heads") if isinstance(state.get("report_heads"), dict) else {}
+        if head and head.strip():
+            heads[chosen] = head.strip()
+        else:
+            heads.pop(chosen, None)
+        state["report_heads"] = heads
+        if session:
+            made[chosen] = session
+            state["report_sessions"] = made
+        else:
+            made.pop(chosen, None)
+        save_state(data_dir, state)
+    shown = os.path.relpath(os.path.join(directory, chosen + ".md"), root).replace(os.sep, "/")
+    if skipped:
+        print("%s は書き始められているか、別の振り返りが作ったものです。上書きせず、別の名前で作りました。"
+              % "、".join("%s.md" % name for name in skipped))
     print("レポートの骨組みを作りました：%s" % shown)
     print("- 書くのは「【ここに書く…】」の欄だけです。欄を、内容で置き換えます。該当が無ければ「なし」と書きます。")
     print("- それ以外の行は、スクリプトが記録から書いたものです。消したり、言い換えたり、まとめ直したりしません。")
@@ -1075,13 +1197,19 @@ def main(argv=None):
     if args.prompt_offset < 0 or args.prompt_limit < 1:
         parser.error("prompt-offset は0以上、prompt-limit は1以上にしてください")
 
-    root = args.root
-    if root is None:
-        top = Repo(os.getcwd()).git("rev-parse", "--show-toplevel")
-        root = top.strip() if top else os.getcwd()
-    if args.require_agent and prompts.execution_context(root)['status'] != 'verified':
-        print('専用エージェントを確認できません。kiro-cli --agent kiroku-retro で起動し、/kiroku-retro を実行してください。')
+    root, refused = script_root(args.root)
+    if refused:
+        print(refused)
         return 1
+    if args.require_agent:
+        context = prompts.execution_context(root)
+        if context['status'] != 'verified':
+            print('専用エージェントを確認できません。kiro-cli --agent kiroku-retro で起動し、/kiroku-retro を実行してください。')
+            if context['status'] == 'wrong_agent':
+                print('- 確認できたエージェント：%s' % mask(context['agent']))
+            elif context['reason']:
+                print('- 確認できなかった理由：%s' % mask(context['reason']))
+            return 1
     now = datetime.datetime.now(datetime.timezone.utc)
     if args.check_report:
         notices = []
@@ -1094,16 +1222,21 @@ def main(argv=None):
             name = os.path.basename(args.check_report)
             name = name[:-3] if name.endswith('.md') else name
             data = aggregate(root, start, end, before_report=name)
-            errors = reportcheck.validate(body, data['report_facts'])
-            if skeleton.version(body):
+            form = skeleton.version(body)
+            data = as_version(data, form)   # 以前の版のレポートは、その版の検証値と骨組みで比べる
+            errors = reportcheck.validate(body, data['report_facts'], numbers=form >= skeleton.VERSION)
+            if form:
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
                 made_by = (load_state(os.path.join(root, ".kiro", "kiroku", "data"))
                            .get("report_sessions") or {}).get(name, reads.session_of(body))
-                errors += skeleton.validate(body, skeleton.build(root, data, GAP_REASONS, made_by))
+                errors += skeleton.validate(body, skeleton.build(
+                    root, data, GAP_REASONS, made_by,
+                    # 版1は表記が違うので、行は照合しない（今の版の骨組みを渡すと、validate が照合を省く）
+                    version=min(form, skeleton.VERSION) if form >= 2 else skeleton.VERSION))
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
-                unread, notices = reads.validate(root, body)
+                unread, notices = reads.validate(root, body, legacy=form < skeleton.VERSION)
                 errors += unread
         except (OSError, ValueError, TypeError, KeyError) as exc:
             errors, notices = ['レポートを検査できません：' + str(exc)], []
@@ -1119,6 +1252,8 @@ def main(argv=None):
         if args.user_chars < 1 or args.reply_chars < 1:
             parser.error("user-chars と reply-chars は1以上にしてください")
         view = prompts.distill(root, args.session, since, until, args.user_chars, args.reply_chars)
+        if view["status"] in ("ok", "partial_log"):
+            prompts.record_shown(root, args.session, since, until)
         if args.json:
             json.dump(view, sys.stdout, ensure_ascii=False, indent=2, default=str)
             sys.stdout.write("\n")

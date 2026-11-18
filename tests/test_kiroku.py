@@ -244,6 +244,15 @@ class RecordTest(Sandbox):
         self.assertEqual(event["session_id"], self.session)
         self.assertTrue(event["ts"].endswith("Z"))
 
+    def test_output_tail_chars_zero_keeps_nothing(self):
+        """Issue #12 指摘1：0 は「残さない」。[-0:] で全体を残していた。"""
+        output = "x" * 3000
+        for limit, expected in ((0, 0), (20, 20), (-5, 2000), ("10", 2000), (True, 2000)):
+            self.write(".kiro/kiroku/config.json", json.dumps({"tests": [], "output_tail_chars": limit}))
+            done = self.shell("make build", 1, output)
+            self.assertEqual((done.returncode, done.stdout), (0, ""))
+            self.assertEqual(len(self.events()[-1]["output_tail"]), expected, limit)
+
     def test_cancelled_tool_is_not_a_failure(self):
         self.shell("rm -rf build", -1, "The tool call was cancelled before it was approved.")
         self.assertEqual(self.events()[0]["type"], "tool_cancelled")

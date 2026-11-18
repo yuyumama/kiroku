@@ -285,22 +285,42 @@ class SkeletonTest(ReviewSandbox):
         self.write("app/AGENTS.md", "app の決まり\n")
         # 以前の版が書いたノート（要約表示で見せた期間の控えが無い）。PR #13 の再レビュー指摘1。
         self.note("sess_live", [], shown=False)
+        # 期間内の1回の指摘と、期間の外の同じ話題の継続方針。版2は候補にした（再々レビュー指摘1）。
+        self.log("sess_in", ["報告は結論から書いて"], days_ago=1)
+        self.log("sess_out", ["今後も報告は必ず結論から書くこと"], days_ago=20)
+        self.note("sess_in", [{"kind": "correction", "topic": "報告順", "summary": "結論から",
+                               "quote": "報告は結論から書いて", "index": 0, "context": "未確認"}], shown=False)
+        self.note("sess_out", [{"kind": "standing_policy", "topic": "報告順", "summary": "結論から",
+                                "quote": "今後も報告は必ず結論から書くこと", "index": 0, "context": "未確認"}],
+                  shown=False)
         future = time.time() + 3600
-        os.utime(self.data / "notes" / "sess_live.json", (future, future))
+        for name in ("sess_live", "sess_in", "sess_out"):
+            os.utime(self.data / "notes" / (name + ".json"), (future, future))
         old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
         self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
         path = sorted((self.data / "reports").glob("*.md"))[-1]
         text = path.read_text(encoding="utf-8")
         self.assertTrue(text.startswith("<!-- kiroku-report:2 -->"))
+        self.assertIn('"topic:報告順"', text)
+        # 版2の検査は、案の番号の重複も、目印を消しただけの空欄も見なかった。
+        user = "### P1. ユーザー共通の手順\n\n- 対象の型：`tool:make test`"
         filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+        marker = "## ハーネスへの改善案（ユーザー共通）\n\n"
+        start = filled.index(marker) + len(marker)
+        filled = filled[:start] + user + filled[filled.index("\n", start):]
+        filled = filled.replace("## 様子見\n\nなし\n", "## 様子見\n\n")
         path.write_text(filled, encoding="utf-8")
         before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
         self.assertEqual(before.returncode, 0, before.stdout)
         self.assertIn("- 未読のセッション：0 件", filled)
+        self.assertFalse(skeleton.is_draft(filled))   # 書き終えたレポートは、更新しても書き終えたまま
         after = self.cli("--check-report", str(path))
         self.assertEqual(after.returncode, 0, after.stdout)
         # 振り返りで読むセッションは、今の判定で決める（以前の版のノートは読み直す）。
-        self.assertEqual(aggregate.aggregate(self.root)["reading_plan"]["read"], ["sess_live"])
+        self.assertIn("sess_live", aggregate.aggregate(self.root)["reading_plan"]["read"])
+        # 版3では、期間の外の継続方針で候補にしない。
+        self.assertNotIn("topic:報告順", aggregate.aggregate(self.root, aggregate.parse_bound(
+            "7d", aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc)))["report_facts"]["targets"])
         self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
 
     def test_reports_without_the_mark_are_checked_by_the_previous_rules(self):

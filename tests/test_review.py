@@ -354,6 +354,10 @@ class AppliedTest(ReviewSandbox):
         (self.data / "state.json").write_text(json.dumps(state), encoding="utf-8")
         row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == name + "#P1"][0]
         self.assertIn("作る前か後かは判別できない", row["applied_basis"])
+        # PR #13 の再々レビュー指摘2：判別できないコミットしか無ければ、反映の日にせず、判定を保留する。
+        self.assertIsNone(row["applied_at"])
+        self.assertEqual(row["verdict"], "反映の前後を判別できない（判定を保留）")
+        self.assertIn("反映は判別できない", aggregate.render(aggregate.aggregate(self.root, since=None)))
 
     def test_commit_exactly_at_the_end_of_the_named_minute_counts_for_old_reports(self):
         minute = datetime.datetime.strptime(self.made, "%Y-%m-%d-%H%M").astimezone()

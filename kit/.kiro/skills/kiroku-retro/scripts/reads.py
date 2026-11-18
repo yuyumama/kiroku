@@ -41,12 +41,16 @@ def _path(root, value):
     return os.path.realpath(value)
 
 
-def opened(root, session):
+def opened(root, session, legacy=False):
     """このセッションで本文を取得したファイル。ログを読めなければ None。
 
     戻り値は (開いたファイルの集合, 記録が今の実行まで届いているか)。
+    legacy は、版2までのレポートの検査。そのころの探し方（sessions_dir だけ）でログを探す。
     """
-    path = prompts.running_session_log(root, session)   # 振り返り自身のログ
+    if legacy:
+        path = excerpt.find_log(session, prompts.sessions_dir(root))
+    else:
+        path = prompts.running_session_log(root, session)   # 振り返り自身のログ
     if not path:
         return None
     try:
@@ -84,7 +88,7 @@ def opened(root, session):
     return files, fresh
 
 
-def validate(root, text):
+def validate(root, text, legacy=False):
     """(不一致, 知らせ) を返す。照合できないときは、不一致にせず、知らせに理由を書く。"""
     claimed = []
     for line in text.splitlines():
@@ -98,7 +102,7 @@ def validate(root, text):
     session = session_of(text)
     if not session:
         return [], ["「確認済み」の照合はしていません（骨組みに、振り返りのセッションの記録がありません）。"]
-    found = opened(root, session)
+    found = opened(root, session, legacy)
     if found is None:
         return [], ["「確認済み」の照合はできませんでした（振り返りのセッションのログを読めません）。"]
     files, fresh = found

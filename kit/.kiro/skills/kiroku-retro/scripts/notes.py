@@ -191,9 +191,17 @@ def topics(findings, since=None, until=None):
         # 期間の後に書かれた方針が、期間内の単発の指摘を型に変えないようにする。
         entry["candidate"] = firm >= PATTERN_SESSIONS or \
             (firm >= 1 and "standing_policy" in entry["period_kinds"])
+        # 版2までの判定（継続方針が期間の外にあっても例外にした）。以前の版のレポートの検査だけに使う。
+        entry["candidate_v2"] = firm >= PATTERN_SESSIONS or \
+            (firm >= 1 and "standing_policy" in entry["kinds"])
         entry["kinds"] = sorted(entry["kinds"])          # 全期間
         entry["period_kinds"] = sorted(entry["period_kinds"])   # 期間内
         entry["all_sessions"] = len(entry["all_sessions"])
         entry["sessions"] = sessions
         rows.append(entry)
-    return sorted(rows, key=lambda r: (not r["candidate"], -r["sessions"], r["topic"]))
+    return sorted(rows, key=order)
+
+
+def order(row):
+    """トピックの並び。候補が先、セッションの多い順。検証値の行の文面もこの順になる。"""
+    return (not row["candidate"], -row["sessions"], row["topic"])

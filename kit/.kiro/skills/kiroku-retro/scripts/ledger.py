@@ -271,8 +271,9 @@ def _commits_after(root, relative, name, made):
         second = int(stamp)
         moment = datetime.datetime.fromtimestamp(second, datetime.timezone.utc)
         if made["exact"] and second == int(since.timestamp()):
-            found.append((since, "コミット %s（`%s`）。レポートを作ったのと同じ秒のコミットで、作る前か後かは"
-                                 "判別できない" % (short, name)))
+            # 時刻の印は None。反映の日には使わず、「判別できない」として知らせるだけにする
+            found.append((None, "コミット %s（`%s`）。レポートを作ったのと同じ秒のコミットで、作る前か後かは"
+                                "判別できない" % (short, name)))
         elif second > since.timestamp() or (not made["exact"] and second >= since.timestamp()):
             found.append((moment, "コミット %s（`%s`）" % (short, name)))
     return found
@@ -285,7 +286,7 @@ def file_changed_at(root, files, made):
     人の申告を待たず、記録から決める。コミットされた変更はコミット（作ったときの HEAD より後か、
     控えが無ければ時刻）で、コミットされていない変更はファイルの更新時刻で判定する。
     ユーザー共通のファイル（~/ で始まるもの）は git に無いので、更新時刻だけを見る。
-    変わっていなければ (None, None)。
+    変わっていなければ (None, None)。前後を判別できない変更しか無ければ (None, その理由)。
     ファイルが変わったことは、案どおりに反映したことの証明ではない（ほかの変更でも変わる）。
     """
     if isinstance(made, datetime.datetime):
@@ -308,7 +309,10 @@ def file_changed_at(root, files, made):
             continue
         if moment > since or (not made["exact"] and moment >= since):
             found.append((moment, "コミットされていない変更（`%s` の更新時刻）" % name))
-    return min(found) if found else (None, None)
+    definite = [item for item in found if item[0] is not None]
+    if definite:
+        return min(definite)
+    return (None, found[0][1]) if found else (None, None)
 
 
 def ambiguous_decisions(root):
@@ -344,9 +348,9 @@ def tracking(root, occurrences, data_start, now, exposure=None):
         if entry["decision"] == "adopted" and proposal and proposal["files"] and made:
             row["files"] = proposal["files"]
             applied, basis = file_changed_at(root, proposal["files"], made)
+            row["applied_basis"] = basis
             if applied:
                 row["applied_at"] = applied.isoformat().replace("+00:00", "Z")
-                row["applied_basis"] = basis
                 split, split_label = applied, "反映"
         row["split"] = split_label
         times = occurrences(entry.get("target"), str(entry.get("id") or "").partition("#")[0]) \
@@ -366,7 +370,9 @@ def tracking(root, occurrences, data_start, now, exposure=None):
             # 境目の後に、その型が起こりうる作業をどれだけ観測できたか。数えられなければ None。
             row["observed"] = exposure(entry.get("target"), split) if exposure else None
             observed = row["observed"]["count"] if row["observed"] else None
-            if row["files"] and row["applied_at"] is None:
+            if row["files"] and row["applied_at"] is None and row["applied_basis"]:
+                row["verdict"] = "反映の前後を判別できない（判定を保留）"
+            elif row["files"] and row["applied_at"] is None:
                 row["verdict"] = "対象のファイルに変更なし（反映を確認できない）"
             elif after_days < YOUNG_DAYS:
                 row["verdict"] = "まだ日が浅い"

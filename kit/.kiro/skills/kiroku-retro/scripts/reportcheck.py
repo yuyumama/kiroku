@@ -41,7 +41,9 @@ def extract(text):
     return value
 
 
-def validate(text, expected):
+def validate(text, expected, numbers=True):
+    """numbers は、案の番号の重複を不一致にするか。版2までのレポートは、そのころの規則どおり見ない
+    （台帳は、どの版のレポートでも、重複した番号への判断を記録しない）。"""
     errors = []
     try:
         if extract(text) != expected:
@@ -62,7 +64,7 @@ def validate(text, expected):
             target = TARGET.search(line)
             if target and target.group(1).strip() not in expected['targets']:
                 errors.append('集約にない対象の型：' + target.group(1).strip())
-    for number, names in titles.items():
+    for number, names in titles.items() if numbers else ():
         if len(names) > 1:
             # 同じ番号の案が複数あると、「P1 は採用」がどの案のことか決まらない。
             errors.append('案の番号 %s が %d 回使われています。プロジェクト内とユーザー共通を通して、'

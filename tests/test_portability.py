@@ -5,6 +5,7 @@ import io
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -102,6 +103,19 @@ class UpdateKeepsLauncherTest(unittest.TestCase):
                 text = "\n".join(installer.runner_notes(root))
             self.assertIn("'python3' で起動しますが、この環境では Python 3.9 以降として動きません", text)
             self.assertIn("--update --python-command 'py -3'", text)
+            # 再々レビュー指摘3：install.sh は python3 を呼ぶので、確かめた起動名で install.py を直接呼ぶ。
+            self.assertNotIn("sh install.sh", text)
+            posix = [line.strip() for line in text.splitlines() if "install.py" in line][0]
+            self.assertTrue(posix.startswith("py -3 "), posix)
+            with tempfile.TemporaryDirectory() as again:
+                installer.install(again, python_command="python3")
+                command = shlex.split(posix.replace("<導入先>", shlex.quote(again)))
+                with patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ.get("PATH", "")}):
+                    done = subprocess.run(command, capture_output=True, text=True, cwd=again,
+                                          env=dict(os.environ, PATH=bin_dir))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                hooks = json.loads((Path(again) / ".kiro/hooks/kiroku.json").read_text(encoding="utf-8"))
+                self.assertTrue(all(h["action"]["command"].startswith("py -3 ") for h in hooks["hooks"]))
             self.assertNotIn("--python-command 'python'", text)
             launcher.unlink()
             with patch.dict(os.environ, {"PATH": bin_dir}):

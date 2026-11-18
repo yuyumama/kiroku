@@ -987,6 +987,8 @@ def render_review(data, cap=None):
                                             "（%s）" % row["observed"]["note"] if row["observed"]["note"] else "")
         if row.get("applied_at"):
             applied = "、反映 %s（%s）" % (row["applied_at"], row["applied_basis"])
+        elif row.get("files") and row.get("applied_basis"):
+            applied = "、反映は判別できない（%s）" % row["applied_basis"]
         elif row.get("files"):
             applied = "、反映は未確認（対象のファイルに、レポートの後の変更なし）"
         else:
@@ -1075,9 +1077,10 @@ def report_names(moment):
 def as_version(data, version):
     """集約を、以前の版のレポートが作られたときの形にそろえる。検証値と骨組みの再現に使う。
 
-    目印の無いレポート（0）と版1・版2のときは、次の2つを、その版のときの形に戻す。
+    目印の無いレポート（0）と版1・版2のときは、検証値と骨組みに効く次の3つを、その版のときの形に戻す。
       - 版3で足した所在（サブディレクトリを含む AGENTS.md）を除く。
       - 未読の数を、版2までの既読の判定（ノートを書いた後に発話が無ければ既読）で数え直す。
+      - 会話からの型の候補を、版2までの判定（期間の外の継続方針も例外にする）で決め直す。
     更新しただけで、以前に検査を通ったレポートが不一致にならないようにするため。
     振り返りで読むセッションは、これまでどおり今の判定で決める（この関数は検査だけに使う）。
     """
@@ -1086,7 +1089,9 @@ def as_version(data, version):
     harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
     sessions = [dict(row, note=row.get("note_v2", row["note"])) for row in data["sessions"]]
     plan = reading_plan([dict(row) for row in sessions], data["reading_plan"]["budget"])
-    shaped = dict(data, harness=harness_rows, sessions=sessions, reading_plan=plan)
+    topics = sorted((dict(row, candidate=row.get("candidate_v2", row["candidate"])) for row in data["topics"]),
+                    key=notes.order)   # 骨組みの検証値の行は、版2のときの並びで書かれている
+    shaped = dict(data, harness=harness_rows, sessions=sessions, reading_plan=plan, topics=topics)
     shaped["report_facts"] = reportcheck.facts(shaped)
     return shaped
 
@@ -1219,7 +1224,7 @@ def main(argv=None):
             data = aggregate(root, start, end, before_report=name)
             form = skeleton.version(body)
             data = as_version(data, form)   # 以前の版のレポートは、その版の検証値と骨組みで比べる
-            errors = reportcheck.validate(body, data['report_facts'])
+            errors = reportcheck.validate(body, data['report_facts'], numbers=form >= skeleton.VERSION)
             if form:
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
@@ -1231,7 +1236,7 @@ def main(argv=None):
                     version=min(form, skeleton.VERSION) if form >= 2 else skeleton.VERSION))
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
-                unread, notices = reads.validate(root, body)
+                unread, notices = reads.validate(root, body, legacy=form < skeleton.VERSION)
                 errors += unread
         except (OSError, ValueError, TypeError, KeyError) as exc:
             errors, notices = ['レポートを検査できません：' + str(exc)], []

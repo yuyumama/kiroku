@@ -4,8 +4,12 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
+import sys
+
+sys.dont_write_bytecode = True   # 配布元の kit/ にも __pycache__ を作らない（record.py を読み込むため）
 
 
 def default_config():
@@ -87,8 +91,11 @@ def runner_notes(target):
              % command,
              "  Kiro の環境でも動かなければ、フックが動かず、記録が止まります。"]
     if others:
+        # install.sh は python3 で起動するので、python3 が動かない環境では使えない。確かめた起動名で
+        # install.py を直接呼ぶ。
+        script = shlex.quote(str(Path(__file__).resolve()))
         lines += ["  動くことを確かめた起動名を指定して、もう一度更新してください。例：",
-                  "    sh install.sh <導入先> --update --python-command '%s'" % others[0],
+                  "    %s %s <導入先> --update --python-command '%s'" % (others[0], script, others[0]),
                   "    install.ps1 -Target <導入先> -Update -PythonCommand '%s'" % others[0]]
     else:
         lines.append("  この環境では、python3、python、py -3 のどれも Python 3.9 以降として動きませんでした。")

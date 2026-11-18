@@ -125,6 +125,23 @@ def find_root(cwd):
     return top.strip() if top and top.strip() else cwd
 
 
+def script_root(given):
+    """集約・台帳のスクリプトが読み書きするリポジトリ。(ルート, 拒否の理由) を返す。
+
+    スクリプトが書くのは、すべてルートの下の .kiro/kiroku/data。シェルの許可規則は引数を制限できない
+    （kiro.dev/docs/permissions/ の Pattern matching）ので、Kiro のセッションの中（KIRO_SESSION_ID がある）
+    では、--root を現在のリポジトリ以外に向けさせない。人がいない実行でも、書き込み先がこのリポジトリに
+    収まるようにするため。Kiro の外（人の端末）では、これまでどおり --root を受け付ける。
+    """
+    current = find_root(os.getcwd())
+    if given is None:
+        return current, None
+    if os.environ.get("KIRO_SESSION_ID") and os.path.realpath(given) != os.path.realpath(current):
+        return None, ("Kiro のセッションの中では、--root に現在のリポジトリ以外を指定できません"
+                      "（指定 %s、現在 %s）。--root を省いて実行してください。" % (given, current))
+    return given, None
+
+
 # 導入先の設定に「足す」項目。既定の値は常に効き、設定に書いた値はそこに加わる。
 # 古い版の既定値が設定ファイルに残っていても、新しい既定値が隠れないようにするため。
 ADDITIVE_KEYS = ("write_tools", "ignore_paths")

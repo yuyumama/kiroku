@@ -127,14 +127,14 @@ def main(argv=None):
     parser.add_argument("--root", default=None, help="リポジトリのルート（既定は現在の git リポジトリ）")
     parser.add_argument("--since", default="14d", help="開始。14d のような日数、日付、または all（既定 14d）")
     args = parser.parse_args(argv)
-    root = args.root
-    if root is None:
-        top = aggregate.Repo(os.getcwd()).git("rev-parse", "--show-toplevel")
-        root = top.strip() if top else os.getcwd()
+    root, refused = aggregate.script_root(args.root)
+    if refused:
+        print(refused)
+        return 1
     now = datetime.datetime.now(datetime.timezone.utc)
     since = aggregate.parse_bound(args.since, now) if args.since not in ("all", "") else None
     sys.stdout.write(summarize(root, since, now))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

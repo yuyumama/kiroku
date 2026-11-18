@@ -20,7 +20,7 @@ import sys
 
 sys.dont_write_bytecode = True  # 導入先に __pycache__ を作らない
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from record import find_root  # noqa: E402
+from record import script_root  # noqa: E402
 import skeleton  # noqa: E402
 
 HEADING = re.compile(r"^###\s+(P\d+)[.．:：]?\s*(.*)$")
@@ -236,7 +236,10 @@ def main(argv=None):
         sub.add_argument("--target", help="対象の型。レポートに書かれていないときに指定する")
         sub.add_argument("--reason", help="理由のメモ")
     args = parser.parse_args(argv)
-    root = args.root or find_root(os.getcwd())
+    root, refused = script_root(args.root)
+    if refused:
+        print(refused)
+        return 1
 
     if args.command == "list":
         known = decisions(root)

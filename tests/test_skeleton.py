@@ -43,7 +43,7 @@ class SkeletonTest(ReviewSandbox):
 
     def cli(self, *args, script=AGGREGATE):
         return subprocess.run([sys.executable, script, "--root", self.root] + list(args),
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, cwd=self.root)
 
     def new_report(self):
         done = self.cli("--since", "7d", "--new-report")

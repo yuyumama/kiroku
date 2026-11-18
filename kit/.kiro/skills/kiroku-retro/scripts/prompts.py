@@ -32,26 +32,49 @@ def notes_dir(root):
     return os.path.join(root, ".kiro", "kiroku", "data", "notes")
 
 
+def _agent_of(path):
+    """ログの隣の session.json に記録されたプロファイル名。無ければ推測せず None。"""
+    try:
+        with open(os.path.join(os.path.dirname(path), 'session.json'), encoding='utf-8-sig') as handle:
+            meta = json.load(handle)
+        agent = meta.get('agentMode')
+        return agent if isinstance(agent, str) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def session_agent(root, session):
     """session.json に記録されたプロファイル名。無ければ推測せず None。"""
     path = excerpt.find_log(session, sessions_dir(root)) if session else None
-    if path:
-        try:
-            with open(os.path.join(os.path.dirname(path), 'session.json'), encoding='utf-8-sig') as handle:
-                meta = json.load(handle)
-            agent = meta.get('agentMode')
-            if isinstance(agent, str):
-                return agent
-        except (OSError, ValueError, AttributeError):
-            pass
-    return None
+    return _agent_of(path) if path else None
+
+
+def running_session_log(root, session):
+    """実行中のセッション（振り返りそのもの）のログ。
+
+    sessions_dir は過去の開発セッションを探す場所（IDE のエクスポートなど）。実行中のセッションの
+    ログは Kiro の既定の置き場に書かれるので、sessions_dir に無ければそちらも見る（CLI で実測した置き場）。
+    """
+    if not session:
+        return None
+    configured = sessions_dir(root)
+    return (excerpt.find_log(session, configured) if configured else None) or excerpt.find_log(session, None)
 
 
 def execution_context(root):
-    """現在のセッションのプロファイルを確認する。取れないときは未確認。"""
+    """現在のセッションのプロファイルを確認する。取れないときは未確認とし、どの確認に失敗したかを返す。"""
     session = os.environ.get('KIRO_SESSION_ID')
-    agent = session_agent(root, session)
-    return {'session_id': session, 'agent': agent,
+    path = running_session_log(root, session)
+    agent = _agent_of(path) if path else None
+    if not session:
+        reason = 'KIRO_SESSION_ID がありません（Kiro の外で実行したか、この環境では渡されない）'
+    elif not path:
+        reason = 'セッション %s のログが、sessions_dir にも Kiro の既定の置き場にもありません' % session
+    elif agent is None:
+        reason = 'セッションのメタデータ（session.json）に agentMode がありません'
+    else:
+        reason = None
+    return {'session_id': session, 'agent': agent, 'reason': reason,
             'status': 'unverified' if agent is None else 'verified' if agent == 'kiroku-retro' else 'wrong_agent'}
 
 
@@ -501,12 +524,19 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
     return result
 
 
-def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=2000):
+def page(root, events, since=None, until=None, offset=0, size=20, chunk_chars=2000, session_ids=None):
+    """全発話を全文でページ表示する。
+
+    session_ids を渡すと、そのセッションを対象にする（集約のセッション一覧と同じ集合。
+    フックの記録が無く、ログだけがあるセッションも含む）。渡さなければ、記録に出たセッション。
+    """
     if offset < 0 or size < 1 or chunk_chars < 1:
         raise ValueError("offset は0以上、size/chunk_chars は1以上が必要です")
     directory = sessions_dir(root)
     chunks, coverage = [], []
-    session_ids = sorted({e["session_id"] for e in events if e.get("session_id")})
+    if session_ids is None:
+        session_ids = {e["session_id"] for e in events if e.get("session_id")}
+    session_ids = sorted(set(session_ids))
     marks = retro_marks(root)
     for session in session_ids:
         status = {"session_id": session, "status": "ok", "issues": [], "prompts": 0}

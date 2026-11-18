@@ -53,7 +53,8 @@ import reportcheck  # noqa: E402
 import skeleton  # noqa: E402
 import citations  # noqa: E402
 import reads  # noqa: E402
-from record import load_config, load_state, mask, not_run_kind, recording_lock, save_state  # noqa: E402
+from record import (load_config, load_state, mask, not_run_kind, recording_lock, save_state,  # noqa: E402
+                    script_root)
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
@@ -587,7 +588,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                                for t in load_config(root)['tests']],
         "execution_context": prompts.execution_context(root),
         "rework_candidates": rework_candidates(events),
-        "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit)
+        "prompt_page": prompts.page(root, events, since, until, prompt_offset, prompt_limit,
+                                    session_ids=[s["session_id"] for s in session_rows])
         if with_prompts else None,
         "harness": harness.inventory(root),
         "steering": harness.steering_weight(root),
@@ -854,6 +856,10 @@ def render_steering(weight):
         if weight["always_total"] > STEERING_GUIDE_CHARS else ""
     lines += ["", "常時読み込みの合計：%d 文字（プロジェクト内 %d、ユーザー共通 %d）%s" % (
         weight["always_total"], weight["always_chars"]["project"], weight["always_chars"]["user"], note)]
+    if any(row["display"].endswith("/AGENTS.md") and not row["display"].startswith(("~", ".kiro/"))
+           for row in weight["files"]):
+        lines.append("サブディレクトリの AGENTS.md は、公式資料で常に読み込むとされているものです。"
+                     "そのセッションで実際に読み込まれたかは、ここでは確かめていません。")
     return lines
 
 
@@ -1116,13 +1122,19 @@ def main(argv=None):
     if args.prompt_offset < 0 or args.prompt_limit < 1:
         parser.error("prompt-offset は0以上、prompt-limit は1以上にしてください")
 
-    root = args.root
-    if root is None:
-        top = Repo(os.getcwd()).git("rev-parse", "--show-toplevel")
-        root = top.strip() if top else os.getcwd()
-    if args.require_agent and prompts.execution_context(root)['status'] != 'verified':
-        print('専用エージェントを確認できません。kiro-cli --agent kiroku-retro で起動し、/kiroku-retro を実行してください。')
+    root, refused = script_root(args.root)
+    if refused:
+        print(refused)
         return 1
+    if args.require_agent:
+        context = prompts.execution_context(root)
+        if context['status'] != 'verified':
+            print('専用エージェントを確認できません。kiro-cli --agent kiroku-retro で起動し、/kiroku-retro を実行してください。')
+            if context['status'] == 'wrong_agent':
+                print('- 確認できたエージェント：%s' % mask(context['agent']))
+            elif context['reason']:
+                print('- 確認できなかった理由：%s' % mask(context['reason']))
+            return 1
     now = datetime.datetime.now(datetime.timezone.utc)
     if args.check_report:
         notices = []

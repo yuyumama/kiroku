@@ -46,7 +46,7 @@ def opened(root, session):
 
     戻り値は (開いたファイルの集合, 記録が今の実行まで届いているか)。
     """
-    path = excerpt.find_log(session, prompts.sessions_dir(root))
+    path = prompts.running_session_log(root, session)   # 振り返り自身のログ
     if not path:
         return None
     try:

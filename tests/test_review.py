@@ -327,6 +327,32 @@ class SteeringWeightTest(ReviewSandbox):
         (steering / "big.md").write_text("あ" * 9000, encoding="utf-8")
         self.assertIn("目安の 8000 文字を超えています", aggregate.render(aggregate.aggregate(self.root)))
 
+    def test_agents_md_in_subdirectories_is_counted_and_compared(self):
+        """Issue #12 改善：Kiro はサブディレクトリの AGENTS.md も常に読み込む（kiro.dev/docs/steering/#agentsmd）。"""
+        self.write("app/AGENTS.md", "app の決まり\n")
+        self.write("vendor/AGENTS.md", "無視される\n")
+        self.write(".gitignore", ".kiro/kiroku/data/\nreports/\nvendor/\n")
+        data = aggregate.aggregate(self.root)
+        rows = {r["display"]: r for r in data["steering"]["files"]}
+        self.assertEqual(set(rows), {"app/AGENTS.md"})
+        self.assertEqual((rows["app/AGENTS.md"]["inclusion"], data["steering"]["always_total"]), ("always", 9))
+        entry = [e for e in data["harness"] if e["path"].endswith("AGENTS.md")]
+        self.assertEqual([(e["status"], [Path(f).name for f in e["files"]]) for e in entry],
+                         [("present", ["AGENTS.md"])])
+        self.assertIn("| プロジェクト内 | `app/AGENTS.md` | あり |", aggregate.skeleton.build(self.root, data))
+        self.write("AGENTS.md", "ルートの決まり\n")
+        self.write(".kiro/steering/AGENTS.md", "steering の中\n")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(sorted(r["display"] for r in data["steering"]["files"]),
+                         [".kiro/steering/AGENTS.md", "AGENTS.md", "app/AGENTS.md"])   # 二重に数えない
+        table = aggregate.skeleton.build(self.root, data)
+        self.assertEqual(table.count("`.kiro/steering/AGENTS.md`"), 1)
+        self.assertIn("| プロジェクト内 | `AGENTS.md` | あり |", table)
+
+    def test_missing_agents_md_is_listed_as_absent(self):
+        self.assertIn("| プロジェクト内 | `AGENTS.md` | なし | — | — |",
+                      aggregate.skeleton.build(self.root, aggregate.aggregate(self.root)))
+
     def test_no_steering(self):
         self.assertIn("steering と AGENTS.md はありません", aggregate.render(aggregate.aggregate(self.root)))
 
@@ -439,6 +465,46 @@ class ReadingPlanTest(ReviewSandbox):
         data = aggregate.aggregate(self.root)
         self.assertEqual(data["reading_plan"]["read"], [])
         self.assertIn("未読のセッションはありません", aggregate.render(data))
+
+
+class LogOnlyTest(ReviewSandbox):
+    def test_conversation_without_hook_records_is_read_and_paged(self):
+        """Issue #12 改善：記録が0件でもログの会話は読む対象になり、全文ページにも出る。"""
+        self.log("sess_question", ["この関数の使い方を教えて"])
+        data = aggregate.aggregate(self.root, NOW - datetime.timedelta(days=7), with_prompts=True)
+        self.assertEqual(data["event_count"], 0)
+        self.assertEqual(data["reading_plan"]["read"], ["sess_question"])
+        page = data["prompt_page"]
+        self.assertEqual([c["session_id"] for c in page["chunks"]], ["sess_question"])
+        self.assertEqual(page["coverage"][0]["status"], "ok")
+        self.assertIn("ログのみ 1 件", aggregate.render(data))
+
+
+class ScriptRootTest(ReviewSandbox):
+    """Issue #12 改善：許可したスクリプトの引数で、別のリポジトリに書かせない。"""
+
+    def run_script(self, name, *args, session="sess_retro"):
+        env = dict(os.environ)
+        env.pop("KIRO_SESSION_ID", None)
+        if session:
+            env["KIRO_SESSION_ID"] = session
+        return subprocess.run([sys.executable, os.path.join(KIT, name)] + list(args),
+                              capture_output=True, text=True, cwd=self.root, env=env)
+
+    def test_root_outside_the_current_repository_is_refused_inside_kiro(self):
+        other = Path(tempfile.mkdtemp(prefix="kiroku-other-"))
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        for name, args in (("aggregate.py", ["--new-report"]), ("ledger.py", ["list"]), ("review.py", [])):
+            done = self.run_script(name, "--root", str(other), *args)
+            self.assertEqual(done.returncode, 1, name + done.stdout + done.stderr)
+            self.assertIn("--root に現在のリポジトリ以外を指定できません", done.stdout)
+        self.assertFalse((other / ".kiro").exists())   # 何も書いていない
+        # 現在のリポジトリを指す --root と、--root の省略は通る。
+        self.assertEqual(self.run_script("ledger.py", "--root", self.root, "list").returncode, 0)
+        self.assertEqual(self.run_script("ledger.py", "list").returncode, 0)
+        # Kiro の外（人の端末）では、これまでどおり別のリポジトリを指定できる。
+        self.assertEqual(self.run_script("ledger.py", "--root", str(other), "list", session=None).returncode, 0)
 
 
 class NoteCoverageTest(ReviewSandbox):

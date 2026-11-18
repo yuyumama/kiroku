@@ -34,6 +34,7 @@
 import argparse
 import collections
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -168,7 +169,9 @@ def load_events(path):
                 try:
                     event = json.loads(line)
                     event["_time"] = parse_time(event["ts"])
-                    if event.get("type") == "tool_denied":
+                    if event.get("judged") == "response":
+                        pass   # 記録の時点で、応答の全体から種類を決めてある。切り詰めた末尾で決め直さない
+                    elif event.get("type") == "tool_denied":
                         # 古い版は、終了コード -1 のうち取り消し以外をすべて拒否として記録していた。
                         event["type"] = not_run_kind(event.get("output_tail"))
                         if event["type"] == "recording_gap":
@@ -834,7 +837,8 @@ def render_harness(data, cap):
     return lines + render_steering(data["steering"])
 
 
-NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり"}
+NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり",
+               "uncovered": "読んだ範囲の外に発話あり", "broken": "ノートを読めない"}
 STEERING_GUIDE_CHARS = 8000  # 常時読み込みの目安。超えたら、足す前に分割や条件付きを検討する
 
 
@@ -905,7 +909,7 @@ def render_review(data, cap=None):
     candidates = [t for t in topics if t["candidate"]]
     lines = ["", "## 会話からの型の候補（%d 件）" % len(candidates), "",
              "振り返りノートの引用をログと照合し、%d つ以上の別のセッションに出たトピックです。"
-             "継続的な方針は1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
+             "期間内に述べた継続的な方針は、1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
     if not candidates:
         lines.append("なし")
     for topic in candidates:
@@ -913,7 +917,7 @@ def render_review(data, cap=None):
             if topic["unsure_only_sessions"] else ""
         lines.append("- `topic:%s`：%d セッション%s、%d 回（%s）。%s" % (
             topic["topic"], topic["sessions"], unsure, topic["count"],
-            "、".join(notes.KINDS[k] for k in topic["kinds"]), topic["summary"]))
+            "、".join(notes.KINDS[k] for k in topic["period_kinds"]), topic["summary"]))
         for example in topic["examples"]:
             lines.append("  - session `%s` index=%s 「%s」" % (
                 example["session_id"], example["index"], shorten(example["quote"], 120)))
@@ -1013,37 +1017,74 @@ def render_session(view):
     return "\n".join(lines) + "\n"
 
 
+MAX_REPORT_SUFFIX = 9   # 同じ秒に作る骨組みの数の上限（名前の並びを崩さないため、1桁まで）
+
+
+def report_names(moment):
+    """骨組みの名前の候補。分、秒、秒＋番号の順。どれも文字列の大小で時刻の順に並ぶ。"""
+    minute = moment.strftime("%Y-%m-%d-%H%M")
+    second = minute + moment.strftime("%S")
+    return [minute, second] + ["%s-%d" % (second, n) for n in range(2, MAX_REPORT_SUFFIX + 1)]
+
+
 def new_report(root, data):
-    """レポートの骨組みを保存先に作る。書きかけの骨組みは作り直し、書き始めたものは上書きしない。"""
+    """レポートの骨組みを保存先に作る。
+
+    同じ名前のファイルがあるとき、作り直すのは、このセッションが作ったまま手を付けていない骨組み
+    （作った時点の内容と一致するもの）だけ。それ以外は上書きせず、別の名前で作る。
+    作成は排他的に行い、同時に始めた2回の振り返りが同じファイルを使わないようにする。
+    """
     directory = os.path.join(root, ".kiro", "kiroku", "data", "reports")
-    name = datetime.datetime.now().strftime("%Y-%m-%d-%H%M") + ".md"
-    path = os.path.join(directory, name)
+    data_dir = os.path.join(root, ".kiro", "kiroku", "data")
     session = os.environ.get("KIRO_SESSION_ID")
     if session and not re.fullmatch(r"[A-Za-z0-9._-]+", session):
         session = None
     text = skeleton.build(root, data, GAP_REASONS, session)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            existing = handle.read()
-    except OSError:
-        existing = None
-    if existing is not None and len(skeleton.SLOT.findall(existing)) != len(skeleton.SLOT.findall(text)):
-        print("%s は書き始められています。上書きしません。このファイルを書き終えるか、1分待って実行してください。"
-              % os.path.relpath(path, root))
-        return 1
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     os.makedirs(directory, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    if session:
-        data_dir = os.path.join(root, ".kiro", "kiroku", "data")
-        with recording_lock(data_dir):
-            state = load_state(data_dir)
-            made = state.get("report_sessions")
-            if not isinstance(made, dict):
-                made = state["report_sessions"] = {}
-            made[name[:-3]] = session
-            save_state(data_dir, state)
-    shown = os.path.relpath(path, root).replace(os.sep, "/")
+    chosen, skipped = None, []
+    with recording_lock(data_dir):
+        state = load_state(data_dir)
+        made = state.get("report_sessions") if isinstance(state.get("report_sessions"), dict) else {}
+        drafts = state.get("report_drafts") if isinstance(state.get("report_drafts"), dict) else {}
+        for name in report_names(datetime.datetime.now()):
+            path = os.path.join(directory, name + ".md")
+            try:
+                with open(path, "x", encoding="utf-8") as handle:
+                    handle.write(text)
+                chosen = name
+                break
+            except FileExistsError:
+                pass
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    existing = handle.read()
+            except OSError:
+                existing = None
+            untouched = existing is not None and drafts.get(name) == hashlib.sha256(
+                existing.encode("utf-8")).hexdigest() and made.get(name) == session
+            if untouched:
+                with open(path + ".tmp", "w", encoding="utf-8") as handle:
+                    handle.write(text)
+                os.replace(path + ".tmp", path)
+                chosen = name
+                break
+            skipped.append(name)
+        if chosen is None:
+            print("骨組みを作れませんでした。同じ時刻のレポートが多すぎます。1分待って実行してください。")
+            return 1
+        drafts[chosen] = digest
+        state["report_drafts"] = drafts
+        if session:
+            made[chosen] = session
+            state["report_sessions"] = made
+        else:
+            made.pop(chosen, None)
+        save_state(data_dir, state)
+    shown = os.path.relpath(os.path.join(directory, chosen + ".md"), root).replace(os.sep, "/")
+    if skipped:
+        print("%s は書き始められているか、別の振り返りが作ったものです。上書きせず、別の名前で作りました。"
+              % "、".join("%s.md" % name for name in skipped))
     print("レポートの骨組みを作りました：%s" % shown)
     print("- 書くのは「【ここに書く…】」の欄だけです。欄を、内容で置き換えます。該当が無ければ「なし」と書きます。")
     print("- それ以外の行は、スクリプトが記録から書いたものです。消したり、言い換えたり、まとめ直したりしません。")
@@ -1119,6 +1160,8 @@ def main(argv=None):
         if args.user_chars < 1 or args.reply_chars < 1:
             parser.error("user-chars と reply-chars は1以上にしてください")
         view = prompts.distill(root, args.session, since, until, args.user_chars, args.reply_chars)
+        if view["status"] in ("ok", "partial_log"):
+            prompts.record_shown(root, args.session, since, until)
         if args.json:
             json.dump(view, sys.stdout, ensure_ascii=False, indent=2, default=str)
             sys.stdout.write("\n")

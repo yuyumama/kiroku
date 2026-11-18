@@ -9,9 +9,10 @@ import glob
 import json
 import os
 import re
+import time
 
 import excerpt
-from record import load_config, load_state, mask
+from record import load_config, load_state, mask, recording_lock, save_state
 import commands
 
 DUPLICATE_WINDOW = 8    # 同じ発話の二重記録とみなす、ログ上の距離（項目数）
@@ -90,6 +91,77 @@ def duplicates(rows):
         else:
             recent.append((index, folded))
     return found
+
+
+SHOWN_LIMIT = 50   # セッションごとに控える、要約表示した範囲の数。最初の値で、根拠は薄い
+
+
+def record_shown(root, session, since, until):
+    """要約表示（aggregate.py --session）で見せた期間を控える。
+
+    ノートが「読み終えた」とみなせるのは、ノートを書く前に、この範囲で見せた発話だけ。
+    期間を広げたときに、前回の範囲の外にあった発話を既読と取り違えないために使う。
+    控えるのは時刻だけで、会話の本文は保存しない。
+    """
+    data_dir = os.path.join(root, ".kiro", "kiroku", "data")
+    entry = [since.isoformat() if since else None, until.isoformat() if until else None, time.time()]
+    with recording_lock(data_dir):
+        state = load_state(data_dir)
+        shown = state.get("shown_ranges")
+        if not isinstance(shown, dict):
+            shown = state["shown_ranges"] = {}
+        ranges = shown.get(session) if isinstance(shown.get(session), list) else []
+        shown[session] = (ranges + [entry])[-SHOWN_LIMIT:]
+        save_state(data_dir, state)
+
+
+def shown_ranges(root):
+    """{session_id: [(開始 or None, 終わり or None, 見せた時刻), ...]}。読めない項目は飛ばす。"""
+    shown = load_state(os.path.join(root, ".kiro", "kiroku", "data")).get("shown_ranges")
+    result = {}
+    for session, ranges in (shown.items() if isinstance(shown, dict) else []):
+        for item in ranges if isinstance(ranges, list) else []:
+            try:
+                start, end, at = item
+                start = excerpt.parse_time(start) if start else None
+                end = excerpt.parse_time(end) if end else None
+                if not isinstance(at, (int, float)) or isinstance(at, bool):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            result.setdefault(session, []).append((start, end, float(at)))
+    return result
+
+
+NOTE_TOLERANCE = 2   # 秒。ファイルの更新時刻の粒度（FAT などは2秒）
+
+
+def note_state(path, moments, ranges):
+    """ノートの状態。none／broken／fresh／stale／uncovered。
+
+    fresh は、期間内の発話がすべて、ノートを書く前に要約表示で見せた範囲に入っているもの。
+    stale は、見せていない発話が、すべてノートを書いた後のもの。
+    uncovered は、ノートより前の発話に、見せた記録の無いものがあるもの（期間を広げた、
+    範囲の記録が無い以前の版のノート、など）。読み直しの対象にする。
+    """
+    if not os.path.isfile(path):
+        return "none"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
+            return "broken"
+        written = os.path.getmtime(path)
+    except (OSError, ValueError):
+        return "broken"
+    before = [(start, end) for start, end, at in ranges if at <= written + NOTE_TOLERANCE]
+    unread = [m for m in moments
+              if not any((start is None or m >= start) and (end is None or m < end) for start, end in before)]
+    if not unread:
+        return "fresh"
+    if all(m.timestamp() > written for m in unread):
+        return "stale"
+    return "uncovered"
 
 
 def retro_marks(root):
@@ -186,6 +258,7 @@ def sessions(root, events, since=None, until=None):
     """
     directory = sessions_dir(root)
     marks = retro_marks(root)
+    shown = shown_ranges(root)
     last_event = {}
     for event in events:
         if event.get("session_id"):
@@ -197,7 +270,7 @@ def sessions(root, events, since=None, until=None):
         row = {"session_id": session, "agent": session_agent(root, session),
                "last_event": last_event.get(session), "recorded": recorded,
                "log": "ok", "prompts": 0, "prompt_chars": 0, "note": "none"}
-        latest = None
+        latest, moments = None, []
         path = excerpt.find_log(session, directory)
         if not path:
             row["log"] = "missing_log"
@@ -220,16 +293,15 @@ def sessions(root, events, since=None, until=None):
                 if text and _in_period(moment, since, until):
                     row["prompts"] += 1
                     row["prompt_chars"] += len(text)
+                    moments.append(moment)
                     latest = moment if latest is None or moment > latest else latest
             if messages is not None and issues:
                 row["log"] = "partial_log"
         if not recorded and not row["prompts"]:
             continue  # ログだけのセッションは、期間内に発話があるものだけを載せる
-        note = os.path.join(notes_dir(root), session + ".json")
-        if os.path.isfile(note):
-            # ノートを書いた後に発話が増えていれば、読み直しが要る。
-            written = os.path.getmtime(note)
-            row["note"] = "stale" if latest and latest.timestamp() > written else "fresh"
+        # ノートを書いた後に発話が増えた、または要約表示で見せていない発話があれば、読み直しが要る。
+        row["note"] = note_state(os.path.join(notes_dir(root), session + ".json"), moments,
+                                 shown.get(session, []))
         activity = [m for m in (excerpt.parse_time(row["last_event"]) if recorded else None, latest) if m]
         row["_activity"] = max(activity) if activity else None
         row["last_activity"] = row["_activity"].isoformat() if row["_activity"] else None

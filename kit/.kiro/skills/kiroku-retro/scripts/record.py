@@ -148,6 +148,23 @@ def load_config(root):
     return config
 
 
+# 0 以上の整数で指定する項目。0 は「残さない」。範囲外や数でない値は、既定値で動く。
+COUNT_KEYS = ("output_tail_chars",)
+
+
+def count_setting(config, key):
+    """0 以上の整数の設定値。不正な値（負数、数でない値、真偽値）は既定値に戻す。"""
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return DEFAULT_CONFIG[key]
+    return value
+
+
+def tail_text(text, limit):
+    """末尾の limit 文字。0 なら空文字（[-0:] は全体になるので、使わない）。"""
+    return text[-limit:] if limit > 0 else ""
+
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -485,7 +502,7 @@ def shell_events(payload, root, cwd, retro_dir, config):
     output = response[:found.start()] if found else response
     if output.startswith("Output:\n"):
         output = output[len("Output:\n"):]
-    tail = mask(output.rstrip())[-config["output_tail_chars"]:]
+    tail = tail_text(mask(output.rstrip()), count_setting(config, "output_tail_chars"))
 
     if exit_code is None:
         return [{"type": "recording_gap", "tool": payload.get("tool_name"),
@@ -528,8 +545,10 @@ def shell_events(payload, root, cwd, retro_dir, config):
     if exit_code == -1:
         # 完了しなかった呼び出し。人による取り消し、タイムアウト、権限の規則による拒否を分ける。
         kind = not_run_kind(output)
+        # judged：応答の全体（先頭を含む）で種類を決めた印。出力の末尾は切り詰めて残すので、
+        # 集約は末尾から決め直さず、この種類をそのまま使う（印の無い古い記録だけを決め直す）。
         event = {"type": kind, "tool": payload.get("tool_name"),
-                 "command": mask(command), "output_tail": tail}
+                 "command": mask(command), "output_tail": tail, "judged": "response"}
         if kind == "recording_gap":
             event["reason"] = "unknown_not_run"
         return [event]

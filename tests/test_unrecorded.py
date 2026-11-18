@@ -191,6 +191,25 @@ class LeftoverStartTest(ReviewSandbox):
         self.shell('sleep 99', -1, 'Blocked by a permission rule (deny shell matching "x timed out after y")')
         self.assertEqual(self.events()[-1]['type'], 'tool_denied')
 
+    def test_denial_with_long_quoted_rule_stays_a_denial_after_aggregation(self):
+        """Issue #12 指摘2：記録時に先頭で確かめた拒否を、切り詰めた末尾から決め直さない。"""
+        text = 'Blocked by a permission rule (deny shell matching "%s"); the user did not reject it.' % ('z' * 2500)
+        self.shell('make deploy', -1, text)
+        event = self.events()[-1]
+        self.assertEqual(event['type'], 'tool_denied')
+        self.assertEqual(len(event['output_tail']), 2000)
+        self.assertNotIn('Blocked by', event['output_tail'])
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data['recording_gaps'], [])
+        self.assertEqual([(r['type'], r['count']) for r in data['tool_failures']], [('tool_denied', 1)])
+        # 印の無い古い記録は、これまでどおり末尾から決め直す（決められなければ記録の不足）。
+        old = dict(event)
+        del old['judged']
+        with open(self.data / 'events.jsonl', 'a', encoding='utf-8') as handle:
+            handle.write(json.dumps(old) + '\n')
+        data = aggregate.aggregate(self.root)
+        self.assertEqual([g['reason'] for g in data['recording_gaps']], ['unknown_not_run'])
+
     def test_deny_once_is_a_cancellation_also_for_events_already_recorded(self):
         text = 'The user rejected this tool call.'
         self.shell('printf KIROKU_CANCEL_PROBE', -1, text)

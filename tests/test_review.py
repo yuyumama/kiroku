@@ -1,11 +1,14 @@
 """ノートの照合、台帳、セッションの探索、steering の重さのテスト。"""
+import contextlib
 import datetime
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -40,7 +43,10 @@ class ReviewSandbox(Sandbox):
                                          "payload": {"type": "user", "content": text}},
                                         ensure_ascii=False) + "\n")
 
-    def note(self, session, findings):
+    def note(self, session, findings, shown=True):
+        """ノートを書く。shown なら、その前に要約表示で全期間を見せたことにする（振り返りの手順どおり）。"""
+        if shown:
+            aggregate.prompts.record_shown(self.root, session, None, None)
         directory = self.data / "notes"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / (session + ".json")).write_text(
@@ -95,6 +101,22 @@ class NotesTest(ReviewSandbox):
         self.note("sess_a", [finding("今後は必ずコミット前に lint を通すこと", "コミット前のlint",
                                      "standing_policy")])
         self.assertTrue(aggregate.aggregate(self.root)["topics"][0]["candidate"])
+
+    def test_policy_stated_after_the_period_does_not_promote_a_past_single_finding(self):
+        """Issue #12 指摘7：期間の後の継続方針が、期間内の1回の指摘を型に変えていた。"""
+        self.log("sess_old", ["テストは make test で回して"], days_ago=10)
+        self.note("sess_old", [finding("テストは make test で回して")])
+        since, until = NOW - datetime.timedelta(days=14), NOW - datetime.timedelta(days=7)
+        self.assertFalse(aggregate.aggregate(self.root, since, until)["topics"][0]["candidate"])
+        self.log("sess_new", ["今後もテストは必ず make test で回すこと"], days_ago=1)
+        self.note("sess_new", [finding("今後もテストは必ず make test で回すこと", kind="standing_policy")])
+        data = aggregate.aggregate(self.root, since, until)
+        topic = data["topics"][0]
+        self.assertEqual((topic["candidate"], topic["sessions"], topic["all_sessions"]), (False, 1, 2))
+        self.assertEqual(topic["period_kinds"], ["correction"])
+        self.assertNotIn("topic:テスト実行コマンド", data["report_facts"]["targets"])
+        # 方針が期間内にあれば、これまでどおり1回でも候補になる。
+        self.assertTrue(aggregate.aggregate(self.root, since)["topics"][0]["candidate"])
 
     def test_fabricated_quote_is_rejected(self):
         self.log("sess_a", ["テストを実行して"])
@@ -339,11 +361,28 @@ class ReviewSummaryTest(ReviewSandbox):
             self.assertNotIn(secret, text)
         self.assertIn("| ツール失敗 | 1 | 1 | 0 | 3 |", text)
         self.assertIn("トピック：1 個（型の候補 1 個）", text)
-        self.assertIn("レポート：1 個、案：2 件", text)
+        self.assertIn("レポート：1 個（ほかに書きかけの骨組み 0 個）、案：2 件", text)
         self.assertIn("| topic | 1 | 0 | 0 |", text)
         self.assertIn("| tool | 0 | 0 | 1 |", text)
         self.assertIn("セッション：3 件（記録あり 1、ログのみ 2）", text)
         self.assertIn("常時読み込みの合計：70 文字", text)
+
+    def test_gap_counts_and_drafts_are_counted_like_the_aggregate(self):
+        """Issue #12 指摘10：重なった3回の実行を1件と表示し、書きかけの骨組みをレポートに数えていた。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("review", os.path.join(KIT, "review.py"))
+        review = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(review)
+        for _ in range(3):
+            self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",
+                       "tool_input": {"command": "pytest -q --junitxml=%s" % "reports/junit.xml"}})
+        self.hook({"hook_event_name": "Stop"})
+        data = aggregate.aggregate(self.root)
+        self.assertEqual([(g["reason"], g["count"]) for g in data["recording_gaps"]], [("test_end_missing", 3)])
+        self.report("2026-11-10-0900", "<!-- kiroku-report:3 -->\n# 振り返り\n\n- 読んだセッション：【ここに書く】\n")
+        text = review.summarize(self.root, None, NOW + datetime.timedelta(minutes=1))
+        self.assertIn("判定できなかったシェル実行（recording_gap）：3 件", text)
+        self.assertIn("レポート：0 個（ほかに書きかけの骨組み 1 個）", text)
 
     def test_summary_runs_on_an_empty_repository(self):
         done = subprocess.run([sys.executable, os.path.join(KIT, "review.py"), "--root", self.root],
@@ -402,6 +441,49 @@ class ReadingPlanTest(ReviewSandbox):
         self.assertIn("未読のセッションはありません", aggregate.render(data))
 
 
+class NoteCoverageTest(ReviewSandbox):
+    """Issue #12 指摘8：ノートが読み終えたとみなすのは、ノートの前に要約表示で見せた範囲の発話だけ。"""
+
+    def show(self, session, since):
+        with contextlib.redirect_stdout(io.StringIO()):
+            aggregate.main(["--root", self.root, "--since", since, "--session", session])
+
+    def test_widening_the_period_brings_back_prompts_outside_the_range_read(self):
+        directory = self.home / "sessions" / "0123456789abcdef" / "sess_wide"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": "sess_wide", "workspacePaths": [self.root]}), encoding="utf-8")
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, days in enumerate((20, 1)):
+                stamp = (NOW - datetime.timedelta(days=days)).isoformat()
+                handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": {
+                    "type": "user", "content": "依頼 %d" % index}}, ensure_ascii=False) + "\n")
+        self.show("sess_wide", "7d")
+        self.note("sess_wide", [], shown=False)
+        week = aggregate.aggregate(self.root, NOW - datetime.timedelta(days=7))
+        self.assertEqual((week["sessions"][0]["note"], week["reading_plan"]["read"]), ("fresh", []))
+        month = aggregate.aggregate(self.root, NOW - datetime.timedelta(days=30))
+        self.assertEqual(month["sessions"][0]["prompts"], 2)
+        self.assertEqual(month["sessions"][0]["note"], "uncovered")
+        self.assertEqual(month["reading_plan"]["read"], ["sess_wide"])
+        self.assertIn("読んだ範囲の外に発話あり", aggregate.render(month))
+        # 広げた期間で見せ直してからノートを書き直せば、読み終えたことになる。
+        self.show("sess_wide", "30d")
+        time.sleep(0.05)
+        self.note("sess_wide", [], shown=False)
+        self.assertEqual(aggregate.aggregate(self.root, NOW - datetime.timedelta(days=30))
+                         ["sessions"][0]["note"], "fresh")
+
+    def test_a_note_that_cannot_be_read_is_read_again(self):
+        self.log("sess_a", ["依頼その1"])
+        self.note("sess_a", [])
+        (self.data / "notes" / "sess_a.json").write_text("{壊れた", encoding="utf-8")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["sessions"][0]["note"], "broken")
+        self.assertEqual(data["reading_plan"]["read"], ["sess_a"])
+        self.assertIn("ノートを読めない", aggregate.render(data))
+
+
 class ConfigTest(ReviewSandbox):
     def test_stale_defaults_in_config_do_not_hide_new_defaults(self):
         """古い版の既定値が config.json に残っていても、新しい既定値が効く。"""
@@ -429,6 +511,13 @@ class ConfigTest(ReviewSandbox):
         self.assertIn("retro_read_chars = 50000", text)
         self.assertIn("write_tools は、既定値に足して使います", text)
         self.assertNotIn("tests =", text)
+        self.assertNotIn("使えません", text)
+        for value in (-1, "100", 1.5):
+            self.write(".kiro/kiroku/config.json", json.dumps({"output_tail_chars": value}))
+            text = "\n".join(installer.config_notes(self.root))
+            self.assertIn("output_tail_chars = %s は使えません" % json.dumps(value), text)
+        self.write(".kiro/kiroku/config.json", json.dumps({"output_tail_chars": 0}))
+        self.assertNotIn("使えません", "\n".join(installer.config_notes(self.root)))
 
 
 class RetroFeedbackTest(ReviewSandbox):

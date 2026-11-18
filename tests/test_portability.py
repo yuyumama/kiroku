@@ -1,5 +1,7 @@
 """製品の実機試験ではなく、導入とログアダプターの契約を検証する。"""
+import contextlib
 import datetime
+import io
 import importlib.util
 import json
 import os
@@ -206,7 +208,7 @@ class AdapterTest(Sandbox):
         ]
         with open(log_dir / "messages.jsonl", "w", encoding="utf-8") as handle:
             for index, payload in enumerate(rows):
-                stamp = (now + datetime.timedelta(seconds=index)).isoformat()
+                stamp = (now - datetime.timedelta(minutes=1) + datetime.timedelta(seconds=index)).isoformat()
                 handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload}) + "\n")
 
         view = aggregate.prompts.distill(self.root, self.session)
@@ -232,6 +234,10 @@ class AdapterTest(Sandbox):
         note.write_text('{"findings": []}', encoding="utf-8")
         future = (now + datetime.timedelta(hours=1)).timestamp()
         os.utime(note, (future, future))
+        # 要約表示で見せた記録の無いノート（以前の版が書いたもの）は、読み直しの対象にする。
+        self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "uncovered")
+        with contextlib.redirect_stdout(io.StringIO()):
+            aggregate.main(["--root", self.root, "--since", "7d", "--session", self.session])
         self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "fresh")
         os.utime(note, (now.timestamp() - 3600, now.timestamp() - 3600))
         self.assertEqual(aggregate.aggregate(self.root)["sessions"][0]["note"], "stale")
@@ -247,3 +253,24 @@ class AdapterTest(Sandbox):
     def test_session_id_cannot_select_unrelated_logs(self):
         self.assertIsNone(excerpt.find_log("../private", self.root))
         self.assertIsNone(excerpt.find_log("*", self.root))
+
+
+class PowerShellWrapperTest(unittest.TestCase):
+    """Issue #12 指摘5：-Update だけで、python の無い環境でも共通のインストーラーまで届くこと。
+
+    PowerShell を実行していない。スクリプトの文面だけを確かめる（実行での確認は未検証）。
+    """
+
+    def test_wrappers_search_for_a_python_when_none_is_given(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("install.ps1", "uninstall.ps1"):
+            raw = (root / name).read_bytes()
+            self.assertTrue(raw.startswith(b"\xef\xbb\xbf"), name)   # Windows PowerShell 5.1 が UTF-8 と読むため
+            text = raw.decode("utf-8-sig")
+            self.assertIn("foreach ($candidate in @('python', 'py -3', 'python3'))", text, name)
+            self.assertIn("sys.version_info >= (3, 9)", text, name)
+            self.assertIn("$launcher = if ($explicit) { $PythonCommand } else { Find-KirokuPython }", text, name)
+            self.assertIn("CommandNotFoundException", text, name)
+            self.assertNotIn("& $runner[0] @arguments", text, name)   # 既定の python で直接起動しない
+        install = (root / "install.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("if ($explicit -or -not $Update) {\n    $arguments += @('--python-command', $launcher)", install)

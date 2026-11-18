@@ -15,7 +15,9 @@ from pathlib import Path
 # この形のレポートであることの目印。数字は形式の版。
 #   1：骨組みをスクリプトが書く（最初の形。期間と検証値の表記が違うので、行の照合はしない）
 #   2：型と改善案の主張に引用を付け、検査が引用の実在を確かめる
-MARK = "<!-- kiroku-report:2 -->"
+#   3：節の中の欄（引き継がなかった案の理由、記録の不足への補足）に見出しの行を付け、
+#      欄が空のままのレポートを、骨組みが無くても見分けられるようにする
+MARK = "<!-- kiroku-report:3 -->"
 MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
 SLOT = re.compile(r"【ここに書く[^】]*】")
 OWN_FILES = (".kiro/skills/kiroku-retro/", ".kiro/hooks/kiroku.json", ".kiro/agents/kiroku-retro.json",
@@ -34,9 +36,54 @@ def version(text):
     return int(found.group(1)) if found else 0
 
 
+# 欄を埋めたあとも値が空であってはならない行と節。目印だけを消した空欄を、書き終えたとみなさない。
+# 版2の骨組みには、後ろの2行が無い。無い行は見ない。
+REQUIRED_LINES = ("- 読んだセッション：", "- 読めなかった範囲（未確認）：",
+                  "- 載せなかった案と理由：", "- 補足と、利用者に確かめたいこと：")
+REQUIRED_SECTIONS = ("## 観測した型・継続方針", "## ハーネスへの改善案（プロジェクト内）",
+                     "## ハーネスへの改善案（ユーザー共通）", "## 様子見")
+TABLE_HEAD = "| 範囲 | パス | 存在 | 確認の状態 | 役割と読み込みの条件 |"
+
+
+def blank_fields(text):
+    """欄のうち、値が空のもの。目印を消しただけの空欄を見つける。意味は判定しない。
+
+    「なし」と書いた欄は空ではない。骨組みから作ったレポート（版2以降）だけに当てはめる。
+    """
+    if version(text) < 2:
+        return []
+    lines = text.splitlines()
+    found = []
+    for label in REQUIRED_LINES:
+        for line in lines:
+            if line.startswith(label) and not line[len(label):].strip():
+                found.append(label[2:].rstrip("："))
+    for heading in REQUIRED_SECTIONS:
+        if heading not in lines:
+            continue
+        body = []
+        for line in lines[lines.index(heading) + 1:]:
+            if line.startswith("## "):
+                break
+            if line.strip():
+                body.append(line)
+        if not body:
+            found.append(heading[3:])
+    if TABLE_HEAD in lines:
+        for line in lines[lines.index(TABLE_HEAD) + 2:]:
+            if not line.startswith("|"):
+                break
+            cells = _cells(line)
+            if len(cells) != 5:
+                found.append("比べたハーネスの表の行（列が %d 個）：%s" % (len(cells), line.strip()))
+            elif cells[2] == "あり" and not (cells[3] and cells[4]):
+                found.append("比べたハーネスの表の「確認の状態」または「役割」：%s" % cells[1])
+    return found
+
+
 def is_draft(text):
-    """骨組みのまま、書いていない欄が残っているレポートか。"""
-    return version(text) > 0 and SLOT.search(text) is not None
+    """骨組みのまま、書いていない欄が残っているレポートか。目印だけを消した空欄も、書きかけとする。"""
+    return version(text) > 0 and (SLOT.search(text) is not None or bool(blank_fields(text)))
 
 
 def _display(root, scope, path):
@@ -170,7 +217,7 @@ def build(root, data, reasons=None, session=None):
     if data["pending"]:
         lines.append("前回のレポートの未判断の案は、次の %d 件です。" % len(data["pending"]))
         lines += ["- `%s` %s" % (row["id"], row["title"]) for row in data["pending"]]
-        lines += ["", slot("上のうち、今回のレポートに載せなかったものと、その理由。すべて引き継いだなら「なし」")]
+        lines += ["", "- 載せなかった案と理由：" + slot("上のうち、今回のレポートに載せなかったものと、その理由。すべて引き継いだなら「なし」")]
     else:
         lines.append("前回のレポートに、未判断の案はありません。")
     lines += [
@@ -185,7 +232,7 @@ def build(root, data, reasons=None, session=None):
         "",
     ] + _gap_lines(data, reasons or {}) + [
         "",
-        slot("上への補足と、利用者に確かめたいこと。無ければ「なし」"),
+        "- 補足と、利用者に確かめたいこと：" + slot("上への補足。無ければ「なし」"),
         "",
         "照合用の検証値です（スクリプトが書いたもの。読む必要はありません）。",
         "",
@@ -223,6 +270,10 @@ def validate(report, expected):
         errors.append("欄の目印が %d 個残っています。内容を書き足すのではなく、目印（【ここに書く…】）ごと"
                       "置き換えてください。該当が無ければ「なし」に置き換えます：%s"
                       % (len(left), "、".join(left[:3])))
+    blank = blank_fields(report)
+    if blank:
+        errors.append("欄が空のままです。内容を書くか、該当が無ければ「なし」と書いてください：%s"
+                      % "、".join(blank))
     position = 0
     for part in fixed_parts(expected):
         for index in range(position, len(lines)):

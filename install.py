@@ -13,12 +13,12 @@ def default_config():
     spec = importlib.util.spec_from_file_location("kiroku_record", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.DEFAULT_CONFIG, module.ADDITIVE_KEYS
+    return module.DEFAULT_CONFIG, module.ADDITIVE_KEYS, module.COUNT_KEYS
 
 
 def config_notes(target):
     """導入先の config.json について、知らせておくことを返す。"""
-    defaults, additive = default_config()
+    defaults, additive, counts = default_config()
     try:
         custom = json.loads((Path(target) / ".kiro/kiroku/config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -33,6 +33,13 @@ def config_notes(target):
     for key in additive:
         if key in custom:
             notes.append("config.json の %s は、既定値に足して使います。既定値は常に有効です。" % key)
+    for key in counts:
+        value = custom.get(key)
+        if key in custom and value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            notes.append("config.json の %s = %s は使えません（0 以上の整数）。既定値 %s で動きます。"
+                         "0 にすると、何も残しません。" % (
+                             key, json.dumps(value, ensure_ascii=False), defaults[key]))
     return notes
 
 

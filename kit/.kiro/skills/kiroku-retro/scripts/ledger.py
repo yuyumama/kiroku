@@ -42,6 +42,18 @@ def _is_draft(path):
         return False
 
 
+def report_count(root):
+    """(書き終えたレポートの数, 書きかけの骨組みの数)。latest_report と同じ判定で分ける。"""
+    directory = os.path.join(data_dir(root), "reports")
+    try:
+        paths = [os.path.join(directory, n) for n in os.listdir(directory)
+                 if n.endswith(".md") and os.path.isfile(os.path.join(directory, n))]
+    except OSError:
+        return 0, 0
+    drafts = sum(1 for path in paths if _is_draft(path))
+    return len(paths) - drafts, drafts
+
+
 def latest_report(root, before=None):
     """案が0件のファイルも含む、最新のレポート名。書きかけの骨組みは除く。
 
@@ -139,13 +151,25 @@ def pending(root, before=None):
     return [p for p in found if p["report"] == latest and p["id"] not in known]
 
 
+def duplicated(found):
+    """同じ ID（レポート名#番号）が複数の案を指すもの。その ID の判断は、どの案のものか決まらない。"""
+    seen = {}
+    for proposal in found:
+        seen[proposal["id"]] = seen.get(proposal["id"], 0) + 1
+    return {key for key, count in seen.items() if count > 1}
+
+
 def resolve(root, name):
+    """ID から案を引く。見つからなければ None、同じ ID の案が複数あれば、その一覧。"""
     found = proposals(root)
     if "#" not in name:
         if not found:
             return None
         name = "%s#%s" % (latest_report(root), name.upper())
-    return next((p for p in found if p["id"] == name), None)
+    matched = [p for p in found if p["id"] == name]
+    if len(matched) > 1:
+        return matched
+    return matched[0] if matched else None
 
 
 def record(root, proposal, decision, target=None, reason=None):
@@ -222,10 +246,18 @@ def main(argv=None):
             return 0
         labels = {"adopted": "採用", "rejected": "見送り"}
         latest = latest_report(root)
+        ambiguous = duplicated(found)
         for proposal in found:
             # 古いレポートの未判断の案は、その後の振り返りが引き継ぐか外すかを決めている。
             undecided = "未判断" if proposal["report"] == latest else "古いレポート。最新を見てください"
             state = labels.get(known.get(proposal["id"], {}).get("decision"), undecided)
+            if proposal["id"] in ambiguous:
+                # 記録された判断が、同じ番号のどの案のものかは推測しない。
+                recorded = known.get(proposal["id"])
+                state = "番号が重複。%s" % (
+                    "記録された判断（%s：%s）がどの案のものかは不明" % (
+                        labels.get(recorded.get("decision"), "?"), recorded.get("title") or "題名なし")
+                    if recorded else "この番号では判断を記録できません")
             print("%s  [%s]  %s  （対象の型：%s）" % (
                 proposal["id"], state, proposal["title"], proposal["target"] or "記載なし"))
         return 0
@@ -233,6 +265,11 @@ def main(argv=None):
     proposal = resolve(root, args.id)
     if proposal is None:
         print("案が見つかりません: %s（ledger.py list で確かめてください）" % args.id)
+        return 1
+    if isinstance(proposal, list):
+        print("%s は、同じレポートの %d 個の案に使われています。どの案の判断か決まらないので、記録しません：%s"
+              % (proposal[0]["id"], len(proposal), "／".join(p["title"] for p in proposal)))
+        print("レポートの番号を通し番号に直してから、もう一度記録してください。")
         return 1
     target = args.target or proposal["target"]
     if target and target.split(":", 1)[0] not in TARGET_KINDS:

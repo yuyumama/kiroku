@@ -38,13 +38,12 @@ def config_notes(target):
     for key in additive:
         if key in custom:
             notes.append("config.json の %s は、既定値に足して使います。既定値は常に有効です。" % key)
-    for key in counts:
+    for key, zero in counts.items():
         value = custom.get(key)
         if key in custom and value is not None and (
                 isinstance(value, bool) or not isinstance(value, int) or value < 0):
             notes.append("config.json の %s = %s は使えません（0 以上の整数）。既定値 %s で動きます。"
-                         "0 にすると、何も残しません。" % (
-                             key, json.dumps(value, ensure_ascii=False), defaults[key]))
+                         "0 にすると、%s。" % (key, json.dumps(value, ensure_ascii=False), defaults[key], zero))
     return notes
 
 

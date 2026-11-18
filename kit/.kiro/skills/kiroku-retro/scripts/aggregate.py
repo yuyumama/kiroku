@@ -53,8 +53,9 @@ import reportcheck  # noqa: E402
 import skeleton  # noqa: E402
 import citations  # noqa: E402
 import reads  # noqa: E402
-from record import (load_config, load_state, mask, not_run_kind, recording_lock, save_state,  # noqa: E402
-                    script_root)
+import diagnose  # noqa: E402
+from record import (count_setting, load_config, load_state, mask, not_run_kind, recording_lock,  # noqa: E402
+                    save_state, script_root)
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
@@ -617,6 +618,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         if with_prompts else None,
         "harness": harness.inventory(root),
         "steering": harness.steering_weight(root),
+        "diagnostics": diagnose.diagnose(root, load_config(root), prompts.hook_triggers(root)),
         "topics": notes.topics(findings, since, until),
         "note_problems": note_problems,
         "adopted": adopted,
@@ -630,6 +632,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "fix_excluded": excluded,
     }
     result['report_facts'] = reportcheck.facts(result)
+    result['burden'] = diagnose.burden(result)
+    result['one_step_max'] = count_setting(load_config(root), 'one_step_max')
     return result
 
 
@@ -854,7 +858,9 @@ def render_files(data, cap):
 
 
 def render_harness(data, cap):
-    lines = ["", "## 比較対象の所在（本文は未確認）", ""]
+    lines = ["", "## ハーネスの診断（ファイルから決まる値。一歩先の改善案の手がかり）", ""]
+    lines += diagnose.lines(data["diagnostics"], data["burden"])
+    lines += ["", "## 比較対象の所在（本文は未確認）", ""]
     for entry in data["harness"]:
         lines.append("- %s `%s`: %s" % (entry["scope"], entry["path"], entry["status"]))
         rows, _ = capped(entry["files"], cap, "harness")
@@ -1086,12 +1092,14 @@ def as_version(data, version):
     """
     if version >= skeleton.VERSION:
         return data
-    harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
-    sessions = [dict(row, note=row.get("note_v2", row["note"])) for row in data["sessions"]]
-    plan = reading_plan([dict(row) for row in sessions], data["reading_plan"]["budget"])
-    topics = sorted((dict(row, candidate=row.get("candidate_v2", row["candidate"])) for row in data["topics"]),
-                    key=notes.order)   # 骨組みの検証値の行は、版2のときの並びで書かれている
-    shaped = dict(data, harness=harness_rows, sessions=sessions, reading_plan=plan, topics=topics)
+    shaped = dict(data, diagnostics=None)   # 版4で足した診断値は、版3までの検証値に無い
+    if version < 3:
+        harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
+        sessions = [dict(row, note=row.get("note_v2", row["note"])) for row in data["sessions"]]
+        plan = reading_plan([dict(row) for row in sessions], data["reading_plan"]["budget"])
+        topics = sorted((dict(row, candidate=row.get("candidate_v2", row["candidate"])) for row in data["topics"]),
+                        key=notes.order)   # 骨組みの検証値の行は、版2のときの並びで書かれている
+        shaped.update(harness=harness_rows, sessions=sessions, reading_plan=plan, topics=topics)
     shaped["report_facts"] = reportcheck.facts(shaped)
     return shaped
 
@@ -1230,10 +1238,12 @@ def main(argv=None):
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
                 made_by = (load_state(os.path.join(root, ".kiro", "kiroku", "data"))
                            .get("report_sessions") or {}).get(name, reads.session_of(body))
-                errors += skeleton.validate(body, skeleton.build(
-                    root, data, GAP_REASONS, made_by,
-                    # 版1は表記が違うので、行は照合しない（今の版の骨組みを渡すと、validate が照合を省く）
-                    version=min(form, skeleton.VERSION) if form >= 2 else skeleton.VERSION))
+                # 版1は表記が違うので、行は照合しない（欄の残りだけを見る）。
+                expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION)) \
+                    if form >= 2 else ""
+                errors += skeleton.validate(body, expected)
+            if form >= 4:
+                errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'])
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
                 unread, notices = reads.validate(root, body, legacy=form < skeleton.VERSION)

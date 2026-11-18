@@ -27,6 +27,7 @@ import skeleton  # noqa: E402
 HEADING = re.compile(r"^###\s+(P\d+)[.．:：]?\s*(.*)$")
 TARGET = re.compile(r"対象の型[：:]\s*`([^`]+)`")
 FILES = re.compile(r"対象のファイル[：:]\s*(.*)$")
+LENS = re.compile(r"^\s*[-*]\s*観点[：:]\s*(.*)$")   # 一歩先の改善案の観点（V1〜V8）
 REPORT_NAME = re.compile(r"(\d{4}-\d\d-\d\d-\d{4})(\d\d)?(?:-\d+)?$")
 TARGET_KINDS = ("topic", "tool", "denied", "cancelled", "timeout", "test")
 YOUNG_DAYS = 3  # これより日が浅いうちは、効果を判定しない
@@ -112,7 +113,7 @@ def proposals(root):
             if heading:
                 current = {"id": "%s#%s" % (name[:-3], heading.group(1)), "report": name[:-3],
                            "number": heading.group(1), "title": heading.group(2).strip(), "target": None,
-                           "files": []}
+                           "files": [], "lenses": []}
                 found.append(current)
             elif line.startswith("#"):
                 current = None
@@ -120,6 +121,9 @@ def proposals(root):
                 target = TARGET.search(line)
                 if target and current["target"] is None:
                     current["target"] = target.group(1).strip()
+                lens = LENS.match(line)
+                if lens and not current["lenses"]:
+                    current["lenses"] = sorted(set(re.findall(r"V[1-8]", lens.group(1))))
                 listed = FILES.search(line)
                 if listed:
                     current["files"] += [p.strip() for p in re.findall(r"`([^`]+)`", listed.group(1))

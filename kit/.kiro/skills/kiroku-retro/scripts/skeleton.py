@@ -17,7 +17,10 @@ from pathlib import Path
 #   2：型と改善案の主張に引用を付け、検査が引用の実在を確かめる
 #   3：節の中の欄（引き継がなかった案の理由、記録の不足への補足）に見出しの行を付け、
 #      欄が空のままのレポートを、骨組みが無くても見分けられるようにする
-VERSION = 3
+#   4：一歩先の改善案の節と、ハーネスの診断の節を足し、人が読む順に並べ替える
+VERSION = 4
+ONE_STEP_HEADING = "## 一歩先の改善案"
+ONE_STEP_DEFAULT = 3   # 一歩先の改善案の上限の既定値（設定の one_step_max）。最初の値で、根拠は薄い
 MARK = "<!-- kiroku-report:%d -->" % VERSION
 MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
 SLOT = re.compile(r"【ここに書く[^】]*】")
@@ -40,7 +43,7 @@ def version(text):
 # 欄を埋めたあとも値が空であってはならない行と節。目印だけを消した空欄を、書き終えたとみなさない。
 REQUIRED_LINES = ("- 読んだセッション：", "- 読めなかった範囲（未確認）：",
                   "- 載せなかった案と理由：", "- 補足と、利用者に確かめたいこと：")
-REQUIRED_SECTIONS = ("## 観測した型・継続方針", "## ハーネスへの改善案（プロジェクト内）",
+REQUIRED_SECTIONS = ("## 一歩先の改善案", "## 観測した型・継続方針", "## ハーネスへの改善案（プロジェクト内）",
                      "## ハーネスへの改善案（ユーザー共通）", "## 様子見")
 TABLE_HEAD = "| 範囲 | パス | 存在 | 確認の状態 | 役割と読み込みの条件 |"
 
@@ -178,11 +181,13 @@ def build(root, data, reasons=None, session=None, version=VERSION):
     session は、振り返りをしているセッション。「確認済み」の照合に使うので、骨組みに控える。
     version は形式の版。以前の版のレポートを検査するとき、その版の骨組みを作り直すのに使う
     （data も、その版の検証値にそろえたものを渡す。aggregate.as_version）。
+    版4は、人が読む順に並べ替えた。一歩先の改善案を先頭に置き、比較表と診断値は後ろに回す。
+    版3までは、作ったときの並びのまま作る（以前のレポートの検査で、行を照合するため）。
     """
     plan, cover = data["reading_plan"], data["coverage"]
     rows, own = _harness_rows(root, data)
     day = (data["until"] or "")[:10] or "期間の終わりなし"
-    lines = ["<!-- kiroku-report:%d -->" % version] + (["<!-- kiroku-session:%s -->" % session] if session else []) + [
+    header = ["<!-- kiroku-report:%d -->" % version] + (["<!-- kiroku-session:%s -->" % session] if session else []) + [
         "# 振り返り %s" % day,
         "",
         "- 対象期間：%s 〜 %s（UTC）" % (_moment(data["since"], "最初"), _moment(data["until"], "現在")),
@@ -191,6 +196,8 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "- 未読のセッション：%d 件" % (len(plan["read"]) + plan["rest"]),
         "- 読んだセッション：%s" % slot("N 件（うち今回ノートを書いたもの M 件）"),
         "- 読めなかった範囲（未確認）：%s" % slot("無ければ「なし」。下の表に「%s」があるときは、ここにも書く" % UNREAD_STATE),
+    ]
+    table = [
         "",
         "## 比べたハーネス",
         "",
@@ -200,8 +207,8 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "|---|---|---|---|---|",
     ] + rows
     if own:
-        lines += ["", "kiroku 自身のファイル（%d 個）は、表から除いています。" % own]
-    lines += [
+        table += ["", "kiroku 自身のファイル（%d 個）は、表から除いています。" % own]
+    body = [
         "",
         "## 観測した型・継続方針",
         "",
@@ -219,16 +226,18 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "",
     ]
     if data["pending"]:
-        lines.append("前回のレポートの未判断の案は、次の %d 件です。" % len(data["pending"]))
-        lines += ["- `%s` %s" % (row["id"], row["title"]) for row in data["pending"]]
-        lines += ["", ("- 載せなかった案と理由：" if version >= 3 else "") + slot("上のうち、今回のレポートに載せなかったものと、その理由。すべて引き継いだなら「なし」")]
+        body.append("前回のレポートの未判断の案は、次の %d 件です。" % len(data["pending"]))
+        body += ["- `%s` %s" % (row["id"], row["title"]) for row in data["pending"]]
+        body += ["", ("- 載せなかった案と理由：" if version >= 3 else "") + slot("上のうち、今回のレポートに載せなかったものと、その理由。すべて引き継いだなら「なし」")]
     else:
-        lines.append("前回のレポートに、未判断の案はありません。")
-    lines += [
+        body.append("前回のレポートに、未判断の案はありません。")
+    body += [
         "",
         "## 様子見",
         "",
         slot("無ければ「なし」"),
+    ]
+    tail = [
         "",
         "## 記録の不足、確認事項",
         "",
@@ -246,7 +255,25 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "```",
         "",
     ]
-    return "\n".join(lines)
+    if version < 4:
+        return "\n".join(header + table + body + tail)
+    import diagnose   # 版4から（ledger → skeleton の読み込みの順に関わらないよう、ここで読む）
+    limit = data.get("one_step_max", ONE_STEP_DEFAULT)
+    one_step = [
+        "",
+        ONE_STEP_HEADING,
+        "",
+        slot("観測した型・診断値より一段上の案を、最大 %d 件。`### P1. …` の見出しで書き、番号は下の改善案と通しにする。"
+             "観点・段・手がかり・確かめ方を書く。無ければ「なし」" % limit),
+    ]
+    diagnostics = [
+        "",
+        "## ハーネスの診断",
+        "",
+        "次は、スクリプトがファイルと記録から決めた値です。一歩先の改善案の手がかりに使います。",
+        "",
+    ] + diagnose.lines(data["diagnostics"], data["burden"])
+    return "\n".join(header + one_step + body + table + diagnostics + tail)
 
 
 def fixed_parts(text):

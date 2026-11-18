@@ -7,8 +7,10 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -28,12 +30,13 @@ PROPOSAL = ("### P1. テストの実行方法を直す\n\n- 対象の型：`tool
 
 
 OLD_VERSION = "0499158"   # 版2の骨組みを作っていた main（PR #13 の前）
+THIRD_FORMAT_VERSION = "89731e1"   # 版3の骨組みを作っていた main（PR #13 のマージ）
 REPO = Path(__file__).resolve().parents[1]
 
 
-def old_scripts(destination):
+def old_scripts(destination, version=OLD_VERSION):
     """以前の版のスクリプトを git の履歴から取り出す。履歴が無ければ None。"""
-    archive = subprocess.run(["git", "-C", str(REPO), "archive", OLD_VERSION, "kit/.kiro/skills/kiroku-retro/scripts"],
+    archive = subprocess.run(["git", "-C", str(REPO), "archive", version, "kit/.kiro/skills/kiroku-retro/scripts"],
                              capture_output=True)
     if archive.returncode != 0:
         return None
@@ -41,7 +44,9 @@ def old_scripts(destination):
     return destination / "kit/.kiro/skills/kiroku-retro/scripts"
 
 
-class SkeletonTest(ReviewSandbox):
+class SkeletonBase(ReviewSandbox):
+    """骨組みの試験の準備と道具。試験の本体は持たない。"""
+
     def setUp(self):
         super().setUp()
         self.write(".kiro/steering/testing.md", "テストは make test で実行する。\n")
@@ -63,7 +68,8 @@ class SkeletonTest(ReviewSandbox):
     def new_report(self):
         done = self.cli("--since", "7d", "--new-report")
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        files = sorted((self.data / "reports").glob("*.md"))
+        # 名前で並べる（同じ秒の `-2` は、拡張子を含めて並べると前に来てしまう）
+        files = sorted((self.data / "reports").glob("*.md"), key=lambda p: p.stem)
         return files[-1], files[-1].read_text(encoding="utf-8")
 
     def fill(self, text, state="確認済み"):
@@ -85,6 +91,8 @@ class SkeletonTest(ReviewSandbox):
         path.write_text(text, encoding="utf-8")
         return self.cli("--check-report", str(path))
 
+
+class SkeletonTest(SkeletonBase):
     def test_script_writes_the_facts_and_the_agent_only_fills_slots(self):
         path, text = self.new_report()
         self.assertTrue(text.startswith(skeleton.MARK))
@@ -335,6 +343,110 @@ class SkeletonTest(ReviewSandbox):
         second = aggregate.aggregate(self.root, until=None)
         self.assertEqual(skeleton.build(self.root, first), skeleton.build(self.root, second))
         self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
+
+
+ONE_STEP = ("### P1. テストの実行を終了時の hook にする\n\n"
+            "- 観点：V3、V5\n- 段：1→3\n"
+            "- 手がかり：`D2:.kiro/steering/build.md:make build`、`tool:make test`\n"
+            "- 価値：テストの実行のし忘れと、コマンドの言い直しが無くなる\n"
+            "- 対象のファイル：`.kiro/hooks/test.json`（新規）\n"
+            "- 小さく試す方法：1週間だけ有効にする\n"
+            "- 確かめ方：次の振り返りで `tool:make test` が0回になる\n"
+            "- 不要になる条件：CI が同じ検査をするようになったとき")
+
+
+class OneStepTest(SkeletonBase):
+    """一歩先の改善案（版4）。文章の意味と価値は判定せず、形と手がかりの実在だけを確かめる。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write(".kiro/steering/build.md", "- ビルドは `make build` で行う。\n")   # Makefile は無い（D2）
+
+    def one_step(self, text, body):
+        marker = "## 一歩先の改善案\n\n"
+        start = text.index(marker) + len(marker)
+        return text[:start] + body + text[text.index("\n", start):]
+
+    def written(self, body):
+        path, text = self.new_report()
+        filled = self.one_step(text, body)
+        filled = skeleton.SLOT.sub("なし", self.propose(filled, PROPOSAL.replace("### P1.", "### P2.")))
+        return path, filled.replace(skeleton.slot("確認済み／未確認"), "確認済み")
+
+    def test_fourth_format_puts_one_step_first_and_diagnostics_after_the_table(self):
+        path, text = self.new_report()
+        self.assertTrue(text.startswith("<!-- kiroku-report:4 -->"))
+        order = [text.index(h) for h in ("## 一歩先の改善案", "## 観測した型・継続方針", "## 様子見",
+                                          "## 比べたハーネス", "## ハーネスの診断", "## 記録の不足、確認事項")]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("- `D2:.kiro/steering/build.md:make build`：Makefile が無い。", text)
+        self.assertIn("最大 3 件", text)
+        self.assertIn('"diagnostics": [', text)
+
+    def test_a_well_formed_one_step_proposal_passes_and_is_a_proposal_in_the_ledger(self):
+        path, body = self.written(ONE_STEP)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        listing = self.cli("list", script=LEDGER).stdout
+        self.assertIn("%s#P1  [未判断]  テストの実行を終了時の hook にする" % path.stem, listing)
+        self.assertIn("%s#P2  [未判断]  テストの実行方法を直す" % path.stem, listing)
+        first = aggregate.ledger.proposals(self.root)[0]
+        self.assertEqual((first["files"], first["lenses"]), ([".kiro/hooks/test.json"], ["V3", "V5"]))
+        self.assertEqual(self.cli("adopt", "P1", script=LEDGER).returncode, 0)
+        summary = self.cli(script=os.path.join(os.path.dirname(AGGREGATE), "review.py")).stdout
+        self.assertIn("| V3 | 1 | 0 | 0 |", summary)
+        self.assertIn("| V5 | 1 | 0 | 0 |", summary)
+
+    def test_malformed_one_step_proposals_fail(self):
+        cases = {
+            "観点が無い": ONE_STEP.replace("- 観点：V3、V5\n", ""),
+            "観点が範囲外": ONE_STEP.replace("V3、V5", "V9"),
+            "段が上がらない": ONE_STEP.replace("1→3", "2→2"),
+            "手がかりが一般論": ONE_STEP.replace("`D2:.kiro/steering/build.md:make build`、`tool:make test`",
+                                          "テストは大事"),
+            "集約に無い手がかり": ONE_STEP.replace("`tool:make test`", "`tool:npm run build`"),
+            "確かめ方が無い": ONE_STEP.replace("- 確かめ方：次の振り返りで `tool:make test` が0回になる\n", ""),
+            "見出しが無い": ONE_STEP.replace("### P1. ", ""),
+        }
+        messages = {"観点が無い": "観点を V1〜V8", "段が上がらない": "案の段を観測より上", "手がかりが一般論": "一般論は",
+                    "集約に無い手がかり": "集約に無い手がかり：tool:npm run build", "確かめ方が無い": "確かめ方",
+                    "見出しが無い": "`### P<番号>. `"}
+        for label, body in cases.items():
+            path, written = self.written(body)
+            done = self.check(path, written)
+            self.assertEqual(done.returncode, 1, label + done.stdout)
+            if label in messages:
+                self.assertIn(messages[label], done.stdout, label)
+
+    def test_the_number_of_one_step_proposals_is_capped_by_the_setting(self):
+        config = json.loads((self.data.parent / "config.json").read_text(encoding="utf-8"))
+        config["one_step_max"] = 1
+        (self.data.parent / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        second = ONE_STEP.replace("### P1. テストの実行を終了時の hook にする", "### P3. もう1つの案")
+        path, body = self.written(ONE_STEP + "\n\n" + second)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("2 件あります。上限は 1 件", done.stdout)
+        self.assertIn("最大 1 件", self.new_report()[1])
+
+    def test_third_format_report_from_the_previous_version_still_passes(self):
+        """版3（PR #13 の main）で作り、検査を通ったレポートが、更新しただけで不一致にならない。"""
+        work = Path(tempfile.mkdtemp(prefix="kiroku-old-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        scripts = old_scripts(work, THIRD_FORMAT_VERSION)
+        if scripts is None:
+            self.skipTest("以前の版（%s）が git の履歴にありません" % THIRD_FORMAT_VERSION)
+        old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        path = sorted((self.data / "reports").glob("*.md"))[-1]
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<!-- kiroku-report:3 -->"))
+        filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+        path.write_text(filled, encoding="utf-8")
+        before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
+        self.assertEqual(before.returncode, 0, before.stdout)
+        after = self.cli("--check-report", str(path))
+        self.assertEqual(after.returncode, 0, after.stdout)
 
 
 class CitationTest(SkeletonTest):

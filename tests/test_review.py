@@ -255,6 +255,90 @@ class LedgerTest(ReviewSandbox):
         self.assertIn("見送った案（1 件）", aggregate.render(data))
 
 
+class AppliedTest(ReviewSandbox):
+    """Issue #12 機能追加：反映日を人の申告なしに決め、反映後に観測できた作業量を出す。"""
+
+    backdate = LedgerTest.backdate
+
+    def setUp(self):
+        super().setUp()
+        self.write(".kiro/steering/build.md", "ビルドの手順\n")
+        self.commit_at(13, "steering")   # レポートより前からあるファイル
+        stamp = (NOW - datetime.timedelta(days=13)).timestamp()
+        os.utime(os.path.join(self.root, ".kiro/steering/build.md"), (stamp, stamp))
+        self.made = (NOW - datetime.timedelta(days=12)).astimezone().strftime("%Y-%m-%d-%H%M")
+        self.report(self.made, "<!-- kiroku-report:3 -->\n### P1. ビルド前に依存を入れる\n"
+                               "- 対象の型：`tool:npm run build`\n"
+                               "- 対象のファイル：`.kiro/steering/build.md`、`.kiro/hooks/deps.json`（新規）\n")
+        self.backdate(11, 3)
+        self.decide(self.made + "#P1", "adopted", 10, "tool:npm run build")
+
+    def commit_at(self, days_ago, message):
+        stamp = (NOW - datetime.timedelta(days=days_ago)).isoformat()
+        env = dict(os.environ, GIT_COMMITTER_DATE=stamp, GIT_AUTHOR_DATE=stamp)
+        subprocess.run(["git", "-C", self.root, "add", "-A"], check=True)
+        subprocess.run(["git", "-C", self.root, "commit", "-q", "-m", message], check=True, env=env)
+
+    def row(self):
+        return aggregate.aggregate(self.root, since=None)["adopted"][0]
+
+    def test_unchanged_target_file_is_not_called_applied(self):
+        row = self.row()
+        self.assertEqual(row["files"], [".kiro/steering/build.md", ".kiro/hooks/deps.json"])
+        self.assertIsNone(row["applied_at"])
+        self.assertEqual(row["verdict"], "対象のファイルに変更なし（反映を確認できない）")
+        self.assertIn("反映は未確認", aggregate.render(aggregate.aggregate(self.root, since=None)))
+
+    def test_first_commit_after_the_report_is_the_applied_date(self):
+        self.write(".kiro/steering/build.md", "ビルドの前に npm ci を実行する\n")
+        self.commit_at(6, "反映")
+        self.backdate(8, 2)   # 採用の後、反映の前の失敗は「反映前」に数える
+        self.backdate(1, 0)
+        with open(self.data / "events.jsonl", "a", encoding="utf-8") as handle:   # 反映後の別の作業
+            handle.write(json.dumps({"type": "prompt", "session_id": "s2", "v": 2,
+                                     "ts": (NOW - datetime.timedelta(days=2)).isoformat()}) + "\n")
+        row = self.row()
+        self.assertEqual(row["split"], "反映")
+        self.assertTrue(row["applied_basis"].startswith("コミット "), row["applied_basis"])
+        self.assertAlmostEqual(aggregate.parse_time(row["applied_at"]).timestamp(),
+                               (NOW - datetime.timedelta(days=6)).timestamp(), delta=2)
+        self.assertEqual((row["before"], row["after"], row["verdict"]), (5, 0, "再発なし"))
+        self.assertEqual(row["observed"], {"unit": "フックの記録があるセッション", "count": 1,
+                                           "note": "実行総数は不明"})
+        text = aggregate.render(aggregate.aggregate(self.root, since=None))
+        self.assertIn("反映前 5 回", text)
+        self.assertIn("反映後の観測：フックの記録があるセッション 1（実行総数は不明）", text)
+
+    def test_uncommitted_change_uses_the_file_time_and_no_activity_is_not_no_recurrence(self):
+        self.write(".kiro/hooks/deps.json", "{}")   # 新規のファイル。未コミット
+        stamp = (NOW - datetime.timedelta(days=5)).timestamp()
+        os.utime(os.path.join(self.root, ".kiro/hooks/deps.json"), (stamp, stamp))
+        row = self.row()
+        self.assertIn("コミットされていない変更", row["applied_basis"])
+        # 反映後に作業が1件も無い。発生0回でも「再発なし」とは言わない。
+        self.assertEqual((row["after"], row["observed"]["count"], row["verdict"]), (0, 0, "反映後の観測なし"))
+
+    def test_proposal_without_target_files_keeps_the_adoption_date(self):
+        """以前の版のレポート（対象のファイルの行が無い）は、採用の時刻で比べ、そのことを表示する。"""
+        self.backdate(12, 2)
+        self.decide("r#P1", "adopted", 7, "tool:npm run build")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == "r#P1"][0]
+        self.assertEqual((row["split"], row["applied_at"]), ("採用", None))
+        self.assertEqual(row["verdict"], "採用後の観測なし")   # 採用後に作業が無い（Issue の例）
+        self.assertIn("反映日は不明", aggregate.render(aggregate.aggregate(self.root, since=None)))
+
+    def test_test_target_counts_runs_that_include_the_test(self):
+        self.data.mkdir(parents=True, exist_ok=True)
+        with open(self.data / "events.jsonl", "a", encoding="utf-8") as handle:
+            for days, ids in ((3, ["t::a"]), (2, ["t::b"]), (1, ["t::a", "t::b"])):
+                handle.write(json.dumps({"type": "test_run", "session_id": "s", "v": 2, "exit_code": 0,
+                                         "results": {"passed": ids}, "head": None, "dirty": {},
+                                         "ts": (NOW - datetime.timedelta(days=days)).isoformat()}) + "\n")
+        self.decide("r#P2", "adopted", 4, "test:t::a")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == "r#P2"][0]
+        self.assertEqual(row["observed"], {"unit": "そのテストを含むテスト実行", "count": 2, "note": None})
+
+
 class DiscoveryTest(ReviewSandbox):
     def test_session_agent_is_available_in_summary_and_report_facts(self):
         self.log('sess_actor', ['今後の完了報告は短くしてください'])

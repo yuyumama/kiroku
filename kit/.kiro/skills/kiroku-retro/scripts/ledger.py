@@ -16,6 +16,7 @@ import datetime
 import json
 import os
 import re
+import subprocess
 import sys
 
 sys.dont_write_bytecode = True  # 導入先に __pycache__ を作らない
@@ -25,6 +26,8 @@ import skeleton  # noqa: E402
 
 HEADING = re.compile(r"^###\s+(P\d+)[.．:：]?\s*(.*)$")
 TARGET = re.compile(r"対象の型[：:]\s*`([^`]+)`")
+FILES = re.compile(r"対象のファイル[：:]\s*(.*)$")
+REPORT_NAME = re.compile(r"(\d{4}-\d\d-\d\d-\d{4})(\d\d)?(?:-\d+)?$")
 TARGET_KINDS = ("topic", "tool", "denied", "cancelled", "timeout", "test")
 YOUNG_DAYS = 3  # これより日が浅いうちは、効果を判定しない
 
@@ -108,14 +111,19 @@ def proposals(root):
             heading = HEADING.match(line)
             if heading:
                 current = {"id": "%s#%s" % (name[:-3], heading.group(1)), "report": name[:-3],
-                           "number": heading.group(1), "title": heading.group(2).strip(), "target": None}
+                           "number": heading.group(1), "title": heading.group(2).strip(), "target": None,
+                           "files": []}
                 found.append(current)
             elif line.startswith("#"):
                 current = None
-            elif current is not None and current["target"] is None:
+            elif current is not None:
                 target = TARGET.search(line)
-                if target:
+                if target and current["target"] is None:
                     current["target"] = target.group(1).strip()
+                listed = FILES.search(line)
+                if listed:
+                    current["files"] += [p.strip() for p in re.findall(r"`([^`]+)`", listed.group(1))
+                                         if p.strip() and p.strip() not in current["files"]]
     return found
 
 
@@ -186,35 +194,118 @@ def _parse(text):
     return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def tracking(root, occurrences, data_start, now):
+def report_time(name):
+    """レポート名（作った時刻、手元の時刻帯）を時刻にする。読めなければ None。"""
+    found = REPORT_NAME.search(name or "")
+    if not found:
+        return None
+    text = found.group(1) + (found.group(2) or "00")
+    try:
+        return datetime.datetime.strptime(text, "%Y-%m-%d-%H%M%S").astimezone()
+    except ValueError:
+        return None
+
+
+def _git(root, *args):
+    try:
+        done = subprocess.run(["git", "-C", root] + list(args), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def file_changed_at(root, files, since):
+    """レポートを作った後に、案の「対象のファイル」が最初に変わった時刻と、その根拠。
+
+    人の申告を待たず、記録から決める。コミットされた変更はコミットの時刻、コミットされていない
+    変更はファイルの更新時刻を使う。ユーザー共通のファイル（~/ で始まるもの）は git に無いので、
+    更新時刻だけを見る。変わっていなければ (None, None)。
+    ファイルが変わったことは、案どおりに反映したことの証明ではない（ほかの変更でも変わる）。
+    """
+    found = []
+    inside = _git(root, "rev-parse", "--is-inside-work-tree") is not None
+    for name in files:
+        if name.startswith("~"):
+            path = os.path.expanduser(name.replace("~/.kiro", os.environ.get("KIRO_HOME") or "~/.kiro", 1))
+        else:
+            path = name if os.path.isabs(name) else os.path.join(root, name)
+            relative = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+            if inside and not relative.startswith(".."):
+                out = _git(root, "log", "--format=%ct %h", "--", relative) or ""
+                for line in out.splitlines():
+                    stamp, _, short = line.partition(" ")
+                    if stamp.isdigit() and int(stamp) > since.timestamp():
+                        moment = datetime.datetime.fromtimestamp(int(stamp), datetime.timezone.utc)
+                        found.append((moment, "コミット %s（`%s`）" % (short, name)))
+                dirty = _git(root, "status", "--porcelain", "--", relative)
+                if not dirty:
+                    continue   # 作業ツリーはコミットと同じ。コミットの時刻だけを使う
+        try:
+            moment = datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc)
+        except OSError:
+            continue
+        if moment > since:
+            found.append((moment, "コミットされていない変更（`%s` の更新時刻）" % name))
+    return min(found) if found else (None, None)
+
+
+def tracking(root, occurrences, data_start, now, exposure=None):
     """採用・見送りした案について、対象の型がその後に何回出たかを数える。
 
     occurrences は、対象の型（`tool:npm run build` など）から発生時刻の一覧を返す関数。
     分からない型には None を返す。
+    exposure は、(対象の型, 境目の時刻) から、境目の後に観測できた作業量
+    {"unit": 単位, "count": 数, "note": 補足} を返す関数。数えられない型には None を返す。
+    境目は、対象のファイルが変わった時刻（反映）。分からなければ採用の時刻。
     """
     adopted, rejected = [], []
+    found = proposals(root)
+    ambiguous = duplicated(found)
+    by_id = {p["id"]: p for p in found if p["id"] not in ambiguous}
     for entry in sorted(decisions(root).values(), key=lambda e: e["ts"]):
         decided = _parse(entry["ts"])
         row = {"id": entry["id"], "title": entry.get("title"), "target": entry.get("target"),
-               "decided_at": entry["ts"], "reason": entry.get("reason")}
+               "decided_at": entry["ts"], "reason": entry.get("reason"),
+               "files": [], "applied_at": None, "applied_basis": None, "observed": None}
+        # 反映：採用した案の「対象のファイル」が、レポートを作った後に変わった時刻（人の申告は要らない）。
+        # 対象のファイルが書かれていない案（以前の版、初期導入の提案など）は、採用の時刻で比べる。
+        split, split_label = decided, "採用"
+        proposal = by_id.get(entry["id"])
+        made = report_time(proposal["report"]) if proposal else None
+        if entry["decision"] == "adopted" and proposal and proposal["files"] and made:
+            row["files"] = proposal["files"]
+            applied, basis = file_changed_at(root, proposal["files"], made)
+            if applied:
+                row["applied_at"] = applied.isoformat().replace("+00:00", "Z")
+                row["applied_basis"] = basis
+                split, split_label = applied, "反映"
+        row["split"] = split_label
         times = occurrences(entry.get("target"), str(entry.get("id") or "").partition("#")[0]) \
             if entry.get("target") else None
-        after_days = max((now - decided).total_seconds() / 86400, 0)
+        after_days = max((now - split).total_seconds() / 86400, 0)
         row["after_days"] = round(after_days, 1)
         if times is None:
             row.update(before=None, after=None, before_days=None, verdict="対象の型を数えられない")
         else:
-            # 採用後と同じ長さの期間を、採用前にも取る。記録が無い期間までは遡らない。
-            available = max((decided - data_start).total_seconds() / 86400, 0) if data_start else 0
+            # 境目の後と同じ長さの期間を、境目の前にも取る。記録が無い期間までは遡らない。
+            available = max((split - data_start).total_seconds() / 86400, 0) if data_start else 0
             before_days = min(max(after_days, 7), available)
-            start = decided - datetime.timedelta(days=before_days)
-            row["before"] = sum(1 for t in times if start <= t < decided)
-            row["after"] = sum(1 for t in times if t >= decided)
+            start = split - datetime.timedelta(days=before_days)
+            row["before"] = sum(1 for t in times if start <= t < split)
+            row["after"] = sum(1 for t in times if t >= split)
             row["before_days"] = round(before_days, 1)
-            if after_days < YOUNG_DAYS:
+            # 境目の後に、その型が起こりうる作業をどれだけ観測できたか。数えられなければ None。
+            row["observed"] = exposure(entry.get("target"), split) if exposure else None
+            observed = row["observed"]["count"] if row["observed"] else None
+            if row["files"] and row["applied_at"] is None:
+                row["verdict"] = "対象のファイルに変更なし（反映を確認できない）"
+            elif after_days < YOUNG_DAYS:
                 row["verdict"] = "まだ日が浅い"
             elif row["before"] == 0:
-                row["verdict"] = "採用前の記録が無い"
+                row["verdict"] = "%s前の記録が無い" % split_label
+            elif row["after"] == 0 and observed == 0:
+                row["verdict"] = "%s後の観測なし" % split_label   # 起きなかったのではなく、作業が無かった
             elif row["after"] == 0:
                 row["verdict"] = "再発なし"
             elif row["after"] / after_days < 0.5 * row["before"] / before_days:

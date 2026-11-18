@@ -444,9 +444,33 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             return [f["_time"] for f in all_failures if f["class"] == REGRESSION and f["test_id"] == name]
         return None
 
+    read_after = {}
+
+    def exposure(target, start):
+        """境目の後に、その型が起こりうる作業をどれだけ観測できたか。発生しなかったことと、
+        作業が無かったことを分けるために使う。数えられない型は None。"""
+        kind, _, name = (target or "").partition(":")
+        if kind == "test":
+            # そのテストを含む、結果を取り込めたテスト実行。成功も数える。
+            count = sum(1 for e in all_events if e.get("type") == "test_run" and e["_time"] >= start
+                        and name in all_ids(e))
+            return {"unit": "そのテストを含むテスト実行", "count": count, "note": None}
+        if kind in ("tool", "denied", "cancelled", "timeout"):
+            # 成功したコマンドは記録しないので、実行の総数は分からない。記録のあるセッションを数える。
+            count = len({e.get("session_id") for e in all_events if e["_time"] >= start})
+            return {"unit": "フックの記録があるセッション", "count": count, "note": "実行総数は不明"}
+        if kind == "topic":
+            # 発話があり、ノートで読み終えたセッション。読んでいないセッションでは、起きたかが分からない。
+            key = start.isoformat()
+            if key not in read_after:
+                read_after[key] = sum(1 for s in prompts.sessions(root, all_events, start, None)
+                                      if s["prompts"] and s["note"] == "fresh")
+            return {"unit": "発話を読み終えたセッション", "count": read_after[key], "note": None}
+        return None
+
     starts = [e["_time"] for e in all_events[:1]] + [f["_time"] for f in findings if f["_time"]]
     adopted, rejected = ledger.tracking(root, occurrences, min(starts) if starts else None,
-                                        datetime.datetime.now(datetime.timezone.utc))
+                                        datetime.datetime.now(datetime.timezone.utc), exposure)
     pending = []
     for proposal in ledger.pending(root, before_report):
         times = occurrences(proposal["target"], proposal["report"]) if proposal["target"] else None
@@ -949,15 +973,25 @@ def render_review(data, cap=None):
         lines.append("なし")
     adopted, more_adopted = capped(data["adopted"], cap, "review")
     for row in adopted:
+        split = row.get("split", "採用")
         if row["before"] is None:
             counts = row["verdict"]
         elif row["verdict"] == "まだ日が浅い":
-            counts = "採用から %s 日。まだ日が浅い（%d 日後から判定）" % (row["after_days"], ledger.YOUNG_DAYS)
+            counts = "%sから %s 日。まだ日が浅い（%d 日後から判定）" % (split, row["after_days"], ledger.YOUNG_DAYS)
         else:
-            counts = "採用前 %d 回／%s 日、採用後 %d 回／%s 日。%s" % (
-                row["before"], row["before_days"], row["after"], row["after_days"], row["verdict"])
-        lines.append("- `%s` %s（対象の型 `%s`、採用 %s）：%s" % (
-            row["id"], row["title"], row["target"], row["decided_at"], counts))
+            counts = "%s前 %d 回／%s 日、%s後 %d 回／%s 日。%s" % (
+                split, row["before"], row["before_days"], split, row["after"], row["after_days"], row["verdict"])
+        if row.get("observed"):
+            counts += "。%s後の観測：%s %d%s" % (split, row["observed"]["unit"], row["observed"]["count"],
+                                            "（%s）" % row["observed"]["note"] if row["observed"]["note"] else "")
+        if row.get("applied_at"):
+            applied = "、反映 %s（%s）" % (row["applied_at"], row["applied_basis"])
+        elif row.get("files"):
+            applied = "、反映は未確認（対象のファイルに、レポートの後の変更なし）"
+        else:
+            applied = "、反映日は不明（対象のファイルの記載なし。採用の時刻で比べる）"
+        lines.append("- `%s` %s（対象の型 `%s`、採用 %s%s）：%s" % (
+            row["id"], row["title"], row["target"], row["decided_at"], applied, counts))
     lines += more_adopted
     if data["pending"]:
         lines += ["", "## 前回のレポートの未判断の案（%d 件）" % len(data["pending"]), "",

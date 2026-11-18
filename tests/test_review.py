@@ -439,6 +439,25 @@ class DiscoveryTest(ReviewSandbox):
         self.assertFalse(rows["sess_chat"]["recorded"])
         self.assertEqual(rows["sess_chat"]["prompts"], 1)
 
+    def test_sessions_dir_that_is_itself_a_session_is_discovered(self):
+        """Issue #12 の5節：sessions_dir にセッションのディレクトリそのものを指定すると、
+        ID を指定した要約では読めるのに、自動の探索では見つからなかった。"""
+        directory = Path(self.root) / ".kiro/kiroku/data/exports/sess_export"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": "sess_export", "workspacePaths": [self.root]}), encoding="utf-8")
+        (directory / "messages.jsonl").write_text(json.dumps(
+            {"id": "0", "timestamp": NOW.isoformat(), "payload": {"type": "user", "content": "エクスポートした会話"}},
+            ensure_ascii=False) + "\n", encoding="utf-8")
+        self.write(".kiro/kiroku/config.json", json.dumps({"sessions_dir": ".kiro/kiroku/data/exports/sess_export"}))
+        self.assertEqual(aggregate.prompts.distill(self.root, "sess_export")["status"], "ok")
+        rows = {r["session_id"]: r for r in aggregate.aggregate(self.root)["sessions"]}
+        self.assertEqual(rows["sess_export"]["prompts"], 1)
+        # 別の作業場所のセッションは、これまでどおり拾わない。
+        (directory / "session.json").write_text(json.dumps(
+            {"id": "sess_export", "workspacePaths": ["/somewhere/else"]}), encoding="utf-8")
+        self.assertNotIn("sess_export", {r["session_id"] for r in aggregate.aggregate(self.root)["sessions"]})
+
     def test_log_only_sessions_are_listed_even_without_any_event(self):
         self.log("sess_chat", ["この関数は何をしているの？"])
         data = aggregate.aggregate(self.root)

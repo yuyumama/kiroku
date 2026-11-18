@@ -9,13 +9,12 @@ SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 KIROKU_DATA = ".kiro/kiroku/"
 
 
-def agents_files(root):
-    """リポジトリ内の AGENTS.md（直下とサブディレクトリ）。Kiro はサブディレクトリのものも常に読み込む。
+def repo_files(root):
+    """リポジトリのファイル（ルートからの相対パス、/ 区切り）。kiroku の生データは除く。
 
-    git が使えれば、追跡しているファイルと、無視されていない未追跡のファイルから探す。
-    使えなければ、ディレクトリを辿る（SKIP_DIRS は辿らない）。kiroku の生データの中は見ない。
+    git が使えれば、追跡しているファイルと、無視されていない未追跡のファイル。
+    使えなければ、ディレクトリを辿る（SKIP_DIRS は辿らない）。
     """
-    found = []
     try:
         done = subprocess.run(["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
                               capture_output=True, timeout=60)
@@ -23,16 +22,21 @@ def agents_files(root):
     except (OSError, subprocess.SubprocessError):
         names = None
     if names is not None:
-        found = sorted({n for n in names if n and n.split("/")[-1] == "AGENTS.md"
-                        and not n.startswith(KIROKU_DATA)})
-    else:
-        for directory, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
-            relative = Path(directory).relative_to(root).as_posix()
-            if "AGENTS.md" in files and not (relative + "/").startswith(KIROKU_DATA):
-                found.append("AGENTS.md" if relative == "." else relative + "/AGENTS.md")
-        found.sort()
-    return [Path(root) / name for name in found]
+        return sorted({n for n in names if n and not n.startswith(KIROKU_DATA)})
+    found = []
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        relative = Path(directory).relative_to(root).as_posix()
+        prefix = "" if relative == "." else relative + "/"
+        if prefix.startswith(KIROKU_DATA):
+            continue
+        found += [prefix + name for name in files]
+    return sorted(found)
+
+
+def agents_files(root):
+    """リポジトリ内の AGENTS.md（直下とサブディレクトリ）。Kiro はサブディレクトリのものも常に読み込む。"""
+    return [Path(root) / name for name in repo_files(root) if name.split("/")[-1] == "AGENTS.md"]
 
 
 def inventory(root):

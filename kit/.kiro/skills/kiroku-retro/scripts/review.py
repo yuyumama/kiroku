@@ -111,6 +111,17 @@ def summarize(root, since, until):
         lines.append("| %s | %d | %d | %d |" % (kind, counts["adopted"], counts["rejected"], counts["undecided"]))
     if not by_kind:
         lines.append("| （案なし） | 0 | 0 | 0 |")
+    lenses = collections.defaultdict(collections.Counter)
+    for proposal in proposals:
+        if proposal["id"] in ambiguous:
+            continue
+        for lens in proposal.get("lenses") or []:
+            lenses[lens][known.get(proposal["id"], {}).get("decision", "undecided")] += 1
+    if lenses:
+        lines += ["", "一歩先の案（観点ごと。1つの案に観点が複数あれば、それぞれに数える）：", "",
+                  "| 観点 | 採用 | 見送り | 未判断 |", "|---|---|---|---|"]
+        for lens, counts in sorted(lenses.items(), key=lambda item: int(item[0][1:])):
+            lines.append("| %s | %d | %d | %d |" % (lens, counts["adopted"], counts["rejected"], counts["undecided"]))
     if ambiguous:
         lines.append("")
         lines.append("番号が重複した案：%d 件（%d 個の番号）。採用・見送りの数と追跡から外しています。" % (

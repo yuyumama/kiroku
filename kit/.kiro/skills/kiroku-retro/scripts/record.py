@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
     "retro_output_chars": 20000,
     # 終わりのフックが来なかった実行前記録を捨てるまでの秒数。最初の値で、根拠は薄い。
     "test_start_max_seconds": 3600,
+    # 1回のレポートに書ける、一歩先の改善案の上限。最初の値で、根拠は薄い。
+    "one_step_max": 3,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
@@ -165,8 +167,8 @@ def load_config(root):
     return config
 
 
-# 0 以上の整数で指定する項目。0 は「残さない」。範囲外や数でない値は、既定値で動く。
-COUNT_KEYS = ("output_tail_chars",)
+# 0 以上の整数で指定する項目と、0 にしたときの意味。範囲外や数でない値は、既定値で動く。
+COUNT_KEYS = {"output_tail_chars": "失敗の出力を残さない", "one_step_max": "一歩先の改善案を書かない"}
 
 
 def count_setting(config, key):

@@ -274,7 +274,8 @@ class AppliedTest(ReviewSandbox):
         self.decide(self.made + "#P1", "adopted", 10, "tool:npm run build")
 
     def commit_at(self, days_ago, message):
-        stamp = (NOW - datetime.timedelta(days=days_ago)).isoformat()
+        when = days_ago if isinstance(days_ago, datetime.datetime) else NOW - datetime.timedelta(days=days_ago)
+        stamp = when.isoformat()
         env = dict(os.environ, GIT_COMMITTER_DATE=stamp, GIT_AUTHOR_DATE=stamp)
         subprocess.run(["git", "-C", self.root, "add", "-A"], check=True)
         subprocess.run(["git", "-C", self.root, "commit", "-q", "-m", message], check=True, env=env)
@@ -308,6 +309,33 @@ class AppliedTest(ReviewSandbox):
         text = aggregate.render(aggregate.aggregate(self.root, since=None))
         self.assertIn("反映前 5 回", text)
         self.assertIn("反映後の観測：フックの記録があるセッション 1（実行総数は不明）", text)
+
+    def test_commit_before_the_report_in_the_same_minute_is_not_the_applied_date(self):
+        """PR #13 のレビュー指摘2：名前の分の頭を作成時刻とみなし、作る前の同じ分のコミットを反映としていた。"""
+        minute = datetime.datetime.strptime(self.made, "%Y-%m-%d-%H%M").astimezone()
+        state_path = self.data / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+        state["report_made"] = {self.made: (minute + datetime.timedelta(seconds=40)).isoformat()}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.write(".kiro/steering/build.md", "作る前の変更\n")
+        self.commit_at(minute + datetime.timedelta(seconds=15), "作る前")
+        self.assertIsNone(self.row()["applied_at"])
+        self.write(".kiro/steering/build.md", "作った後の変更\n")
+        self.commit_at(minute + datetime.timedelta(minutes=2), "作った後")
+        applied = aggregate.parse_time(self.row()["applied_at"])
+        self.assertEqual(applied, (minute + datetime.timedelta(minutes=2)).astimezone(datetime.timezone.utc))
+        # 正確な時刻の控えが無い以前のレポートは、名前の分の終わりを基準にする。同じ分のコミットは数えない。
+        state_path.write_text("{}", encoding="utf-8")
+        self.assertEqual(aggregate.parse_time(self.row()["applied_at"]), applied)
+        self.assertEqual(aggregate.ledger.report_time(self.root, self.made), minute + datetime.timedelta(minutes=1))
+
+    def test_new_report_keeps_the_exact_creation_time(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(aggregate.new_report(self.root, aggregate.aggregate(self.root)), 0)
+        name = sorted((self.data / "reports").glob("*.md"))[-1].stem
+        made = aggregate.ledger.report_time(self.root, name)
+        self.assertLess(abs((made - datetime.datetime.now(datetime.timezone.utc)).total_seconds()), 60)
+        self.assertNotEqual(made.second + made.microsecond, 0)   # 分の頭ではなく、作った時刻
 
     def test_uncommitted_change_uses_the_file_time_and_no_activity_is_not_no_recurrence(self):
         self.write(".kiro/hooks/deps.json", "{}")   # 新規のファイル。未コミット

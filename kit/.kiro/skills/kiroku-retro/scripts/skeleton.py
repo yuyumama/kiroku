@@ -17,7 +17,8 @@ from pathlib import Path
 #   2：型と改善案の主張に引用を付け、検査が引用の実在を確かめる
 #   3：節の中の欄（引き継がなかった案の理由、記録の不足への補足）に見出しの行を付け、
 #      欄が空のままのレポートを、骨組みが無くても見分けられるようにする
-MARK = "<!-- kiroku-report:3 -->"
+VERSION = 3
+MARK = "<!-- kiroku-report:%d -->" % VERSION
 MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
 SLOT = re.compile(r"【ここに書く[^】]*】")
 OWN_FILES = (".kiro/skills/kiroku-retro/", ".kiro/hooks/kiroku.json", ".kiro/agents/kiroku-retro.json",
@@ -170,15 +171,17 @@ def _gap_lines(data, reasons):
     return lines or ["- スクリプトが検出した記録の不足はありません。"]
 
 
-def build(root, data, reasons=None, session=None):
+def build(root, data, reasons=None, session=None, version=VERSION):
     """集約から、レポートの骨組みを作る。同じ集約からは、いつも同じ文面になる。
 
     session は、振り返りをしているセッション。「確認済み」の照合に使うので、骨組みに控える。
+    version は形式の版。以前の版のレポートを検査するとき、その版の骨組みを作り直すのに使う
+    （data も、その版の検証値にそろえたものを渡す。aggregate.as_version）。
     """
     plan, cover = data["reading_plan"], data["coverage"]
     rows, own = _harness_rows(root, data)
     day = (data["until"] or "")[:10] or "期間の終わりなし"
-    lines = [MARK] + (["<!-- kiroku-session:%s -->" % session] if session else []) + [
+    lines = ["<!-- kiroku-report:%d -->" % version] + (["<!-- kiroku-session:%s -->" % session] if session else []) + [
         "# 振り返り %s" % day,
         "",
         "- 対象期間：%s 〜 %s（UTC）" % (_moment(data["since"], "最初"), _moment(data["until"], "現在")),
@@ -217,7 +220,7 @@ def build(root, data, reasons=None, session=None):
     if data["pending"]:
         lines.append("前回のレポートの未判断の案は、次の %d 件です。" % len(data["pending"]))
         lines += ["- `%s` %s" % (row["id"], row["title"]) for row in data["pending"]]
-        lines += ["", "- 載せなかった案と理由：" + slot("上のうち、今回のレポートに載せなかったものと、その理由。すべて引き継いだなら「なし」")]
+        lines += ["", ("- 載せなかった案と理由：" if version >= 3 else "") + slot("上のうち、今回のレポートに載せなかったものと、その理由。すべて引き継いだなら「なし」")]
     else:
         lines.append("前回のレポートに、未判断の案はありません。")
     lines += [
@@ -232,7 +235,8 @@ def build(root, data, reasons=None, session=None):
         "",
     ] + _gap_lines(data, reasons or {}) + [
         "",
-        "- 補足と、利用者に確かめたいこと：" + slot("上への補足。無ければ「なし」"),
+        "- 補足と、利用者に確かめたいこと：" + slot("上への補足。無ければ「なし」") if version >= 3
+        else slot("上への補足と、利用者に確かめたいこと。無ければ「なし」"),
         "",
         "照合用の検証値です（スクリプトが書いたもの。読む必要はありません）。",
         "",

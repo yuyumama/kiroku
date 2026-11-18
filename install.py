@@ -58,6 +58,25 @@ def installed_python_command(target):
     return found.pop() if len(found) == 1 else None
 
 
+def runner_notes(target):
+    """導入済みのフックの起動名が、この環境で見つからないときの注意。見つかれば空。
+
+    指定の無い更新は起動名を引き継ぐ。その起動名が環境から無くなっていると、フックが動かず、
+    記録が黙って止まる。フックは Kiro の環境で動くので、ここで見つからなくても動く場合がある。
+    """
+    command = installed_python_command(target)
+    if command is None or shutil.which(command.split(" ")[0]):
+        return []
+    others = [name for name in PYTHON_COMMANDS if name != command and shutil.which(name.split(" ")[0])]
+    lines = ["注意：導入済みのフックは Python を '%s' で起動しますが、この環境では見つかりません。" % command,
+             "  Kiro の環境でも見つからなければ、フックが動かず、記録が止まります。"]
+    if others:
+        lines += ["  動く起動名を指定して、もう一度更新してください。例：",
+                  "    sh install.sh <導入先> --update --python-command %s" % others[0],
+                  "    install.ps1 -Target <導入先> -Update -PythonCommand '%s'" % others[0]]
+    return lines
+
+
 def install(target, update=False, python_command=None):
     target = Path(target).resolve()
     if not target.is_dir():
@@ -139,6 +158,9 @@ def main():
         print("導入先は、この kiroku と同じ内容です。")
     if changes["そのまま（導入先の設定）"]:
         for line in config_notes(args.target):
+            print(line)
+    if args.update and args.python_command is None:
+        for line in runner_notes(args.target):
             print(line)
     print("完了。テスト結果の記録は .kiro/kiroku/config.json の tests を設定してください。")
 

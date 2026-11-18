@@ -61,7 +61,9 @@ def inventory(root):
         if scope == "project":
             # AGENTS.md はディレクトリにまとまっていないので、リポジトリ内のすべてを1つの所在として出す。
             # ユーザー共通の AGENTS.md は ~/.kiro/steering/ に置くので、steering の所在に含まれる。
-            row = {"scope": scope, "path": str(Path(root) / "AGENTS.md"), "status": "absent", "files": []}
+            # added_in：この所在を出すようになった、レポートの形式の版。以前の版のレポートの検査では除く。
+            row = {"scope": scope, "path": str(Path(root) / "AGENTS.md"), "status": "absent", "files": [],
+                   "added_in": 3}
             try:
                 Path(root).stat()
                 steering = (Path(root) / ".kiro" / "steering").resolve()

@@ -620,6 +620,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "topics": notes.topics(findings, since, until),
         "note_problems": note_problems,
         "adopted": adopted,
+        "ambiguous_decisions": ledger.ambiguous_decisions(root),
         "pending": pending,
         "rejected": rejected,
         "sessions": session_rows,
@@ -993,6 +994,10 @@ def render_review(data, cap=None):
         lines.append("- `%s` %s（対象の型 `%s`、採用 %s%s）：%s" % (
             row["id"], row["title"], row["target"], row["decided_at"], applied, counts))
     lines += more_adopted
+    if data.get("ambiguous_decisions"):
+        lines += ["", "番号が重複した案への判断（%s）は、どの案のものか決まらないので、追跡から外しています。"
+                  "レポートの番号を通し番号に直してから、判断を記録し直してください。"
+                  % "、".join("`%s`" % key for key in data["ambiguous_decisions"])]
     if data["pending"]:
         lines += ["", "## 前回のレポートの未判断の案（%d 件）" % len(data["pending"]), "",
                   "最新のレポートにあり、採用も見送りも記録されていない案です。"
@@ -1067,6 +1072,20 @@ def report_names(moment):
     return [minute, second] + ["%s-%d" % (second, n) for n in range(2, MAX_REPORT_SUFFIX + 1)]
 
 
+def as_version(data, version):
+    """集約を、以前の版のレポートが作られたときの形にそろえる。検証値と骨組みの再現に使う。
+
+    目印の無いレポート（0）と版1・版2のときは、版3で足した所在（サブディレクトリを含む AGENTS.md）を除く。
+    更新しただけで、以前に検査を通ったレポートが不一致にならないようにするため。
+    """
+    if version >= skeleton.VERSION:
+        return data
+    harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
+    shaped = dict(data, harness=harness_rows)
+    shaped["report_facts"] = reportcheck.facts(shaped)
+    return shaped
+
+
 def new_report(root, data):
     """レポートの骨組みを保存先に作る。
 
@@ -1115,6 +1134,10 @@ def new_report(root, data):
             return 1
         drafts[chosen] = digest
         state["report_drafts"] = drafts
+        # 作った正確な時刻。名前は分（または秒）までなので、反映の判定の基準にはこちらを使う。
+        made_at = state.get("report_made") if isinstance(state.get("report_made"), dict) else {}
+        made_at[chosen] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        state["report_made"] = made_at
         if session:
             made[chosen] = session
             state["report_sessions"] = made
@@ -1181,13 +1204,18 @@ def main(argv=None):
             name = os.path.basename(args.check_report)
             name = name[:-3] if name.endswith('.md') else name
             data = aggregate(root, start, end, before_report=name)
+            form = skeleton.version(body)
+            data = as_version(data, form)   # 以前の版のレポートは、その版の検証値と骨組みで比べる
             errors = reportcheck.validate(body, data['report_facts'])
-            if skeleton.version(body):
+            if form:
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
                 made_by = (load_state(os.path.join(root, ".kiro", "kiroku", "data"))
                            .get("report_sessions") or {}).get(name, reads.session_of(body))
-                errors += skeleton.validate(body, skeleton.build(root, data, GAP_REASONS, made_by))
+                errors += skeleton.validate(body, skeleton.build(
+                    root, data, GAP_REASONS, made_by,
+                    # 版1は表記が違うので、行は照合しない（今の版の骨組みを渡すと、validate が照合を省く）
+                    version=min(form, skeleton.VERSION) if form >= 2 else skeleton.VERSION))
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
                 unread, notices = reads.validate(root, body)

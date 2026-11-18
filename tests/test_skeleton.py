@@ -26,6 +26,20 @@ PROPOSAL = ("### P1. テストの実行方法を直す\n\n- 対象の型：`tool
             "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n- 変更の内容：…")
 
 
+OLD_VERSION = "0499158"   # 版2の骨組みを作っていた main（PR #13 の前）
+REPO = Path(__file__).resolve().parents[1]
+
+
+def old_scripts(destination):
+    """以前の版のスクリプトを git の履歴から取り出す。履歴が無ければ None。"""
+    archive = subprocess.run(["git", "-C", str(REPO), "archive", OLD_VERSION, "kit/.kiro/skills/kiroku-retro/scripts"],
+                             capture_output=True)
+    if archive.returncode != 0:
+        return None
+    subprocess.run(["tar", "-x", "-C", str(destination)], input=archive.stdout, check=True)
+    return destination / "kit/.kiro/skills/kiroku-retro/scripts"
+
+
 class SkeletonTest(ReviewSandbox):
     def setUp(self):
         super().setUp()
@@ -133,12 +147,22 @@ class SkeletonTest(ReviewSandbox):
         self.assertIn("列が 4 個", self.check(path, broken).stdout)
 
     def test_second_format_reports_keep_their_reading(self):
-        """版2のレポート（見出しの行が無い）は、ある行と節だけを見る。書き終えたものは書き終えたまま。"""
-        path, text = self.new_report()
-        old = self.fill(text).replace(skeleton.MARK, "<!-- kiroku-report:2 -->").replace(
-            "- 補足と、利用者に確かめたいこと：なし", "なし")
+        """版2のレポート（見出しの行が無い）は、版2の骨組みと検証値で比べる。書き終えたものは書き終えたまま。"""
+        data = aggregate.as_version(aggregate.aggregate(self.root, aggregate.parse_bound(
+            "7d", aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc))), 2)
+        text = skeleton.build(self.root, data, aggregate.GAP_REASONS, os.environ.get("KIRO_SESSION_ID"), version=2)
+        self.assertTrue(text.startswith("<!-- kiroku-report:2 -->"))
+        self.assertNotIn("補足と、利用者に確かめたいこと：", text)
+        self.assertNotIn("`AGENTS.md`", text)
+        path = self.data / "reports" / "2026-11-10-0900.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = self.fill(text)
         self.assertFalse(skeleton.is_draft(old))
-        self.assertEqual(self.check(path, old).returncode, 0)
+        done = self.check(path, old)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        # 版2でも、スクリプトが書いた行は照合する。
+        self.assertEqual(self.check(path, old.replace("- イベント数、セッション数：1 件", "- イベント数、セッション数：3 件")
+                                    ).returncode, 1)
 
     def test_unread_file_in_the_table_contradicts_none_in_the_header(self):
         path, text = self.new_report()
@@ -235,13 +259,44 @@ class SkeletonTest(ReviewSandbox):
         listing = self.cli("list", script=LEDGER).stdout
         self.assertEqual(listing.count("番号が重複"), 2, listing)
         self.assertNotIn("[採用]", listing)
+        # PR #13 のレビュー指摘3：見直し用の要約と集約の追跡でも、この判断を数えない。
+        summary = self.cli(script=os.path.join(os.path.dirname(AGGREGATE), "review.py")).stdout
+        self.assertNotIn("| tool |", summary)   # 以前は「採用 2」と数えていた
+        self.assertIn("番号が重複した案：2 件（1 個の番号）", summary)
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["adopted"], [])
+        self.assertEqual(data["ambiguous_decisions"], [path.stem + "#P1"])
+        self.assertIn("追跡から外しています", aggregate.render(data))
         # 通し番号に直せば検査を通り、記録できる。
         fixed = body.replace("### P1. ユーザー共通", "### P2. ユーザー共通")
         self.assertEqual(self.check(path, fixed).returncode, 0)
         self.assertEqual(self.cli("adopt", "P2", script=LEDGER).returncode, 0)
 
+    def test_report_checked_by_the_previous_version_still_passes(self):
+        """PR #13 のレビュー指摘1：以前の版で検査を通った版2のレポートが、更新しただけで不一致になった。"""
+        import tempfile
+        import shutil
+        work = Path(tempfile.mkdtemp(prefix="kiroku-old-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        scripts = old_scripts(work)
+        if scripts is None:
+            self.skipTest("以前の版（%s）が git の履歴にありません" % OLD_VERSION)
+        self.write("app/AGENTS.md", "app の決まり\n")
+        old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        path = sorted((self.data / "reports").glob("*.md"))[-1]
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<!-- kiroku-report:2 -->"))
+        filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+        path.write_text(filled, encoding="utf-8")
+        before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
+        self.assertEqual(before.returncode, 0, before.stdout)
+        after = self.cli("--check-report", str(path))
+        self.assertEqual(after.returncode, 0, after.stdout)
+        self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
+
     def test_reports_without_the_mark_are_checked_by_the_previous_rules(self):
-        facts = aggregate.aggregate(self.root)["report_facts"]
+        facts = aggregate.as_version(aggregate.aggregate(self.root), 0)["report_facts"]
         path = self.data / "reports" / "2026-11-10-0900.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         body = "### P1. 手順\n- 対象の型：`tool:make test`\n\n```kiroku-facts\n%s\n```\n" % json.dumps(facts)
@@ -347,8 +402,11 @@ class CitationTest(SkeletonTest):
         self.assertIn("ログを読めない", out)
 
     def test_first_format_reports_are_not_held_to_the_citation_rules(self):
-        path, text = self.new_report()
-        old = self.fill(text).replace(skeleton.MARK, "<!-- kiroku-report:1 -->").replace(
+        path, _ = self.new_report()
+        data = aggregate.as_version(aggregate.aggregate(self.root, aggregate.parse_bound(
+            "7d", aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc))), 1)
+        text = skeleton.build(self.root, data, aggregate.GAP_REASONS, version=2)
+        old = self.fill(text).replace("<!-- kiroku-report:2 -->", "<!-- kiroku-report:1 -->").replace(
             "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n", "")
         self.assertEqual(self.check(path, old).returncode, 0)
 

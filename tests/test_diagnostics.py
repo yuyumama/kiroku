@@ -95,7 +95,7 @@ class SetupTest(Sandbox):
 
     def test_report_facts_and_targets_are_checked_against_records(self):
         self.shell('make test', 2)
-        data = aggregate.aggregate(self.root)
+        data = aggregate.as_version(aggregate.aggregate(self.root), 0)   # 目印の無い、以前の版のレポート
         facts = data['report_facts']
         path = Path(self.root) / '.kiro/kiroku/data/reports/2026-11-14-0200.md'
         path.parent.mkdir(parents=True)

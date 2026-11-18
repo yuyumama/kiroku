@@ -21,7 +21,7 @@ import sys
 
 sys.dont_write_bytecode = True  # 導入先に __pycache__ を作らない
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from record import script_root  # noqa: E402
+from record import load_state, script_root  # noqa: E402
 import skeleton  # noqa: E402
 
 HEADING = re.compile(r"^###\s+(P\d+)[.．:：]?\s*(.*)$")
@@ -194,16 +194,36 @@ def _parse(text):
     return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def report_time(name):
-    """レポート名（作った時刻、手元の時刻帯）を時刻にする。読めなければ None。"""
+def report_time(root, name):
+    """レポートを作った時刻。反映（対象のファイルの変更）を、この時刻より後のものに限るのに使う。
+
+    骨組みを作ったときに state に控えた正確な時刻を使う。控えが無いレポート（以前の版、手で書いたもの）は、
+    名前（作った機械の時刻帯で、分または秒まで）の区間の終わりを使う。作る前の同じ分の変更を、
+    作った後の変更と取り違えないため（その区間の中で作った後に変えたものは、反映として拾えない）。
+    読めなければ None。
+    """
+    made = load_state(data_dir(root)).get("report_made")
+    stamp = made.get(name) if isinstance(made, dict) else None
+    if isinstance(stamp, str):
+        try:
+            moment = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if moment.tzinfo:
+                return moment
+        except ValueError:
+            pass
     found = REPORT_NAME.search(name or "")
     if not found:
         return None
-    text = found.group(1) + (found.group(2) or "00")
     try:
-        return datetime.datetime.strptime(text, "%Y-%m-%d-%H%M%S").astimezone()
+        if found.group(2):
+            start = datetime.datetime.strptime(found.group(1) + found.group(2), "%Y-%m-%d-%H%M%S")
+            width = datetime.timedelta(seconds=1)
+        else:
+            start = datetime.datetime.strptime(found.group(1), "%Y-%m-%d-%H%M")
+            width = datetime.timedelta(minutes=1)
     except ValueError:
         return None
+    return (start + width).astimezone()
 
 
 def _git(root, *args):
@@ -250,6 +270,11 @@ def file_changed_at(root, files, since):
     return min(found) if found else (None, None)
 
 
+def ambiguous_decisions(root):
+    """記録された判断のうち、同じ ID の案が複数あって、どの案のものか決まらないものの ID。"""
+    return sorted(duplicated(proposals(root)) & set(decisions(root)))
+
+
 def tracking(root, occurrences, data_start, now, exposure=None):
     """採用・見送りした案について、対象の型がその後に何回出たかを数える。
 
@@ -264,6 +289,8 @@ def tracking(root, occurrences, data_start, now, exposure=None):
     ambiguous = duplicated(found)
     by_id = {p["id"]: p for p in found if p["id"] not in ambiguous}
     for entry in sorted(decisions(root).values(), key=lambda e: e["ts"]):
+        if entry["id"] in ambiguous:
+            continue   # 同じ ID の案が複数ある。どの案の判断か決まらないので、追跡しない
         decided = _parse(entry["ts"])
         row = {"id": entry["id"], "title": entry.get("title"), "target": entry.get("target"),
                "decided_at": entry["ts"], "reason": entry.get("reason"),
@@ -272,7 +299,7 @@ def tracking(root, occurrences, data_start, now, exposure=None):
         # 対象のファイルが書かれていない案（以前の版、初期導入の提案など）は、採用の時刻で比べる。
         split, split_label = decided, "採用"
         proposal = by_id.get(entry["id"])
-        made = report_time(proposal["report"]) if proposal else None
+        made = report_time(root, proposal["report"]) if proposal else None
         if entry["decision"] == "adopted" and proposal and proposal["files"] and made:
             row["files"] = proposal["files"]
             applied, basis = file_changed_at(root, proposal["files"], made)

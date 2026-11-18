@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 
-from test_kiroku import Sandbox
+from test_kiroku import Sandbox, aggregate
 from test_portability import installer
 
 
@@ -62,7 +62,8 @@ class DemoFlowTest(Sandbox):
         report = root / '.kiro/kiroku/data/reports/2026-11-14-0200.md'
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text('### P1. 記録の確認\n- 対象の型：`%s`\n\n```kiroku-facts\n%s\n```\n'
-                          % (target, json.dumps(data['report_facts'], ensure_ascii=False)), encoding='utf-8')
+                          % (target, json.dumps(aggregate.as_version(data, 0)['report_facts'], ensure_ascii=False)),
+                          encoding='utf-8')
         self.assertEqual(cli('aggregate.py', '--check-report', str(report)).returncode, 0)
         (report.parent / '2026-11-14-0300.md').write_text('# 次回\n改善案なし\n', encoding='utf-8')
         self.assertEqual(cli('ledger.py', 'adopt', 'P1').returncode, 1)

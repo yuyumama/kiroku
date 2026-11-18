@@ -94,8 +94,11 @@ def summarize(root, since, until):
 
     proposals = ledger.proposals(root)
     known = ledger.decisions(root)
+    ambiguous = ledger.duplicated(proposals)
     by_kind = collections.defaultdict(collections.Counter)
     for proposal in proposals:
+        if proposal["id"] in ambiguous:
+            continue   # 同じ ID の案が複数ある。判断をどの案にも対応づけない（下に件数だけ出す）
         decision = known.get(proposal["id"], {}).get("decision", "undecided")
         target = known.get(proposal["id"], {}).get("target") or proposal["target"] or ""
         by_kind[target.split(":", 1)[0] if ":" in target else "対象の型なし"][decision] += 1
@@ -108,6 +111,10 @@ def summarize(root, since, until):
         lines.append("| %s | %d | %d | %d |" % (kind, counts["adopted"], counts["rejected"], counts["undecided"]))
     if not by_kind:
         lines.append("| （案なし） | 0 | 0 | 0 |")
+    if ambiguous:
+        lines.append("")
+        lines.append("番号が重複した案：%d 件（%d 個の番号）。採用・見送りの数と追跡から外しています。" % (
+            sum(1 for p in proposals if p["id"] in ambiguous), len(ambiguous)))
     lines += ["", "- 採用した案の追跡：%s" % ("、".join("%s %d" % item for item in sorted(verdicts.items())) or "なし"),
               "- 見送った案のうち、その後も発生があるもの：%d 件" % sum(
                   1 for row in data["rejected"] if row["after"])]

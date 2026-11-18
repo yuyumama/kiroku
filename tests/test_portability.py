@@ -83,6 +83,21 @@ class InstallerTest(unittest.TestCase):
 
 
 class UpdateKeepsLauncherTest(unittest.TestCase):
+    def test_update_warns_when_the_inherited_launcher_is_missing(self):
+        """PR #13 のレビュー：引き継いだ起動名が環境から無くなっていると、フックが黙って動かなくなる。"""
+        with tempfile.TemporaryDirectory() as root:
+            installer.install(root, python_command="py -3")
+            found = {"python3": "/usr/bin/python3"}
+            with patch("shutil.which", side_effect=lambda name: found.get(name)):
+                lines = installer.runner_notes(root)
+            text = "\n".join(lines)
+            self.assertIn("'py -3' で起動しますが、この環境では見つかりません", text)
+            self.assertIn("--update --python-command python3", text)
+            self.assertIn("-Update -PythonCommand 'python3'", text)
+            found["py"] = "C:/Windows/py.exe"
+            with patch("shutil.which", side_effect=lambda name: found.get(name)):
+                self.assertEqual(installer.runner_notes(root), [])
+
     def test_update_without_a_launcher_keeps_the_installed_one(self):
         """`python` で導入した先を、起動名を指定せずに更新しても、python3 に変えない。"""
         with tempfile.TemporaryDirectory() as root:
@@ -271,6 +286,9 @@ class PowerShellWrapperTest(unittest.TestCase):
             self.assertIn("sys.version_info >= (3, 9)", text, name)
             self.assertIn("$launcher = if ($explicit) { $PythonCommand } else { Find-KirokuPython }", text, name)
             self.assertIn("CommandNotFoundException", text, name)
+            # PR #13 のレビュー指摘4：明示した起動名にも、同じ起動確認をする。
+            self.assertIn("$problem = Test-KirokuPython $PythonCommand", text, name)
+            self.assertIn("を使えません：$problem", text, name)
             self.assertNotIn("& $runner[0] @arguments", text, name)   # 既定の python で直接起動しない
         install = (root / "install.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("if ($explicit -or -not $Update) {\n    $arguments += @('--python-command', $launcher)", install)

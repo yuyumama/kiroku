@@ -329,6 +329,39 @@ class AppliedTest(ReviewSandbox):
         self.assertEqual(aggregate.parse_time(self.row()["applied_at"]), applied)
         self.assertEqual(aggregate.ledger.report_time(self.root, self.made), minute + datetime.timedelta(minutes=1))
 
+    def test_commit_in_the_same_second_after_the_report_is_the_applied_date(self):
+        """PR #13 の再レビュー指摘2：作った直後の同じ秒のコミットを、反映に数えていなかった。"""
+        self.write(".kiro/hooks/deps.json", "{}")
+        self.commit_at(13, "レポートより前の状態")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(aggregate.new_report(self.root, aggregate.aggregate(self.root)), 0)
+        name = sorted((self.data / "reports").glob("*.md"))[-1].stem
+        made = aggregate.ledger.report_made(self.root, name)
+        self.assertTrue(made["exact"])
+        self.assertRegex(made["head"], r"^[0-9a-f]{40}$")
+        self.report(name, "<!-- kiroku-report:3 -->\n### P1. 依存を入れる\n- 対象の型：`tool:npm run build`\n"
+                          "- 対象のファイル：`.kiro/hooks/deps.json`\n")
+        self.decide(name + "#P1", "adopted", 0, "tool:npm run build")
+        self.write(".kiro/hooks/deps.json", '{"hooks": []}')
+        self.commit_at(datetime.datetime.fromtimestamp(int(made["at"].timestamp()), datetime.timezone.utc),
+                       "作った直後、同じ秒")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == name + "#P1"][0]
+        self.assertIsNotNone(row["applied_at"])
+        self.assertNotIn("判別できない", row["applied_basis"])
+        # HEAD の控えが無ければ、時刻では前後を判別できないと書く。
+        state = json.loads((self.data / "state.json").read_text(encoding="utf-8"))
+        state.pop("report_heads")
+        (self.data / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        row = [r for r in aggregate.aggregate(self.root, since=None)["adopted"] if r["id"] == name + "#P1"][0]
+        self.assertIn("作る前か後かは判別できない", row["applied_basis"])
+
+    def test_commit_exactly_at_the_end_of_the_named_minute_counts_for_old_reports(self):
+        minute = datetime.datetime.strptime(self.made, "%Y-%m-%d-%H%M").astimezone()
+        self.write(".kiro/steering/build.md", "次の分の頭の変更\n")
+        self.commit_at(minute + datetime.timedelta(minutes=1), "次の分の頭")
+        self.assertEqual(aggregate.parse_time(self.row()["applied_at"]),
+                         (minute + datetime.timedelta(minutes=1)).astimezone(datetime.timezone.utc))
+
     def test_new_report_keeps_the_exact_creation_time(self):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(aggregate.new_report(self.root, aggregate.aggregate(self.root)), 0)

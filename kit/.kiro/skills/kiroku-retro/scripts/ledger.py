@@ -194,21 +194,24 @@ def _parse(text):
     return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
-def report_time(root, name):
-    """レポートを作った時刻。反映（対象のファイルの変更）を、この時刻より後のものに限るのに使う。
+def report_made(root, name):
+    """レポートを作った時点。{"at": 時刻, "exact": 正確な時刻か, "head": そのときの HEAD}。読めなければ None。
 
-    骨組みを作ったときに state に控えた正確な時刻を使う。控えが無いレポート（以前の版、手で書いたもの）は、
-    名前（作った機械の時刻帯で、分または秒まで）の区間の終わりを使う。作る前の同じ分の変更を、
-    作った後の変更と取り違えないため（その区間の中で作った後に変えたものは、反映として拾えない）。
-    読めなければ None。
+    骨組みを作ったときに state に控えた正確な時刻と HEAD を使う。控えが無いレポート（以前の版、
+    手で書いたもの）は、名前（作った機械の時刻帯で、分または秒まで）の区間の終わりを使う。
+    作る前の同じ分の変更を、作った後の変更と取り違えないため（その区間の中で作った後に変えたものは拾えない）。
     """
-    made = load_state(data_dir(root)).get("report_made")
+    state = load_state(data_dir(root))
+    made = state.get("report_made")
+    heads = state.get("report_heads")
     stamp = made.get(name) if isinstance(made, dict) else None
+    head = heads.get(name) if isinstance(heads, dict) else None
+    head = head if isinstance(head, str) and re.fullmatch(r"[0-9a-f]{7,64}", head) else None
     if isinstance(stamp, str):
         try:
             moment = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
             if moment.tzinfo:
-                return moment
+                return {"at": moment, "exact": True, "head": head}
         except ValueError:
             pass
     found = REPORT_NAME.search(name or "")
@@ -223,7 +226,13 @@ def report_time(root, name):
             width = datetime.timedelta(minutes=1)
     except ValueError:
         return None
-    return (start + width).astimezone()
+    return {"at": (start + width).astimezone(), "exact": False, "head": None}
+
+
+def report_time(root, name):
+    """レポートを作った時刻（report_made の at）。読めなければ None。"""
+    made = report_made(root, name)
+    return made["at"] if made else None
 
 
 def _git(root, *args):
@@ -235,15 +244,53 @@ def _git(root, *args):
     return done.stdout if done.returncode == 0 else None
 
 
-def file_changed_at(root, files, since):
+def _commits_after(root, relative, name, made):
+    """レポートを作った後に、そのファイルを変えたコミット。[(時刻, 根拠)]。
+
+    作ったときの HEAD が控えてあれば、そこから辿れないコミット（HEAD..）を後のものとする。
+    時刻に頼らないので、作ったのと同じ秒のコミットも前後を取り違えない。
+    控えが無ければ時刻で比べる。正確な時刻があって同じ秒のコミットは、前後を判別できないと書く。
+    名前から決めた時刻（区間の終わり）は、その時刻ちょうどのコミットを含める。
+    """
+    since, found = made["at"], []
+    if made["head"]:
+        out = _git(root, "log", "--format=%ct %h", "%s..HEAD" % made["head"], "--", relative)
+        if out is not None:
+            for line in out.splitlines():
+                stamp, _, short = line.partition(" ")
+                if stamp.isdigit():
+                    moment = datetime.datetime.fromtimestamp(int(stamp), datetime.timezone.utc)
+                    # 書き換えた履歴などでコミットの時刻が古くても、作った時刻より前にはしない
+                    found.append((max(moment, since), "コミット %s（`%s`）" % (short, name)))
+            return found
+    out = _git(root, "log", "--format=%ct %h", "--", relative) or ""
+    for line in out.splitlines():
+        stamp, _, short = line.partition(" ")
+        if not stamp.isdigit():
+            continue
+        second = int(stamp)
+        moment = datetime.datetime.fromtimestamp(second, datetime.timezone.utc)
+        if made["exact"] and second == int(since.timestamp()):
+            found.append((since, "コミット %s（`%s`）。レポートを作ったのと同じ秒のコミットで、作る前か後かは"
+                                 "判別できない" % (short, name)))
+        elif second > since.timestamp() or (not made["exact"] and second >= since.timestamp()):
+            found.append((moment, "コミット %s（`%s`）" % (short, name)))
+    return found
+
+
+def file_changed_at(root, files, made):
     """レポートを作った後に、案の「対象のファイル」が最初に変わった時刻と、その根拠。
 
-    人の申告を待たず、記録から決める。コミットされた変更はコミットの時刻、コミットされていない
-    変更はファイルの更新時刻を使う。ユーザー共通のファイル（~/ で始まるもの）は git に無いので、
-    更新時刻だけを見る。変わっていなければ (None, None)。
+    made は report_made の戻り値（時刻だけを渡したときは、正確な時刻とみなす）。
+    人の申告を待たず、記録から決める。コミットされた変更はコミット（作ったときの HEAD より後か、
+    控えが無ければ時刻）で、コミットされていない変更はファイルの更新時刻で判定する。
+    ユーザー共通のファイル（~/ で始まるもの）は git に無いので、更新時刻だけを見る。
+    変わっていなければ (None, None)。
     ファイルが変わったことは、案どおりに反映したことの証明ではない（ほかの変更でも変わる）。
     """
-    found = []
+    if isinstance(made, datetime.datetime):
+        made = {"at": made, "exact": True, "head": None}
+    since, found = made["at"], []
     inside = _git(root, "rev-parse", "--is-inside-work-tree") is not None
     for name in files:
         if name.startswith("~"):
@@ -252,20 +299,14 @@ def file_changed_at(root, files, since):
             path = name if os.path.isabs(name) else os.path.join(root, name)
             relative = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
             if inside and not relative.startswith(".."):
-                out = _git(root, "log", "--format=%ct %h", "--", relative) or ""
-                for line in out.splitlines():
-                    stamp, _, short = line.partition(" ")
-                    if stamp.isdigit() and int(stamp) > since.timestamp():
-                        moment = datetime.datetime.fromtimestamp(int(stamp), datetime.timezone.utc)
-                        found.append((moment, "コミット %s（`%s`）" % (short, name)))
-                dirty = _git(root, "status", "--porcelain", "--", relative)
-                if not dirty:
-                    continue   # 作業ツリーはコミットと同じ。コミットの時刻だけを使う
+                found += _commits_after(root, relative, name, made)
+                if not _git(root, "status", "--porcelain", "--", relative):
+                    continue   # 作業ツリーはコミットと同じ。コミットだけで判定する
         try:
             moment = datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc)
         except OSError:
             continue
-        if moment > since:
+        if moment > since or (not made["exact"] and moment >= since):
             found.append((moment, "コミットされていない変更（`%s` の更新時刻）" % name))
     return min(found) if found else (None, None)
 
@@ -299,7 +340,7 @@ def tracking(root, occurrences, data_start, now, exposure=None):
         # 対象のファイルが書かれていない案（以前の版、初期導入の提案など）は、採用の時刻で比べる。
         split, split_label = decided, "採用"
         proposal = by_id.get(entry["id"])
-        made = report_time(root, proposal["report"]) if proposal else None
+        made = report_made(root, proposal["report"]) if proposal else None
         if entry["decision"] == "adopted" and proposal and proposal["files"] and made:
             row["files"] = proposal["files"]
             applied, basis = file_changed_at(root, proposal["files"], made)

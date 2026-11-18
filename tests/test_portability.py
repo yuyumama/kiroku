@@ -84,19 +84,29 @@ class InstallerTest(unittest.TestCase):
 
 class UpdateKeepsLauncherTest(unittest.TestCase):
     def test_update_warns_when_the_inherited_launcher_is_missing(self):
-        """PR #13 のレビュー：引き継いだ起動名が環境から無くなっていると、フックが黙って動かなくなる。"""
-        with tempfile.TemporaryDirectory() as root:
-            installer.install(root, python_command="py -3")
-            found = {"python3": "/usr/bin/python3"}
-            with patch("shutil.which", side_effect=lambda name: found.get(name)):
-                lines = installer.runner_notes(root)
-            text = "\n".join(lines)
-            self.assertIn("'py -3' で起動しますが、この環境では見つかりません", text)
-            self.assertIn("--update --python-command python3", text)
-            self.assertIn("-Update -PythonCommand 'python3'", text)
-            found["py"] = "C:/Windows/py.exe"
-            with patch("shutil.which", side_effect=lambda name: found.get(name)):
-                self.assertEqual(installer.runner_notes(root), [])
+        """PR #13 のレビュー：引き継いだ起動名が動かないと、フックが黙って動かなくなる。
+        再レビュー指摘3：代わりに案内する起動名も、実際に起動して確かめる。"""
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as bin_dir:
+            installer.install(root, python_command="python3")
+            # python3 は無く、python は終了コード1で終わる偽物、py は本物の Python を呼ぶ。
+            fake = Path(bin_dir) / "python"
+            fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            launcher = Path(bin_dir) / "py"
+            launcher.write_text('#!/bin/sh\nif [ "$1" = "-3" ]; then shift; fi\nexec "%s" "$@"\n' % sys.executable,
+                                encoding="utf-8")
+            fake.chmod(0o755)
+            launcher.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertFalse(installer.python_works("python"))
+                self.assertTrue(installer.python_works("py -3"))
+                text = "\n".join(installer.runner_notes(root))
+            self.assertIn("'python3' で起動しますが、この環境では Python 3.9 以降として動きません", text)
+            self.assertIn("--update --python-command 'py -3'", text)
+            self.assertNotIn("--python-command 'python'", text)
+            launcher.unlink()
+            with patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertIn("どれも Python 3.9 以降として動きませんでした", "\n".join(installer.runner_notes(root)))
+            self.assertEqual(installer.runner_notes(root), [])   # 本物の python3 がある環境では何も出さない
 
     def test_update_without_a_launcher_keeps_the_installed_one(self):
         """`python` で導入した先を、起動名を指定せずに更新しても、python3 に変えない。"""

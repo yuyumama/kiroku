@@ -187,6 +187,17 @@ def note_state(path, moments, ranges):
     return "uncovered"
 
 
+def legacy_note_state(path, latest):
+    """版2までの既読の判定。ノートがあり、ノートを書いた後に発話が無ければ fresh。
+
+    以前の版で作ったレポートを検査するとき、その版が数えた未読の数を再現するために使う。
+    振り返りで読むセッションの判定には使わない（note_state を使う）。
+    """
+    if not os.path.isfile(path):
+        return "none"
+    return "stale" if latest and latest.timestamp() > os.path.getmtime(path) else "fresh"
+
+
 def retro_marks(root):
     """記録フックが残した、振り返りの開始時刻。{session_id: 時刻}。"""
     marks = load_state(os.path.join(root, ".kiro", "kiroku", "data")).get("retro_sessions")
@@ -323,8 +334,9 @@ def sessions(root, events, since=None, until=None):
         if not recorded and not row["prompts"]:
             continue  # ログだけのセッションは、期間内に発話があるものだけを載せる
         # ノートを書いた後に発話が増えた、または要約表示で見せていない発話があれば、読み直しが要る。
-        row["note"] = note_state(os.path.join(notes_dir(root), session + ".json"), moments,
-                                 shown.get(session, []))
+        note_path = os.path.join(notes_dir(root), session + ".json")
+        row["note"] = note_state(note_path, moments, shown.get(session, []))
+        row["note_v2"] = legacy_note_state(note_path, latest)   # 以前の版のレポートの検査に使う
         activity = [m for m in (excerpt.parse_time(row["last_event"]) if recorded else None, latest) if m]
         row["_activity"] = max(activity) if activity else None
         row["last_activity"] = row["_activity"].isoformat() if row["_activity"] else None

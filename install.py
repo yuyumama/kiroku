@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 
 
 def default_config():
@@ -58,22 +59,39 @@ def installed_python_command(target):
     return found.pop() if len(found) == 1 else None
 
 
+def python_works(command):
+    """起動名が Python 3.9 以降として動くか。実行ファイルがあるだけでは、動くとみなさない。"""
+    parts = command.split(" ")
+    if not shutil.which(parts[0]):
+        return False
+    try:
+        done = subprocess.run(parts + ["-c", "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)"],
+                              capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def runner_notes(target):
-    """導入済みのフックの起動名が、この環境で見つからないときの注意。見つかれば空。
+    """導入済みのフックの起動名が、この環境で動かないときの注意。動けば空。
 
     指定の無い更新は起動名を引き継ぐ。その起動名が環境から無くなっていると、フックが動かず、
-    記録が黙って止まる。フックは Kiro の環境で動くので、ここで見つからなくても動く場合がある。
+    記録が黙って止まる。フックは Kiro の環境で動くので、ここで動かなくても動く場合がある。
+    代わりに案内する起動名も、実際に起動して確かめたものだけにする。
     """
     command = installed_python_command(target)
-    if command is None or shutil.which(command.split(" ")[0]):
+    if command is None or python_works(command):
         return []
-    others = [name for name in PYTHON_COMMANDS if name != command and shutil.which(name.split(" ")[0])]
-    lines = ["注意：導入済みのフックは Python を '%s' で起動しますが、この環境では見つかりません。" % command,
-             "  Kiro の環境でも見つからなければ、フックが動かず、記録が止まります。"]
+    others = [name for name in PYTHON_COMMANDS if name != command and python_works(name)]
+    lines = ["注意：導入済みのフックは Python を '%s' で起動しますが、この環境では Python 3.9 以降として動きません。"
+             % command,
+             "  Kiro の環境でも動かなければ、フックが動かず、記録が止まります。"]
     if others:
-        lines += ["  動く起動名を指定して、もう一度更新してください。例：",
-                  "    sh install.sh <導入先> --update --python-command %s" % others[0],
+        lines += ["  動くことを確かめた起動名を指定して、もう一度更新してください。例：",
+                  "    sh install.sh <導入先> --update --python-command '%s'" % others[0],
                   "    install.ps1 -Target <導入先> -Update -PythonCommand '%s'" % others[0]]
+    else:
+        lines.append("  この環境では、python3、python、py -3 のどれも Python 3.9 以降として動きませんでした。")
     return lines
 
 

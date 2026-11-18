@@ -1075,13 +1075,18 @@ def report_names(moment):
 def as_version(data, version):
     """集約を、以前の版のレポートが作られたときの形にそろえる。検証値と骨組みの再現に使う。
 
-    目印の無いレポート（0）と版1・版2のときは、版3で足した所在（サブディレクトリを含む AGENTS.md）を除く。
+    目印の無いレポート（0）と版1・版2のときは、次の2つを、その版のときの形に戻す。
+      - 版3で足した所在（サブディレクトリを含む AGENTS.md）を除く。
+      - 未読の数を、版2までの既読の判定（ノートを書いた後に発話が無ければ既読）で数え直す。
     更新しただけで、以前に検査を通ったレポートが不一致にならないようにするため。
+    振り返りで読むセッションは、これまでどおり今の判定で決める（この関数は検査だけに使う）。
     """
     if version >= skeleton.VERSION:
         return data
     harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
-    shaped = dict(data, harness=harness_rows)
+    sessions = [dict(row, note=row.get("note_v2", row["note"])) for row in data["sessions"]]
+    plan = reading_plan([dict(row) for row in sessions], data["reading_plan"]["budget"])
+    shaped = dict(data, harness=harness_rows, sessions=sessions, reading_plan=plan)
     shaped["report_facts"] = reportcheck.facts(shaped)
     return shaped
 
@@ -1138,6 +1143,14 @@ def new_report(root, data):
         made_at = state.get("report_made") if isinstance(state.get("report_made"), dict) else {}
         made_at[chosen] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         state["report_made"] = made_at
+        # そのときの HEAD。反映の判定で、同じ秒のコミットの前後を時刻に頼らず決めるのに使う。
+        head = Repo(root).git("rev-parse", "--verify", "--quiet", "HEAD")
+        heads = state.get("report_heads") if isinstance(state.get("report_heads"), dict) else {}
+        if head and head.strip():
+            heads[chosen] = head.strip()
+        else:
+            heads.pop(chosen, None)
+        state["report_heads"] = heads
         if session:
             made[chosen] = session
             state["report_sessions"] = made

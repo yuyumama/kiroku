@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from test_kiroku import KIT, aggregate
@@ -282,6 +283,10 @@ class SkeletonTest(ReviewSandbox):
         if scripts is None:
             self.skipTest("以前の版（%s）が git の履歴にありません" % OLD_VERSION)
         self.write("app/AGENTS.md", "app の決まり\n")
+        # 以前の版が書いたノート（要約表示で見せた期間の控えが無い）。PR #13 の再レビュー指摘1。
+        self.note("sess_live", [], shown=False)
+        future = time.time() + 3600
+        os.utime(self.data / "notes" / "sess_live.json", (future, future))
         old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
         self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
         path = sorted((self.data / "reports").glob("*.md"))[-1]
@@ -291,8 +296,11 @@ class SkeletonTest(ReviewSandbox):
         path.write_text(filled, encoding="utf-8")
         before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
         self.assertEqual(before.returncode, 0, before.stdout)
+        self.assertIn("- 未読のセッション：0 件", filled)
         after = self.cli("--check-report", str(path))
         self.assertEqual(after.returncode, 0, after.stdout)
+        # 振り返りで読むセッションは、今の判定で決める（以前の版のノートは読み直す）。
+        self.assertEqual(aggregate.aggregate(self.root)["reading_plan"]["read"], ["sess_live"])
         self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
 
     def test_reports_without_the_mark_are_checked_by_the_previous_rules(self):

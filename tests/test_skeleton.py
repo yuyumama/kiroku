@@ -19,6 +19,9 @@ skeleton = aggregate.skeleton
 AGGREGATE = os.path.join(KIT, "aggregate.py")
 LEDGER = os.path.join(KIT, "ledger.py")
 OLD_REPORT = "### P1. 以前の案\n- 対象の型：`tool:make test`\n"
+PROPOSAL = ("### P1. テストの実行方法を直す\n\n- 対象の型：`tool:make test`\n"
+            "- 対象のファイル：`.kiro/steering/testing.md`\n"
+            "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n- 変更の内容：…")
 
 
 class SkeletonTest(ReviewSandbox):
@@ -49,9 +52,17 @@ class SkeletonTest(ReviewSandbox):
     def fill(self, text, state="確認済み"):
         """欄を、それらしい内容で埋める（エージェントの書き込みの代わり）。"""
         text = text.replace(skeleton.slot("確認済み／未確認"), state)
-        text = text.replace(skeleton.slot("案ごとに `### P1. …` の見出しで書く。無ければ「なし」"),
-                            "### P1. テストの実行方法を直す\n\n- 対象の型：`tool:make test`\n- 変更の内容：…")
-        return skeleton.SLOT.sub("なし", text)
+        return skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+
+    def propose(self, text, proposal):
+        marker = "## ハーネスへの改善案（プロジェクト内）\n\n"
+        start = text.index(marker) + len(marker)
+        return text[:start] + proposal + text[text.index("\n", start):]
+
+    def observe(self, text, body):
+        marker = "## 観測した型・継続方針\n\n"
+        start = text.index(marker) + len(marker)
+        return text[:start] + body + text[text.index("\n", start):]
 
     def check(self, path, text):
         path.write_text(text, encoding="utf-8")
@@ -140,3 +151,206 @@ class SkeletonTest(ReviewSandbox):
         second = aggregate.aggregate(self.root, until=None)
         self.assertEqual(skeleton.build(self.root, first), skeleton.build(self.root, second))
         self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
+
+
+class CitationTest(SkeletonTest):
+    """主張に付けた引用の実在を確かめる。引用の解釈が正しいかどうかは判定しない。"""
+
+    def setUp(self):
+        super().setUp()
+        directory = self.home / "sessions" / "0123456789abcdef" / "sess_talk"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": "sess_talk", "workspacePaths": [self.root]}), encoding="utf-8")
+        rows = [("user", "医療カテゴリを追加してください"),
+                ("assistant", "テストは12件すべて成功しました。変更点は models.py と cli.py です。"),
+                ("user", "完了報告は結論から短く書いてください")]
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, (kind, content) in enumerate(rows):
+                handle.write(json.dumps({"id": str(index), "timestamp": "2026-11-16T0%d:00:00Z" % index,
+                                         "payload": {"type": kind, "content": content}}, ensure_ascii=False) + "\n")
+        self.note("sess_talk", [{"kind": "standing_policy", "topic": "完了報告の書き方", "summary": "結論から",
+                                 "quote": "完了報告は結論から短く書いてください", "index": 2, "context": "未確認"}])
+
+    TYPE = ("### 1. 完了報告の順序\n\n- 対象の型：`topic:完了報告の書き方`\n"
+            "- 引用（利用者）：session `sess_talk` index 2「完了報告は結論から短く書いてください」\n%s"
+            "- 原因の見立て：%s\n- 対応する既存の決まり：%s\n")
+
+    def result(self, type_body, proposal=PROPOSAL):
+        for stale in (self.data / "reports").glob("*.md"):   # 1つのテストの中で、骨組みから書き直す
+            stale.unlink()
+        path, text = self.new_report()
+        body = skeleton.SLOT.sub("なし", self.observe(self.propose(text, proposal), type_body))
+        done = self.check(path, body)
+        return done.returncode, done.stdout
+
+    def test_real_quotes_from_user_reply_and_file_pass(self):
+        code, out = self.result(self.TYPE % (
+            "- 引用（応答）：session `sess_talk` index 1「テストは12件すべて成功しました。」\n"
+            "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する」\n",
+            "応答は結論を先に書いていた。指摘は今後の方針の明示", "`.kiro/steering/testing.md`"))
+        self.assertEqual(code, 0, out)
+
+    def test_a_reply_that_was_never_said_fails(self):
+        """実機で出た誤り：応答の順序を、実際と逆に説明した。引用を作っても、照合で落ちる。"""
+        code, out = self.result(self.TYPE % (
+            "- 引用（応答）：session `sess_talk` index 1「変更点は models.py です。テストは成功しました。」\n",
+            "応答が変更点を先に書いていた", "なし"))
+        self.assertEqual(code, 1)
+        self.assertIn("照合できない引用", out)
+        self.assertIn("応答の発話に、この引用が無い", out)
+
+    def test_text_that_is_not_in_the_file_fails(self):
+        """実機で出た誤り：ファイルに無い記述を、あるかのように書いた。"""
+        proposal = PROPOSAL.replace("「テストは make test で実行する。」", "「5. git commit する」")
+        code, out = self.result("なし", proposal)
+        self.assertEqual(code, 1)
+        self.assertIn("に、この引用が無い", out)
+
+    def test_cause_without_reply_or_file_quote_fails_but_unconfirmed_passes(self):
+        stated = self.TYPE % ("", "応答が変更点を先に書いていた", "なし")
+        code, out = self.result(stated)
+        self.assertEqual(code, 1)
+        self.assertIn("原因の見立てに、応答またはファイルの引用がありません", out)
+        self.assertEqual(self.result(self.TYPE % ("", "未確認", "なし"))[0], 0)
+        self.assertEqual(self.result(self.TYPE % ("", "該当なし（方針の明示）", "なし"))[0], 0)
+
+    def test_naming_an_existing_file_requires_a_quote_from_it(self):
+        code, out = self.result(self.TYPE % ("", "未確認", "`.kiro/steering/testing.md` の冒頭"))
+        self.assertEqual(code, 1)
+        self.assertIn("そのファイルからの引用", out)
+        without = PROPOSAL.replace("- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n", "")
+        self.assertEqual(self.result("なし", without)[0], 1)
+        new_file = without.replace("`.kiro/steering/testing.md`", "`.kiro/steering/report.md`（新規）")
+        self.assertEqual(self.result("なし", new_file)[0], 0)
+
+    def test_conversation_type_needs_a_user_quote_and_wrong_role_fails(self):
+        body = self.TYPE % ("", "未確認", "なし")
+        missing = body.replace("- 引用（利用者）：session `sess_talk` index 2「完了報告は結論から短く書いてください」\n", "")
+        code, out = self.result(missing)
+        self.assertEqual(code, 1)
+        self.assertIn("利用者の発話の引用", out)
+        # 利用者の発話を、応答として引用しても通らない。
+        swapped = body.replace("引用（利用者）", "引用（応答）")
+        self.assertEqual(self.result(swapped)[0], 1)
+
+    def test_quotes_outside_the_repository_and_missing_logs_are_not_accepted(self):
+        outside = PROPOSAL.replace("`.kiro/steering/testing.md`「テストは make test で実行する。」",
+                                   "`/etc/hostname`「localhost」")
+        code, out = self.result("なし", outside)
+        self.assertEqual(code, 1)
+        self.assertIn("リポジトリと ~/.kiro の外", out)
+        gone = self.TYPE % ("", "未確認", "なし")
+        code, out = self.result(gone.replace("sess_talk", "sess_missing"))
+        self.assertEqual(code, 1)
+        self.assertIn("ログを読めない", out)
+
+    def test_first_format_reports_are_not_held_to_the_citation_rules(self):
+        path, text = self.new_report()
+        old = self.fill(text).replace(skeleton.MARK, "<!-- kiroku-report:1 -->").replace(
+            "- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」\n", "")
+        self.assertEqual(self.check(path, old).returncode, 0)
+
+
+
+class ReadRecordTest(SkeletonTest):
+    """表の「確認済み」を、振り返り自身のセッションログの読み取りと照合する。
+
+    ログの形は Kiro CLI 3.3.0 で実測したもの。ここでは模している。
+    """
+    RETRO = "sess_retro"
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.environ.pop, "KIRO_SESSION_ID", None)
+        os.environ["KIRO_SESSION_ID"] = self.RETRO
+        self.write("AGENTS.md", "共通の決まり\n")
+
+    def retro_log(self, rows):
+        directory = self.home / "sessions" / "0123456789abcdef" / self.RETRO
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": self.RETRO, "workspacePaths": [self.root], "agentMode": "kiroku-retro"}), encoding="utf-8")
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, payload in enumerate(rows):
+                handle.write(json.dumps({"id": str(index), "timestamp": "2026-11-17T00:00:%02dZ" % index,
+                                         "payload": payload}, ensure_ascii=False) + "\n")
+
+    def call(self, call_id, name, args, success=True, meta=None):
+        return [{"type": "tool_call", "toolCallId": call_id, "toolName": name, "status": "approved",
+                 "args": args, "_meta": meta or {}},
+                {"type": "tool_result", "toolCallId": call_id, "success": success, "content": "…"}]
+
+    def read(self, call_id, relative, success=True):
+        return self.call(call_id, "read_file", {"path": os.path.join(self.root, relative),
+                                                "offset": None, "limit": None}, success)
+
+    def made(self):
+        return self.call("new", "execute_bash", {"command": "python3 .kiro/skills/kiroku-retro/scripts/"
+                                                              "aggregate.py --since 7d --new-report --require-agent"})
+
+    def confirm(self, text, *names):
+        for name in names:
+            text = text.replace("| `%s` | あり | %s |" % (name, skeleton.slot("確認済み／未確認")),
+                                "| `%s` | あり | 確認済み |" % name)
+        return text
+
+    def checked(self, rows, *names):
+        self.retro_log(rows)
+        for stale in (self.data / "reports").glob("*.md"):
+            stale.unlink()
+        path, text = self.new_report()
+        self.assertIn("<!-- kiroku-session:%s -->" % self.RETRO, text)
+        body = self.fill(self.confirm(text, *names), state="未確認").replace(
+            "- 読めなかった範囲（未確認）：なし", "- 読めなかった範囲（未確認）：表のとおり")
+        done = self.check(path, body)
+        return done.returncode, done.stdout
+
+    def test_files_read_in_this_retro_can_be_confirmed(self):
+        rows = self.made() + self.read("r1", ".kiro/steering/testing.md")
+        code, out = self.checked(rows, ".kiro/steering/testing.md")
+        self.assertEqual(code, 0, out)
+
+    def test_confirmed_without_a_read_fails(self):
+        code, out = self.checked(self.made(), ".kiro/steering/testing.md")
+        self.assertEqual(code, 1)
+        self.assertIn("本文を開いた記録がありません", out)
+
+    def test_failed_reads_listings_and_searches_are_not_reads(self):
+        rows = self.made() + self.read("r1", ".kiro/steering/testing.md", success=False)
+        rows += self.call("l1", "list_directory", {"path": os.path.join(self.root, ".kiro/steering")})
+        rows += self.call("g1", "grep_search", {"query": "make test", "includePattern": ".kiro/steering/testing.md"})
+        code, out = self.checked(rows, ".kiro/steering/testing.md")
+        self.assertEqual(code, 1, out)
+
+    def test_skill_loading_and_automatic_context_count_as_reads(self):
+        skill = Path(self.root, ".kiro/skills/add-category/SKILL.md").as_uri()
+        rows = self.made() + self.call("s1", "load_resource", {"id": "skill::add-category"},
+                                       meta={"kiro": {"disclosedContext": {"uri": skill}}})
+        rows.append({"type": "steering_inclusion",
+                     "documents": [Path(self.root, ".kiro/steering/testing.md").as_uri()]})
+        code, out = self.checked(rows, ".kiro/skills/add-category/SKILL.md", ".kiro/steering/testing.md")
+        self.assertEqual(code, 0, out)
+
+    def test_cannot_check_is_reported_but_not_a_failure(self):
+        """ログがまだ今の実行まで届いていない、読めない場合は、照合できないと知らせるだけにする。"""
+        code, out = self.checked(self.read("r1", ".kiro/steering/release.md"), ".kiro/steering/testing.md")
+        self.assertEqual(code, 0, out)
+        self.assertIn("照合はできませんでした", out)
+        os.environ["KIRO_SESSION_ID"] = "sess_nolog"
+        for stale in (self.data / "reports").glob("*.md"):
+            stale.unlink()
+        path, text = self.new_report()
+        done = self.check(path, self.fill(self.confirm(text, ".kiro/steering/testing.md"), state="未確認").replace(
+            "- 読めなかった範囲（未確認）：なし", "- 読めなかった範囲（未確認）：表のとおり"))
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("ログを読めません", done.stdout)
+
+    def test_session_line_cannot_be_changed_to_another_session(self):
+        rows = self.made() + self.read("r1", ".kiro/steering/testing.md")
+        self.retro_log(rows)
+        path, text = self.new_report()
+        body = self.fill(text).replace(self.RETRO, "sess_other")
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("書き換えられています", done.stdout)

@@ -705,14 +705,18 @@ class ShellLogTest(ReviewSandbox):
         self.rows([{"type": "user", "content": "ビルドを直して"}]
                   + call(1, "npm run build 2>&1 | tail -20", 1) + call(2, "npm run build", 2)
                   + call(3, "pytest -q", 1) + call(4, "pytest -q", 0) + call(5, "echo pytest", 0)
+                  + call(6, "cd backend && pytest -q 2>&1 | tail -20", 0)
                   + [{"type": "assistant", "content": "直しました"}], minutes_after=-1)
         view = aggregate.prompts.distill(self.root, self.session)
         turn = view["turns"][0]
         self.assertEqual(turn["failed_commands"], {"npm run build": 2})
-        self.assertEqual([t["exit_code"] for t in turn["tests"]], [1, 0, 0])
+        self.assertEqual([(t["exit_code"], t["matched"]) for t in turn["tests"]],
+                         [(1, "invocation"), (0, "invocation"), (0, "text"), (0, "pipe")])
         text = aggregate.render_session(view)
         self.assertIn("- 終了コードが 0 以外のシェル実行：`npm run build`×2", text)
-        self.assertIn("- テストの記録設定に一致したシェル実行：3 回（終了コード 1→0→0）。"
+        # パイプを付けた実行は、言及ではなく実行。ただし終了コードはパイプの後ろのもの（#18 の後の指摘）
+        self.assertIn("- テストの記録設定に一致したシェル実行：4 回（終了コード 1→0→0→0）。"
+                      "うちパイプの後ろの終了コード 1 回（テストの成否ではない。集約の結果は JUnit から取る）。"
                       "うち文面だけで一致 1 回（実行か言及かは未確認）", text)
 
     def test_test_calls_that_did_not_run_are_not_counted(self):

@@ -500,6 +500,20 @@ def shell_calls(root, session_ids, since=None):
     return found
 
 
+def _piped_runner(command, config):
+    """パイプや連結の手前のコマンドが、テストの記録設定の起動先に一致するか。"""
+    head = commands.invocation(command, through_pipes=True)
+    if not head:
+        return False
+    for entry in config.get("tests") or []:
+        try:
+            if isinstance(entry, dict) and re.search(entry.get("match", "(?!)"), head):
+                return True
+        except re.error:
+            continue
+    return False
+
+
 def _clip(text, limit):
     """長い文を、頭と末尾を残して切る。"""
     if len(text) <= limit:
@@ -575,6 +589,8 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
                 if entry is not None and code == -1:
                     turn["tests_not_run"] += 1   # 承認されない、止められた、など。実行には数えない
                 elif entry is not None:
+                    if how == "text" and _piped_runner(command, config):
+                        how = "pipe"   # パイプの手前が起動先。終了コードはパイプの後ろのもの
                     turn["tests"].append({"exit_code": code, "matched": how})
                 elif code not in (0, -1):
                     turn["failed_commands"][commands.key(mask(command))] += 1

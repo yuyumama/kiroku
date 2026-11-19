@@ -55,7 +55,61 @@ class DiagnoseTest(ReviewSandbox):
         found = self.keys()
         self.assertFalse([k for k in found if "make test" in k or "npm" in k])
         reasons = {r["key"]: r["reason"] for r in self.found()["broken"]}
-        self.assertEqual(reasons["D2:.kiro/steering/testing.md:scripts/release.sh"], "参照先が無い")
+        self.assertEqual(reasons["D2:.kiro/steering/testing.md:scripts/release.sh"],
+                         "参照先が無い（探した場所：ルート、`.kiro/steering/`、リポジトリ内で末尾が一致するパス）")
+
+    def test_monorepo_scripts_and_targets_in_subdirectories_are_found(self):
+        """モノレポ：ルートの package.json や Makefile に無くても、サブディレクトリにあれば参照切れにしない。"""
+        self.write("package.json", json.dumps({"scripts": {"lint": "npm -w frontend run lint"}}))
+        self.write("frontend/package.json", json.dumps({"scripts": {"lint": "eslint .", "typecheck": "tsc -b"}}))
+        self.write("infra/package.json", json.dumps({"scripts": {"typecheck": "tsc"}}))
+        self.write("backend/Makefile", "check:\n\truff check .\n")
+        self.write(".kiro/steering/dev.md", "\n".join([
+            "- `frontend/` の中で `npm run typecheck` を実行します。", "- `npm run lint` と `npm test`。",
+            "- `make check` と `make deploy`。", "- `npm run release`。"]) + "\n")
+        reasons = {r["ref"]: r["reason"] for r in self.found()["broken"]}
+        self.assertNotIn("npm run typecheck", reasons)
+        self.assertNotIn("npm run lint", reasons)
+        self.assertNotIn("make check", reasons)
+        # どこにも無いものは、探した数と一緒に出す
+        self.assertEqual(reasons["npm test"], "どの package.json（3 個）にも script `test` が無い")
+        self.assertEqual(reasons["npm run release"], "どの package.json（3 個）にも script `release` が無い")
+        self.assertEqual(reasons["make deploy"], "backend/Makefile に target `deploy` が無い")
+        # ルートだけのときは、これまでどおりの文面
+        os.remove(os.path.join(self.root, "frontend/package.json"))
+        os.remove(os.path.join(self.root, "infra/package.json"))
+        reasons = {r["ref"]: r["reason"] for r in self.found()["broken"]}
+        self.assertEqual(reasons["npm run typecheck"], "package.json に script `typecheck` が無い")
+
+    def test_relative_and_bare_names_are_searched_in_the_repository(self):
+        """書いたファイルのディレクトリからの相対パスと、ファイル名だけの参照（別の場所にある実体）。"""
+        self.write(".kiro/steering/a.md", "`b.md` と `missing-rule.md` を読む。\n")
+        self.write(".kiro/steering/b.md", "# b\n")
+        self.write(".kiro/skills/dev/SKILL.md", "`a.md` を読み、`pyproject.toml`、`uv.lock`、`vitest.config.ts`、"
+                                                 "`deploy.mjs`、`src/main.ts`、`frontend/src` を見る。\n")
+        for name in ("backend/pyproject.toml", "backend/uv.lock", "frontend/vitest.config.ts",
+                     "scripts/deploy.mjs", "frontend/src/main.ts"):
+            self.write(name, "")
+        found = self.found()["broken"]
+        refs = {(r["path"], r["ref"]) for r in found}
+        self.assertEqual(refs, {(".kiro/steering/a.md", "missing-rule.md")})
+        self.assertEqual(found[0]["reason"],
+                         "参照先が無い（探した場所：ルート、`.kiro/steering/`、リポジトリ内の同じ名前のファイル）")
+
+    def test_words_joined_by_slash_are_not_paths(self):
+        """/ で区切った語や日本語の文はパスとみなさない。拡張子のあるもの、実在するディレクトリの下は確かめる。"""
+        self.write("frontend/package.json", "{}")
+        self.write("docs/設計.md", "")
+        self.write(".kiro/steering/words.md", "\n".join([
+            "- `owner/repo`、`is/has/can/should`、`Given/When/Then`、`deletion/modification`",
+            "- `登録/削除時に自動で`、`input/output`",
+            "- `frontend/src`、`docs/missing.md`、`.aidlc-rule-details/rules.md`、`docs/設計.md`、`docs/手順.md`",
+            "- `tools/`"]) + "\n")
+        refs = {r["ref"] for r in self.found()["broken"]}
+        self.assertEqual(refs, {"frontend/src", "docs/missing.md", ".aidlc-rule-details/rules.md", "docs/手順.md",
+                                "tools/"})
+        self.assertEqual({r["reason"] for r in self.found()["broken"] if r["ref"] == "frontend/src"},
+                         {"参照先が無い（探した場所：ルート、`.kiro/steering/`、リポジトリ内で末尾が一致するパス）"})
 
     def test_hooks_agents_and_skills_are_checked_but_kiroku_itself_is_not(self):
         self.write(".kiro/hooks/project.json", json.dumps({"hooks": [
@@ -107,6 +161,17 @@ class DiagnoseTest(ReviewSandbox):
         self.assertEqual(sense["ci"], [".github/workflows/ci.yml"])
         self.assertTrue(sense["ci_runs_tests"])   # テストの記録設定の match（pytest）に一致する行がある
         self.assertEqual(sense["lint"], ["pyproject.toml"])
+
+    def test_lint_configs_in_subdirectories_are_listed(self):
+        """モノレポ：サブディレクトリの lint・型検査の設定も数える。"""
+        self.write("frontend/tsconfig.json", "{}")
+        self.write("frontend/eslint.config.js", "export default []\n")
+        self.write("backend/pyproject.toml", "[tool.mypy]\n")
+        self.write("infra/pyproject.toml", "[project]\nname = 'x'\n")
+        self.write("docs/ruff.toml.md", "")
+        sense = self.found()["sensors"]
+        self.assertEqual(sense["lint"], ["backend/pyproject.toml", "frontend/eslint.config.js",
+                                         "frontend/tsconfig.json"])
 
     def test_aggregate_shows_diagnostics_burden_and_puts_keys_in_the_facts(self):
         self.write(".kiro/steering/testing.md", "- `make test` で実行する。\n")

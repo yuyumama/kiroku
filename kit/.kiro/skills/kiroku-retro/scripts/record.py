@@ -297,6 +297,18 @@ def load_state(retro_dir):
         return {}
 
 
+def recording_start(retro_dir):
+    """reset.py が控えた「記録の始まり」の時刻（UTC）。無ければ None。"""
+    value = load_state(retro_dir).get("recording_start")
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=datetime.timezone.utc)
+
+
 def save_state(retro_dir, state):
     os.makedirs(retro_dir, exist_ok=True)
     path = os.path.join(retro_dir, "state.json")

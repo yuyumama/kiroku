@@ -98,9 +98,13 @@ def key(command):
     return ' '.join((command or '').split()[:3])[:60]
 
 
-def invocation(command):
-    """テスト検出に使う起動先。echo や検索の引数をランナーと誤認しない。"""
-    parsed = parse(command)
+def invocation(command, through_pipes=False):
+    """テスト検出に使う起動先。echo や検索の引数をランナーと誤認しない。
+
+    through_pipes は、パイプや連結の手前のコマンドを起動先とみなす（`pytest | tail -20` は pytest）。
+    要約表示だけで使う。記録の照合（test_match）は、これまでどおり使わない。
+    """
+    parsed = parse(command) or (first_command(command) if through_pipes else None)
     if not parsed:
         return None
     argv = parsed['argv']

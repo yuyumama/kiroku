@@ -1224,8 +1224,11 @@ def render_session(view):
                          "承認されなかった、止められた、など）：%d 回。実行には数えない" % turn["tests_not_run"])
         if tests:
             text_only = sum(1 for t in tests if t["matched"] == "text")
-            lines.append("- テストの記録設定に一致したシェル実行：%d 回（終了コード %s%s）%s" % (
+            piped = sum(1 for t in tests if t["matched"] == "pipe")
+            lines.append("- テストの記録設定に一致したシェル実行：%d 回（終了コード %s%s）%s%s" % (
                 len(tests), "…→" if len(tests) > 5 else "", "→".join(str(t["exit_code"]) for t in tests[-5:]),
+                "。うちパイプの後ろの終了コード %d 回（テストの成否ではない。集約の結果は JUnit から取る）" % piped
+                if piped else "",
                 "。うち文面だけで一致 %d 回（実行か言及かは未確認）" % text_only if text_only else ""))
         if turn["reply"]:
             lines.append("- 応答（index=%d、%d 文字）：%s" % (

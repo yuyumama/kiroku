@@ -12,8 +12,9 @@
 
 テスト失敗の分類（記録時ではなく、ここで計算する）:
   Red 候補    前回の全テスト成功より後に追加されたテスト、
-              または前回の全テスト成功以降にテストファイルが変更されたテストの失敗
-  回帰        前回の全テスト成功の時点で存在し、通っていて、テストファイルが変わっていないテストの失敗
+              またはそのテストが最後に通った後にテストファイルが変更されたテストの失敗
+  回帰        前回の全テスト成功の時点で存在し、通った記録があり、そのテストが最後に通った後に
+              テストファイルが変わっていない（または、どのファイルか特定できない）テストの失敗
   マージ中    回帰と同じ条件で、merge や rebase の最中（コンフリクトの解消中など）に起きた失敗
   その他      基準になる全テスト成功が無い、通った記録が無い、git から状態を復元できない、など
 
@@ -27,8 +28,9 @@
 書き直し候補:
   発話タイミングをまたぐファイルの書き直し。本文は保存せず時刻でログと照合する。
 
-人間の手直し候補:
-  エージェントが最後に書いた内容と、いまの内容が違うファイル。
+手直し候補:
+  エージェントが書き込みツールで最後に書いた内容と、いまの内容が違うファイル。誰が変えたかは証明しない
+  （エージェントがシェルで書き換えた場合も入る。その後のシェル実行にファイルの名前が出れば、手がかりに添える）。
   merge、pull、rebase、checkout、reset などによる変更は除く。
 """
 import argparse
@@ -91,6 +93,7 @@ class Repo:
         self.root = root
         self._blob = {}
         self._diff = {}
+        self._tree = {}
         self._moves = None
 
     def git(self, *args, stdin=None):
@@ -118,6 +121,13 @@ class Repo:
             out = self.git("diff", "--name-only", "-z", old, new)
             self._diff[key] = None if out is None else {p for p in out.split("\0") if p}
         return self._diff[key]
+
+    def tree(self, commit):
+        """あるコミットのファイルの一覧。復元できなければ空。"""
+        if commit not in self._tree:
+            out = self.git("ls-tree", "-r", "--name-only", "-z", commit) if commit else None
+            self._tree[commit] = frozenset(p for p in (out or "").split("\0") if p)
+        return self._tree[commit]
 
     def current_hashes(self, paths):
         existing = [p for p in paths if os.path.isfile(os.path.join(self.root, p))]
@@ -232,21 +242,81 @@ def changed_between(repo, base, run):
     return {p for p in candidates if file_state(repo, base, p) != file_state(repo, run, p)}
 
 
-def test_file_changed(test_id, known_file, changed):
-    """テストのファイルが変更一覧に含まれるか。分からなければ None。"""
-    if known_file:
-        return known_file in changed
+# テストのファイルらしい拡張子。classname がこれで終わるときは、パスとして読む（vitest は classname がパス）。
+SOURCE_SUFFIX = re.compile(r"\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kts?|php|cs|swift|vue|svelte|exs?|scala|dart)$", re.I)
+
+
+class FileIndex:
+    """ある時点のリポジトリのファイルを、最後の名前で引けるようにしたもの。"""
+
+    def __init__(self, files):
+        self.by_name, self.by_stem = {}, {}
+        for path in files:
+            self.by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+            stem = os.path.splitext(path)[0]
+            self.by_stem.setdefault(stem.rsplit("/", 1)[-1], []).append((stem, path))
+
+
+def files_at(repo, run):
+    """その実行の時点でリポジトリにあったファイル（コミットの内容に、作業ツリーの変更を重ねたもの）。"""
+    files = set(repo.tree(run.get("head")))
+    for path, value in (run.get("dirty") or {}).items():
+        if value:
+            files.add(path)
+        else:
+            files.discard(path)
+    return FileIndex(files)
+
+
+def test_file_candidates(test_id, known_file, index):
+    """テストID から、そのテストが書かれたファイルの候補。分からなければ空の集合。
+
+    JUnit の形はランナーごとに違う（docs/retro/judgment-review.md）。
+      - file 属性（pytest の xunit1、kiroku のデモ）：パス。テストを実行した場所からの相対のこともある。
+      - classname がパス（vitest の既定）：vitest の root からの相対パス。
+      - classname がモジュール名（pytest の既定、Java）：tests.test_a、com.example.LoginTest。
+      - classname が題（jest-junit の既定）やパッケージ（go）：ファイルに結びつかない。
+    パスは、末尾が一致するファイルを探す。サブディレクトリで実行したときの相対パスにも当たるようにするため。
+    """
+    refs = [("path", known_file)] if known_file else []
     classname = test_id.split("::", 1)[0] if "::" in test_id else ""
-    tokens = [t for t in re.split(r"[./\\]", classname) if t]
-    if not tokens:
+    if classname:
+        path_like = "/" in classname or "\\" in classname or SOURCE_SUFFIX.search(classname)
+        refs.append(("path" if path_like else "module", classname))
+    for how, ref in refs:
+        found = set()
+        if how == "path":
+            ref = ref.replace("\\", "/")
+            while ref.startswith("./"):
+                ref = ref[2:]
+            found = {path for path in index.by_name.get(ref.rsplit("/", 1)[-1], ())
+                     if path == ref or path.endswith("/" + ref)}
+        else:
+            tokens = [t for t in re.split(r"[./\\]", ref) if t]
+            for size in range(len(tokens), 0, -1):
+                prefix = "/".join(tokens[:size])
+                found = {path for stem, path in index.by_stem.get(tokens[size - 1], ())
+                         if stem == prefix or stem.endswith("/" + prefix)}
+                if found:
+                    break
+        if found:
+            return found
+    return set()
+
+
+def test_file_changed(test_id, known_file, changed, index):
+    """テストのファイルが変更一覧に含まれるか。分からなければ None。
+
+    候補が見つからないとき、同じ名前の候補が複数あって一部だけが変わったときは、どのファイルのテストか
+    決まらないので None にする（「変更なし」と断定しない）。
+    """
+    candidates = test_file_candidates(test_id, known_file, index)
+    if not candidates:
         return None
-    for path in changed:
-        stem = os.path.splitext(path)[0]
-        for size in range(len(tokens), 0, -1):
-            prefix = "/".join(tokens[:size])
-            if stem == prefix or stem.endswith("/" + prefix):
-                return True
-    return False
+    hit = candidates & set(changed)
+    if not hit:
+        return False
+    return True if hit == candidates else None
 
 
 def merge_basis(repo, run):
@@ -269,13 +339,18 @@ def merged_between(repo, base, run):
 
 
 def classify_failures(repo, runs):
-    """全期間のテスト実行を時刻順に見て、失敗を1件ずつ分類する。"""
+    """全期間のテスト実行を時刻順に見て、失敗を1件ずつ分類する。
+
+    回帰かどうかは、そのテストが最後に通った実行を基準に、テストファイルが変わったかで見る。
+    直近の「全テスト成功」は、一部のテストだけを流した実行でも成り立つので、それを基準にすると、
+    その間に変わったテストファイルを見落とす。
+    """
     failures = []
-    green = None          # 直近の全テスト成功
+    green = None          # 直近の全テスト成功（その実行に含まれたテストが、すべて通ったもの）
     first_seen = {}       # テストID -> 初めて現れた実行の番号
-    passed_before = set()
+    last_pass = {}        # テストID -> (最後に通った実行の番号, その実行)
     green_index = -1
-    change_cache = {}
+    change_cache, index_cache = {}, {}
     for index, run in enumerate(runs):
         results = run.get("results")
         if results:
@@ -285,29 +360,32 @@ def classify_failures(repo, runs):
                     kind, basis = OTHER, "基準になる全テスト成功の記録が無い"
                 elif test_id not in first_seen or first_seen[test_id] > green_index:
                     kind, basis = RED, "前回の全テスト成功より後に追加されたテスト"
-                elif test_id not in passed_before:
+                elif test_id not in last_pass:
                     kind, basis = OTHER, "通った記録が無い"
                 else:
-                    if index not in change_cache:
-                        change_cache[index] = changed_between(repo, green, run)
-                    changed = change_cache[index]
+                    base_index, base = last_pass[test_id]
+                    if (base_index, index) not in change_cache:
+                        change_cache[(base_index, index)] = changed_between(repo, base, run)
+                    changed = change_cache[(base_index, index)]
                     if changed is None:
                         kind, basis = OTHER, "git から当時の状態を復元できない"
                     else:
-                        verdict = test_file_changed(test_id, known_file, changed)
+                        if index not in index_cache:
+                            index_cache[index] = files_at(repo, run)
+                        verdict = test_file_changed(test_id, known_file, changed, index_cache[index])
                         if verdict:
-                            kind, basis = RED, "前回の全テスト成功以降にテストファイルが変更された"
+                            kind, basis = RED, "このテストが最後に通った後に、テストファイルが変更された"
                         else:
                             kind = REGRESSION
-                            basis = "通っていたテストの失敗（テストファイルは%s）" % (
+                            basis = "通っていたテストの失敗（このテストが最後に通った後、テストファイルは%s）" % (
                                 "特定できず" if verdict is None else "変更なし")
                             merging = merge_basis(repo, run)
                             if merging:
                                 kind, basis = MERGE, merging
                             else:
-                                merged = merged_between(repo, green, run)
+                                merged = merged_between(repo, base, run)
                                 if merged:
-                                    basis += "。前回の全テスト成功の後に %s あり" % "、".join(merged)
+                                    basis += "。このテストが最後に通った後に %s あり" % "、".join(merged)
                 failures.append({
                     "test_id": test_id, "class": kind, "basis": basis, "ts": run["ts"],
                     "_time": run["_time"], "session_id": run.get("session_id"),
@@ -315,14 +393,26 @@ def classify_failures(repo, runs):
                 })
             for test_id in all_ids(run):
                 first_seen.setdefault(test_id, index)
-            passed_before |= set(results.get("passed", []))
+            for test_id in results.get("passed", []):
+                last_pass[test_id] = (index, run)
         if is_green(run):
             green, green_index = run, index
     return failures
 
 
-def fix_candidates(repo, writes):
-    """エージェントが最後に書いた内容と、いまの内容が違うファイルを探す。"""
+def mentions(command, path):
+    """コマンドの文面に、そのファイルの名前が語として出るか（パスの一部として出る場合を含む）。"""
+    name = path.rsplit("/", 1)[-1]
+    return bool(re.search(r"(?:^|[\s/'\"=(:])" + re.escape(name) + r"(?=$|[\s'\";:)|&>,])", command))
+
+
+def fix_candidates(repo, writes, calls=()):
+    """エージェントが書き込みツールで最後に書いた内容と、いまの内容が違うファイルを探す。
+
+    誰が変えたかは分からない。人の手直しのほか、エージェントがシェルで書き換えた場合（ヒアドキュメント、
+    sed、整形コマンド）も、書き込みの記録が残らないので、ここに入る。calls（セッションログのシェル実行。
+    [(時刻, コマンド)]）のうち、書き込みの後にそのファイルの名前が出るものを、手がかりとして添える。
+    """
     last = {}
     for event in writes:
         last[event["path"]] = event
@@ -347,6 +437,13 @@ def fix_candidates(repo, writes):
             row["cause"] = cause
             excluded.append(row)
         else:
+            later = []
+            for moment, command in sorted(calls, key=lambda c: c[0]):
+                head = shorten(mask(command.split("\n", 1)[0]), 80)   # 1行目（ヒアドキュメントの本文は出さない）
+                if moment >= event["_time"] and mentions(command, path) and head not in later:
+                    later.append(head)
+            if later:
+                row["shell_after"] = later[:2]
             candidates.append(row)
     return candidates, excluded
 
@@ -380,6 +477,32 @@ def rework_candidates(events):
                         for n in turns[1:]],
         })
     return sorted(rows, key=lambda r: (-r["turns"], r["path"]))
+
+
+def counted_run(event):
+    """回数に数えるテスト実行か。文面だけで一致して結果も取り込めなかったもの（実行か言及か分からない）と、
+    バックグラウンドで起動しただけのもの（終わったか分からない）は数えない。"""
+    return event.get("type") == "test_run" and not (event.get("results") is None and (
+        event.get("matched") == "text" or event.get("background")))
+
+
+def after_writes(events):
+    """書き込みのあったターンの数と、そのうち最後の書き込みの後に、同じターンでテストを実行したものの数。
+
+    ターンは、同じセッションの発話の記録（prompt）から次の発話の記録まで。発話の記録が無い部分は、
+    1つのターンとみなす。確かめる手段（V3）と早く知らせる仕組み（V4）の手がかりにする。
+    テストで確かめる必要の無い書き込み（文書など）も含むので、割合の良し悪しは、読む側が決める。
+    """
+    turns, state = collections.Counter(), {}
+    for event in events:
+        session, kind = event.get("session_id"), event.get("type")
+        if kind == "prompt":
+            turns[session] += 1
+        elif kind == "write":
+            state[(session, turns[session])] = False
+        elif counted_run(event) and (session, turns[session]) in state:
+            state[(session, turns[session])] = True
+    return {"turns": len(state), "tested": sum(1 for tested in state.values() if tested)}
 
 
 def command_key(command):
@@ -488,7 +611,6 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
 
     events = [e for e in events if inside(e)]
     failures = [f for f in failures if inside(f)]
-    candidates, excluded = fix_candidates(repo, [e for e in events if e.get("type") == "write"])
 
     periods = collections.OrderedDict()
     columns = ("sessions", "test_runs", RED, REGRESSION, MERGE, OTHER, "tool_failures", "cancelled",
@@ -503,11 +625,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         row["_s"].add(event.get("session_id"))
         kind = event.get("type")
         if kind == "test_run":
-            # 文面だけで一致し、結果も取り込めなかったものは、実行か言及か分からないので数えない。
-            # バックグラウンドで起動しただけのものも、終わったかどうか分からないので数えない。
-            unknown = event.get("results") is None and (
-                event.get("matched") == "text" or event.get("background"))
-            if not unknown:
+            if counted_run(event):
                 row["test_runs"] += 1
         elif kind == "prompt":
             row["prompts"] += 1
@@ -574,6 +692,9 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     known += [s for s in {e.get("session_id") for e in all_events if e.get("session_id")} if s not in known]
     known += [s for s in prompts.discover(root, prompts.sessions_dir(root)) if s not in known]
     calls, undetermined = prompts.unrecorded_calls(root, known, since, until)
+    writes = [e for e in events if e.get("type") == "write"]
+    candidates, excluded = fix_candidates(repo, writes, prompts.shell_calls(
+        root, known, min(e["_time"] for e in writes)) if writes else [])
     for call in calls:
         entry = grouped_unrecorded.setdefault((call["kind"], command_key(call["command"])), {
             "kind": call["kind"], "command_key": command_key(call["command"]),
@@ -597,6 +718,9 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                 "before_first": before, "after_first": len(log_only) - before if first else None,
                 "record_errors": record_errors, "retro_sessions": len(retro),
                 "retro_excluded": retro_excluded}
+    diagnostics = diagnose.diagnose(root, load_config(root), prompts.hook_triggers(root))
+    if diagnostics["sensors"]["test_configs"]:
+        diagnostics["sensors"]["after_writes"] = after_writes(events)
     result = {
         "since": since.isoformat() if since else None,
         "until": until.isoformat() if until else None,
@@ -625,7 +749,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         if with_prompts else None,
         "harness": harness.inventory(root),
         "steering": harness.steering_weight(root),
-        "diagnostics": diagnose.diagnose(root, load_config(root), prompts.hook_triggers(root)),
+        "diagnostics": diagnostics,
         "recording_start": (lambda m: m.isoformat() if m else None)(recording_start(data_dir)),
         "topics": notes.topics(findings, since, until),
         "note_problems": note_problems,
@@ -855,13 +979,18 @@ def render_files(data, cap):
             lines.append("  - 発話の時刻：%s" % prompt["ts"])
     lines += more
 
-    lines += ["", "## 人間の手直し候補（%d 件）" % len(data["fix_candidates"]), ""]
+    lines += ["", "## 手直し候補（%d 件）" % len(data["fix_candidates"]), "",
+              "エージェントが書き込みツールで最後に書いた後に、内容が変わったファイルです。人の手直しのほか、"
+              "エージェントがシェルで書き換えた場合（ヒアドキュメント、sed、整形コマンド）も入ります。"
+              "誰が変えたかは証明しません。案にするときは、抜粋で確かめます。", ""]
     if not data["fix_candidates"]:
         lines.append("なし")
     rows, more = capped(data["fix_candidates"], cap, "files")
     for row in rows:
-        lines.append("- `%s`：%s。エージェントの最後の書き込みは %s（session `%s`）" % (
-            row["path"], row["status"], row["written_at"], row["session_id"]))
+        hint = "。その後のシェル実行に、このファイルの名前が出る：%s（エージェントのシェルでの変更の可能性）" % (
+            "、".join("`%s`" % key for key in row["shell_after"])) if row.get("shell_after") else ""
+        lines.append("- `%s`：%s。エージェントの最後の書き込みは %s（session `%s`）%s" % (
+            row["path"], row["status"], row["written_at"], row["session_id"], hint))
     lines += more
     if data["fix_excluded"]:
         lines += ["", "merge などによる変更として除いたもの：%d 件" % len(data["fix_excluded"])]
@@ -870,7 +999,7 @@ def render_files(data, cap):
 
 def render_harness(data, cap):
     lines = ["", "## ハーネスの診断（ファイルから決まる値。一歩先の改善案の手がかり）", ""]
-    lines += diagnose.lines(data["diagnostics"], data["burden"])
+    lines += diagnose.lines(data["diagnostics"], data["burden"], cap)
     lines += ["", "## 比較対象の所在（本文は未確認）", ""]
     for entry in data["harness"]:
         lines.append("- %s `%s`: %s" % (entry["scope"], entry["path"], entry["status"]))
@@ -1068,7 +1197,8 @@ def render_session(view):
              "- ログの状態：%s" % view["status"],
              "- 記録されたエージェント：`%s`（session.json、取れない場合は未確認。途中の切り替えは未復元）" % mask(view.get('agent') or '未確認'),
              "- ユーザー発話：%d 件" % len(view["turns"]),
-             "- ユーザー発話は原文、ツール実行は件数、応答は最後の1件の冒頭だけです。",
+             "- ユーザー発話は原文、ツール実行は件数、応答は最後の1件の冒頭だけです。"
+             "シェル実行は、終了コードが 0 以外のコマンドと、テストの記録設定に一致した実行の終了コードを添えます。",
              "- 応答やその後の作業を根拠に書くときは、抜粋で本文を確かめます。",
              "- 全文は `excerpt.py --session %s --index <index> --context 3` で読みます。" % view["session_id"]]
     if view["status"] != "ok":
@@ -1083,6 +1213,17 @@ def render_session(view):
             tools = "、".join("%s×%d" % item for item in sorted(turn["tools"].items()))
             failed = "、失敗 %d 件" % turn["tool_failures"] if turn["tool_failures"] else ""
             lines.append("- ツール実行：%s%s" % (tools, failed))
+        commands_failed = list((turn.get("failed_commands") or {}).items())
+        if commands_failed:
+            lines.append("- 終了コードが 0 以外のシェル実行：%s%s" % (
+                "、".join("`%s`×%d" % item for item in commands_failed[:3]),
+                "、ほか %d 種類" % (len(commands_failed) - 3) if len(commands_failed) > 3 else ""))
+        tests = turn.get("tests") or []
+        if tests:
+            text_only = sum(1 for t in tests if t["matched"] == "text")
+            lines.append("- テストの記録設定に一致したシェル実行：%d 回（終了コード %s%s）%s" % (
+                len(tests), "…→" if len(tests) > 5 else "", "→".join(str(t["exit_code"]) for t in tests[-5:]),
+                "。うち文面だけで一致 %d 回（実行か言及かは未確認）" % text_only if text_only else ""))
         if turn["reply"]:
             lines.append("- 応答（index=%d、%d 文字）：%s" % (
                 turn["reply"]["index"], turn["reply"]["chars"], turn["reply"]["text"]))

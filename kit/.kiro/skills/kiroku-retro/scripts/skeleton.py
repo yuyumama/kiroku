@@ -272,7 +272,7 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "",
         "次は、スクリプトがファイルと記録から決めた値です。一歩先の改善案の手がかりに使います。",
         "",
-    ] + diagnose.lines(data["diagnostics"], data["burden"])
+    ] + diagnose.lines(data["diagnostics"], data["burden"], diagnose.REPORT_CAP)
     return "\n".join(header + one_step + body + table + diagnostics + tail)
 
 

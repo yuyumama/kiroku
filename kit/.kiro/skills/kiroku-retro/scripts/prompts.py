@@ -350,7 +350,7 @@ def sessions(root, events, since=None, until=None):
 
 
 SHELL_TOOLS = ("execute_bash", "execute_pwsh")
-EXIT_CODE_LINE = re.compile(r"(?m)^Exit Code:\s*-?\d+\s*$")   # 応答の、行としての終了コード
+EXIT_CODE_LINE = re.compile(r"(?m)^Exit Code:\s*(-?\d+)\s*$")   # 応答の、行としての終了コード
 OWN_HOOK_PREFIX = "kiroku-record-"
 
 
@@ -469,6 +469,37 @@ def unrecorded_calls(root, session_ids, since=None, until=None):
     return found, unknown
 
 
+def shell_calls(root, session_ids, since=None):
+    """セッションログに残ったシェル実行。[(時刻, コマンド)]。振り返りの後の実行と、kiroku 自身のスクリプトは除く。
+
+    書き込みツールを使わずにシェルでファイルを書き換えた実行（ヒアドキュメント、sed、整形コマンド）は、
+    書き込みの記録に残らない。手直し候補の手がかりにするため、コマンドの文面だけを返す。
+    """
+    directory, marks, found = sessions_dir(root), retro_marks(root), []
+    for session in session_ids:
+        path = excerpt.find_log(session, directory)
+        if not path:
+            continue
+        try:
+            if since and os.path.getmtime(path) < since.timestamp():
+                continue   # 期間の始まりより前から更新されていないログには、その後の実行は無い
+            rows = excerpt.load(path)
+        except (OSError, UnicodeError):
+            continue
+        cutoff = retro_start(rows, marks.get(session))
+        for stamp, payload in rows:
+            if payload.get("type") != "tool_call" or payload.get("toolName") not in SHELL_TOOLS:
+                continue
+            args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+            command = args.get("command")
+            moment = excerpt.parse_time(stamp)
+            if not isinstance(command, str) or moment is None or (cutoff and moment >= cutoff) \
+                    or commands.own_script(command):
+                continue
+            found.append((moment, command))
+    return found
+
+
 def _clip(text, limit):
     """長い文を、頭と末尾を残して切る。"""
     if len(text) <= limit:
@@ -482,6 +513,8 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
 
     ユーザー発話は原文（長ければ頭と末尾）。次の発話までのツール実行は件数だけ、
     応答は最後の1件の冒頭だけを添える。全文が要る箇所は excerpt.py --index で読む。
+    シェル実行は、終了コードが 0 以外のコマンド（見出しにまとめたもの）と、テストの記録設定に一致した
+    実行の終了コードを添える。試行錯誤や、確かめずに終えたターンを、抜粋を開かずに見つけるため。
     """
     result = {"session_id": session, "agent": session_agent(root, session),
               "status": "ok", "issues": [], "turns": []}
@@ -500,6 +533,8 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
     repeated = duplicates(rows)
     cutoff = retro_start(rows, retro_marks(root).get(session))
     by_index = {}
+    config = load_config(root)
+    shells = {}   # 結果を待っているシェル実行。toolCallId -> コマンド
     for index, (stamp, payload) in enumerate(rows):
         kind = payload.get("type")
         if kind == "user":
@@ -517,15 +552,30 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
                 continue
             turn = {"index": index, "ts": stamp, "chars": len(text),
                     "text": _clip(mask(text), user_chars), "duplicates": [],
-                    "tools": collections.Counter(), "tool_failures": 0, "reply": None}
+                    "tools": collections.Counter(), "tool_failures": 0, "reply": None,
+                    "failed_commands": collections.Counter(), "tests": []}
             by_index[index] = turn
             result["turns"].append(turn)
         elif turn is None:
             continue
         elif kind == "tool_call":
             turn["tools"][payload.get("toolName") or "unknown"] += 1
-        elif kind == "tool_result" and payload.get("success") is False:
-            turn["tool_failures"] += 1
+            args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+            if payload.get("toolName") in SHELL_TOOLS and isinstance(args.get("command"), str):
+                shells[payload.get("toolCallId")] = args["command"]
+        elif kind == "tool_result":
+            if payload.get("success") is False:
+                turn["tool_failures"] += 1
+            command = shells.pop(payload.get("toolCallId"), None)
+            found = EXIT_CODE_LINE.search(payload.get("content")) \
+                if command is not None and isinstance(payload.get("content"), str) else None
+            if found:
+                code = int(found.group(1))
+                entry, how = commands.test_match(command, config)
+                if entry is not None:
+                    turn["tests"].append({"exit_code": code, "matched": how})
+                elif code not in (0, -1):
+                    turn["failed_commands"][commands.key(mask(command))] += 1
         elif kind == "assistant":
             text = excerpt.content_text(payload)
             # 実機のログでは、各ターンの最後に "..." だけの応答が入る。文字のある応答だけを採る。
@@ -535,6 +585,7 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
                                  "text": flat[:assistant_chars] + ("…" if len(flat) > assistant_chars else "")}
     for turn in result["turns"]:
         turn["tools"] = dict(turn["tools"])
+        turn["failed_commands"] = dict(turn["failed_commands"].most_common())
     return result
 
 

@@ -553,7 +553,7 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
             turn = {"index": index, "ts": stamp, "chars": len(text),
                     "text": _clip(mask(text), user_chars), "duplicates": [],
                     "tools": collections.Counter(), "tool_failures": 0, "reply": None,
-                    "failed_commands": collections.Counter(), "tests": []}
+                    "failed_commands": collections.Counter(), "tests": [], "tests_not_run": 0}
             by_index[index] = turn
             result["turns"].append(turn)
         elif turn is None:
@@ -572,7 +572,9 @@ def distill(root, session, since=None, until=None, user_chars=1500, assistant_ch
             if found:
                 code = int(found.group(1))
                 entry, how = commands.test_match(command, config)
-                if entry is not None:
+                if entry is not None and code == -1:
+                    turn["tests_not_run"] += 1   # 承認されない、止められた、など。実行には数えない
+                elif entry is not None:
                     turn["tests"].append({"exit_code": code, "matched": how})
                 elif code not in (0, -1):
                     turn["failed_commands"][commands.key(mask(command))] += 1

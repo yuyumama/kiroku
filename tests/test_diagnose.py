@@ -56,7 +56,7 @@ class DiagnoseTest(ReviewSandbox):
         self.assertFalse([k for k in found if "make test" in k or "npm" in k])
         reasons = {r["key"]: r["reason"] for r in self.found()["broken"]}
         self.assertEqual(reasons["D2:.kiro/steering/testing.md:scripts/release.sh"],
-                         "参照先が無い（探した場所：ルート、`.kiro/steering/`、リポジトリ内で末尾が一致するパス）")
+                         "見つからない（探した場所：ルート、`.kiro/steering/`、リポジトリ内で末尾が一致するパス）")
 
     def test_monorepo_scripts_and_targets_in_subdirectories_are_found(self):
         """モノレポ：ルートの package.json や Makefile に無くても、サブディレクトリにあれば参照切れにしない。"""
@@ -94,7 +94,7 @@ class DiagnoseTest(ReviewSandbox):
         refs = {(r["path"], r["ref"]) for r in found}
         self.assertEqual(refs, {(".kiro/steering/a.md", "missing-rule.md")})
         self.assertEqual(found[0]["reason"],
-                         "参照先が無い（探した場所：ルート、`.kiro/steering/`、リポジトリ内の同じ名前のファイル）")
+                         "見つからない（探した場所：ルート、`.kiro/steering/`、リポジトリ内の同じ名前のファイル）")
 
     def test_words_joined_by_slash_are_not_paths(self):
         """/ で区切った語や日本語の文はパスとみなさない。拡張子のあるもの、実在するディレクトリの下は確かめる。"""
@@ -109,7 +109,95 @@ class DiagnoseTest(ReviewSandbox):
         self.assertEqual(refs, {"frontend/src", "docs/missing.md", ".aidlc-rule-details/rules.md", "docs/手順.md",
                                 "tools/"})
         self.assertEqual({r["reason"] for r in self.found()["broken"] if r["ref"] == "frontend/src"},
-                         {"参照先が無い（探した場所：ルート、`.kiro/steering/`、リポジトリ内で末尾が一致するパス）"})
+                         {"見つからない（探した場所：ルート、`.kiro/steering/`、リポジトリ内で末尾が一致するパス）"})
+
+    def test_file_references_and_links_are_asserted(self):
+        """Kiro のファイル参照（#[[file:…]]）と Markdown のリンクは、書き方から参照と決まるので断定する。
+        基準は公式資料（kiro.dev/docs/steering の File references）のとおり。ワークスペースの steering は
+        ルート、ユーザー共通の steering は ~/.kiro/steering/、AGENTS.md はそのフォルダ。"""
+        self.write("docs/api.md", "# API\n")
+        self.write("services/api/openapi.yaml", "x: 1\n")
+        self.write(".kiro/steering/api.md", "\n".join([
+            "#[[file:docs/api.md]] と #[[file:docs/api.md:1-3]] と #[[folder:services/api]]",
+            "#[[file:api.md]]",
+            "#[[file:docs/old.md]]",
+            "[設計](../../docs/api.md)、[古い手順](../../docs/old-steps.md)、[外部](https://kiro.dev/docs/)、[見出し](#api)",
+            "`#[[file:docs/example.md]]` は記法の例",
+            "```", "[例](missing-in-code.md)", "```"]) + "\n")
+        self.write("services/api/AGENTS.md", "#[[file:openapi.yaml]] と #[[file:missing.yaml]]\n")
+        rows = {r["key"]: r for r in self.found()["broken"]}
+        confirmed = {k: (r["reason"], r["line"]) for k, r in rows.items() if r["confirmed"]}
+        root = "Kiro のファイル参照 `#[[file:…]]` の参照先が無い（基準：ルート）"
+        self.assertEqual(confirmed, {
+            "D2:.kiro/steering/api.md:api.md": (root, 2),       # steering の隣にあっても、基準はルート
+            "D2:.kiro/steering/api.md:docs/old.md": (root, 3),
+            "D2:.kiro/steering/api.md:../../docs/old-steps.md":
+                ("Markdown のリンク先が無い（基準：このファイルのフォルダ、ルート）", 4),
+            "D2:services/api/AGENTS.md:missing.yaml":
+                ("Kiro のファイル参照 `#[[file:…]]` の参照先が無い（基準：`services/api/`）", 1)})
+        self.assertFalse([k for k in rows if "example" in k or "missing-in-code" in k])   # コードの中は記法の例
+        text = "\n".join(diagnose.lines(self.found(), []))
+        self.assertIn("- `D2:.kiro/steering/api.md:docs/old.md`：%s。3 行目。" % root, text)
+        # ユーザー共通の steering は、基準が ~/.kiro/steering/ と決まっている、Kiro のファイル参照だけを見る。
+        (self.home / "steering").mkdir(parents=True)
+        (self.home / "steering" / "style.md").write_text("x\n", encoding="utf-8")
+        (self.home / "steering" / "shared.md").write_text(
+            "#[[file:style.md]] と #[[file:gone.md]] と `scripts/none.sh`\n", encoding="utf-8")
+        self.assertEqual([k for k in self.keys() if "shared.md" in k], ["D2:~/.kiro/steering/shared.md:gone.md"])
+
+    def test_code_words_are_candidates_with_their_line(self):
+        """文章の中でコードとして書かれた語は、断定せず候補にし、行の文面を添える。参照か、例・略記かは、
+        読み手（振り返りのエージェント）が行を読んで決める。出力先（> や mkdir の引数）と、末尾が一致する
+        ファイルがある拡張子の説明（.test.ts）は、構文と実在で除く。"""
+        self.write("frontend/src/a.test.ts", "")
+        self.write("specs/x.md", "")
+        self.write(".kiro/steering/local.opt-in.md", "x\n")
+        self.write(".kiro/skills/pr/SKILL.md",
+                   "```bash\ngh api repos/o/r/pulls/1/comments > file.json\nmkdir -p tests-manual/out\n```\n")
+        self.write(".kiro/steering/core.md", "\n".join([
+            "`.opt-in.md` で終わるファイルは任意。テストは `.test.ts`。",
+            "| 種類 | 置き場 |", "|---|---|", "| 単体 | `test_xxx.py` |",
+            "- `specs/AC` から生成する。", "- テストは `make test` で実行します。"]) + "\n")
+        found = self.found()
+        rows = {r["ref"]: r for r in found["broken"]}
+        self.assertEqual(set(rows), {"test_xxx.py", "specs/AC", "make test"})
+        self.assertFalse(any(r["confirmed"] for r in rows.values()))
+        self.assertEqual((rows["test_xxx.py"]["line"], rows["test_xxx.py"]["text"]), (4, "| 単体 | `test_xxx.py` |"))
+        text = diagnose.lines(found, [])
+        self.assertIn("- D2 の候補 3 件：文章の中でコードとして書かれた語のうち、リポジトリに見つからないもの。"
+                      "参照なのか、例・使わない手順・これから作る場所なのかは未確認。"
+                      "手がかりに使う前に、その行を読んで確かめる。", text)
+        self.assertIn("  - `D2:.kiro/steering/core.md:specs/AC`：見つからない（探した場所：ルート、`.kiro/steering/`、"
+                      "リポジトリ内で末尾が一致するパス）。5 行目「- `specs/AC` から生成する。」", text)
+        self.assertIn("D2:.kiro/steering/core.md:make test", diagnose.keys(found))   # 候補も手がかりに書ける
+
+    def test_lists_are_capped_and_the_rest_is_counted(self):
+        """診断値の一覧は、出力とレポートでは上位だけを出す。検証値（手がかりに書ける名前）には全件を入れる。"""
+        self.write(".kiro/steering/many.md", "\n".join("- `docs/missing-%02d.md`" % n for n in range(15)) + "\n")
+        found = self.found()
+        text = diagnose.lines(found, [], 12)
+        self.assertEqual(sum(1 for line in text if line.startswith("  - `D2:")), 12)
+        self.assertIn("  - ほか 3 件。全件は `aggregate.py --section harness` で出します。", text)
+        self.assertEqual(len([k for k in diagnose.keys(found) if k.startswith("D2:")]), 15)
+        data = aggregate.aggregate(self.root)
+        self.assertIn("ほか 3 件", aggregate.render(data, cap=12))
+        self.assertNotIn("ほか 3 件", aggregate.render(data, section="harness"))   # 節だけを出すときは全件
+
+    def test_d5_counts_turns_whose_last_write_was_tested(self):
+        """記録から、書き込みのあったターンのうち、最後の書き込みの後に同じターンでテストを実行したものを数える。"""
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "a を直して"})
+        self.write("src/a.py", "x = 1\n")
+        self.saved("src/a.py")
+        self.run_tests([("tests.test_a", "test_a", "passed")])
+        self.hook({"hook_event_name": "UserPromptSubmit", "prompt": "b も直して"})
+        self.write("src/b.py", "y = 1\n")
+        self.saved("src/b.py")
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["diagnostics"]["sensors"]["after_writes"], {"turns": 2, "tested": 1})
+        self.assertIn("記録から：書き込みのあったターン 2 件のうち、最後の書き込みの後に同じターンでテスト実行の記録が"
+                      "あるもの 1 件", aggregate.render(data, section="harness"))
+        self.write(".kiro/kiroku/config.json", "{}")   # テストの記録設定が無ければ、数えない
+        self.assertNotIn("after_writes", aggregate.aggregate(self.root)["diagnostics"]["sensors"])
 
     def test_hooks_agents_and_skills_are_checked_but_kiroku_itself_is_not(self):
         self.write(".kiro/hooks/project.json", json.dumps({"hooks": [

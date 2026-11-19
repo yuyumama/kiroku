@@ -543,7 +543,8 @@ class ClassifyTest(Sandbox):
         _, data = self.classes()
         row = data["test_failures"][0]
         self.assertEqual(row["class"], aggregate.REGRESSION)
-        self.assertIn("前回の全テスト成功の後に merge あり", row["basis"])
+        self.assertIn("このテストが最後に通った後に merge あり", row["basis"])
+        self.assertIn("テストファイルは特定できず", row["basis"])   # tests/test_a.py が無いので、変更なしとは言えない
 
     def test_failure_without_green_baseline_is_other(self):
         self.write("tests/test_a.py", "def test_a():\n    assert False\n")
@@ -570,6 +571,79 @@ class ClassifyTest(Sandbox):
         self.shell("pytest", 1)
         classes, _ = self.classes()
         self.assertEqual(classes, {"Login page::logs in": aggregate.RED})
+
+    def run_report(self, xml, exit_code, command="pytest"):
+        """JUnit の本文をそのまま書いて、テストを実行したことにする。"""
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "execute_bash",
+                   "tool_input": {"command": command}})
+        time.sleep(0.02)
+        self.write(REPORT, '<testsuites><testsuite name="s">%s</testsuite></testsuites>' % xml)
+        self.shell(command, exit_code)
+
+    def test_vitest_classname_is_a_path_from_the_runner_root(self):
+        """vitest の既定の JUnit は file 属性を出さず、classname が vitest の root からのパスになる。
+        モノレポで frontend/ の中から実行しても、テストファイルの変更を見つける（以前は常に「変更なし」）。"""
+        case = '<testcase classname="tests/pages/List.test.tsx" name="shows list">%s</testcase>'
+        self.write("frontend/tests/pages/List.test.tsx", "it('shows list', () => {})\n")
+        self.commit("frontend")
+        self.run_report(case % "", 0)
+        self.write("frontend/tests/pages/List.test.tsx", "it('shows list', () => { expect(1).toBe(2) })\n")
+        self.run_report(case % "<failure/>", 1)
+        classes, data = self.classes()
+        self.assertEqual(classes, {"tests/pages/List.test.tsx::shows list": aggregate.RED})
+        self.assertIn("テストファイルが変更された", data["test_failures"][0]["basis"])
+
+    def test_vitest_failure_without_test_change_is_regression(self):
+        case = '<testcase classname="tests/pages/List.test.tsx" name="shows list">%s</testcase>'
+        self.write("frontend/tests/pages/List.test.tsx", "it('shows list', () => {})\n")
+        self.write("frontend/src/List.tsx", "export const a = 1\n")
+        self.commit("frontend")
+        self.run_report(case % "", 0)
+        self.write("frontend/src/List.tsx", "export const a = 2\n")   # 実装だけ変える
+        self.run_report(case % "<failure/>", 1)
+        _, data = self.classes()
+        row = data["test_failures"][0]
+        self.assertEqual(row["class"], aggregate.REGRESSION)
+        self.assertIn("テストファイルは変更なし", row["basis"])
+
+    def test_classname_that_is_not_a_file_is_not_called_unchanged(self):
+        """jest-junit の既定の classname は「describe の題 テストの題」で、ファイルに結びつかない。
+        テストファイルを書き換えていても分からないので、「変更なし」ではなく「特定できず」と書く。"""
+        case = '<testcase classname="FindingList renders list" name="FindingList renders list">%s</testcase>'
+        self.write("frontend/src/FindingList.test.tsx", "test('renders list', () => {})\n")
+        self.commit("frontend")
+        self.run_report(case % "", 0)
+        self.write("frontend/src/FindingList.test.tsx", "test('renders list', () => { throw 1 })\n")
+        self.run_report(case % "<failure/>", 1)
+        _, data = self.classes()
+        row = data["test_failures"][0]
+        self.assertEqual(row["class"], aggregate.REGRESSION)   # 回帰の候補には残す（確かめられないので）
+        self.assertIn("テストファイルは特定できず", row["basis"])
+
+    def test_same_test_path_in_two_packages_is_not_decided(self):
+        """同じ相対パスのテストが2つのパッケージにあり、片方だけ変わったときは、どちらのテストか決まらない。"""
+        case = '<testcase classname="tests/api.test.ts" name="works">%s</testcase>'
+        for package in ("frontend", "infra"):
+            self.write("%s/tests/api.test.ts" % package, "it('works', () => {})\n")
+        self.commit("packages")
+        self.run_report(case % "", 0)
+        self.write("infra/tests/api.test.ts", "it('works', () => { throw 1 })\n")
+        self.run_report(case % "<failure/>", 1)
+        _, data = self.classes()
+        self.assertIn("テストファイルは特定できず", data["test_failures"][0]["basis"])
+
+    def test_partial_run_does_not_hide_a_test_change(self):
+        """一部のテストだけを流して通った実行は、そのテストを流していない。それを基準にすると、
+        その前に書き換えたテストファイルを見落とし、Red を回帰と取り違えていた。"""
+        self.baseline()
+        self.write("tests/test_b.py", "def test_b():\n    assert True\n")
+        self.commit("add b")
+        self.run_tests([self.A + ("passed",), self.B + ("passed",)])   # 全部が通る
+        self.write("tests/test_b.py", "def test_b():\n    assert False\n")   # b を書き換える
+        self.run_tests([self.A + ("passed",)])                          # a だけを流して通る
+        self.run_tests([self.A + ("passed",), self.B + ("failed",)])   # b が落ちる
+        classes, _ = self.classes()
+        self.assertEqual(classes, {"tests.test_b::test_b": aggregate.RED})
 
 
 class FixCandidateTest(Sandbox):

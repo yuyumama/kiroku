@@ -651,6 +651,79 @@ class ReadingPlanTest(ReviewSandbox):
                                 "`sess_nolog`": "対象外（ログが無い・読めない）"})
         self.assertIn("## 未読のセッション（合計 1 件）", text)
 
+
+class ShellLogTest(ReviewSandbox):
+    """セッションログのシェル実行から決まる手がかり（手直し候補、要約表示）。"""
+
+    def rows(self, rows, minutes_after=1):
+        """書き込みの記録より後の時刻で、セッションログを書く。"""
+        directory = self.home / "sessions" / "0123456789abcdef" / self.session
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "session.json").write_text(json.dumps(
+            {"id": self.session, "workspacePaths": [self.root]}), encoding="utf-8")
+        start = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=minutes_after)
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, payload in enumerate(rows):
+                stamp = (start + datetime.timedelta(seconds=index)).isoformat()
+                handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload},
+                                        ensure_ascii=False) + "\n")
+
+    def test_shell_rewrite_after_the_write_is_shown_as_a_clue(self):
+        """シェルでの書き換えは書き込みの記録に残らず、手直し候補に入る。誰が変えたかは決めず、
+        その後のシェル実行にファイルの名前が出ることを、手がかりとして添える。"""
+        self.write("frontend/src/List.tsx", "export const a = 1\n")
+        self.saved("frontend/src/List.tsx")
+        self.write("frontend/src/List.tsx", "export const a = 2\n")   # ヒアドキュメントで書き換えた
+        self.write("src/other.py", "x = 1\n")
+        self.saved("src/other.py")
+        self.write("src/other.py", "x = 2\n")                         # こちらは名前の出る実行が無い
+        command = "cd frontend && python3 - <<'EOF'\nopen('src/List.tsx','w').write('x')\nEOF"
+        self.rows([{"type": "user", "content": "一覧を直して"},
+                   {"type": "tool_call", "toolName": "execute_bash", "toolCallId": "c1",
+                    "args": {"command": command}},
+                   {"type": "tool_result", "toolCallId": "c1", "success": True,
+                    "content": "Output:\n\nExit Code: 0"}])
+        data = aggregate.aggregate(self.root)
+        rows = {r["path"]: r for r in data["fix_candidates"]}
+        self.assertEqual(set(rows), {"frontend/src/List.tsx", "src/other.py"})
+        self.assertEqual(rows["frontend/src/List.tsx"]["shell_after"], ["cd frontend && python3 - <<'EOF'"])
+        self.assertNotIn("shell_after", rows["src/other.py"])
+        text = aggregate.render(data, section="files")
+        self.assertIn("## 手直し候補（2 件）", text)
+        self.assertNotIn("人間の手直し候補", text)
+        self.assertIn("その後のシェル実行に、このファイルの名前が出る：`cd frontend && python3 - <<'EOF'`"
+                      "（エージェントのシェルでの変更の可能性）", text)
+
+    def test_summary_shows_failed_commands_and_test_exit_codes(self):
+        """要約表示は、終了コードが 0 以外のコマンドと、テストの記録設定に一致した実行の終了コードを添える。
+        抜粋を開かずに、試行錯誤や、確かめずに終えたターンを見つけるため。"""
+        def call(number, command, code):
+            return [{"type": "tool_call", "toolName": "execute_bash", "toolCallId": "c%d" % number,
+                     "args": {"command": command}},
+                    {"type": "tool_result", "toolCallId": "c%d" % number, "success": code == 0,
+                     "content": "Output:\nlog\n\nExit Code: %d" % code}]
+        self.rows([{"type": "user", "content": "ビルドを直して"}]
+                  + call(1, "npm run build 2>&1 | tail -20", 1) + call(2, "npm run build", 2)
+                  + call(3, "pytest -q", 1) + call(4, "pytest -q", 0) + call(5, "echo pytest", 0)
+                  + [{"type": "assistant", "content": "直しました"}], minutes_after=-1)
+        view = aggregate.prompts.distill(self.root, self.session)
+        turn = view["turns"][0]
+        self.assertEqual(turn["failed_commands"], {"npm run build": 2})
+        self.assertEqual([t["exit_code"] for t in turn["tests"]], [1, 0, 0])
+        text = aggregate.render_session(view)
+        self.assertIn("- 終了コードが 0 以外のシェル実行：`npm run build`×2", text)
+        self.assertIn("- テストの記録設定に一致したシェル実行：3 回（終了コード 1→0→0）。"
+                      "うち文面だけで一致 1 回（実行か言及かは未確認）", text)
+
+    def test_review_summary_does_not_count_sessions_without_prompts_as_unread(self):
+        """見直し用の要約も、発話の無いセッションを未読に数えない（集約の未読の合計とそろえる）。"""
+        self.shell("ls missing", 2)
+        self.rows([], minutes_after=-1)
+        self.log("sess_talk", ["依頼"])
+        import review
+        text = review.summarize(self.root, None, None)
+        self.assertIn("ノートを読めない 0、未読 1、対象外（発話なし） 1", text)
+
 class LogOnlyTest(ReviewSandbox):
     def test_conversation_without_hook_records_is_read_and_paged(self):
         """Issue #12 改善：記録が0件でもログの会話は読む対象になり、全文ページにも出る。"""

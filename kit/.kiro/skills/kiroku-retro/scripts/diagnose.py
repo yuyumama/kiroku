@@ -4,14 +4,21 @@
 意味（決まりが正しいか、矛盾していないか）は判定しない。それは振り返りのエージェントが読む。
 
   D1  読み込みの条件（fileMatchPattern）に当たるファイルが無い steering
-  D2  決まりに書かれたパス、make の target、npm script、hook やエージェントが呼ぶスクリプトの参照先が無い
+  D2  決まりに書かれた参照の参照先が無い。2つに分ける。
+        断定：Kiro やツールが機械的に読む書き方（Kiro のファイル参照 #[[file:…]]、Markdown のリンク、
+              hook のコマンド、エージェント定義）。
+        候補：文章の中でコードとして書かれた語（パス、make の target、npm script）。参照なのか、例・
+              使わない手順・これから作る場所なのかは文脈で決まるので、行の文面を添えて出し、
+              振り返りのエージェントが読んで決める。
   D3  同じ文が、複数のファイルにある
-  D5  事後の検査（テスト、hook、pre-commit、CI、lint）の一覧
+  D5  事後の検査（テスト、hook、pre-commit、CI、lint）の一覧。記録があれば、書き込みの後のテスト実行の数も
   D6  型ごとの負担（回数、セッション数、割合）
 
 判定できない参照は数えない。「確かめられない」ものを「壊れている」とは書かない。
+意味（参照か例か、決まりが正しいか）はコードで決めない。コードは、構文と実在だけで決まることを確かめ、
+候補を絞って根拠（行の文面）を添える。
 モノレポでは、参照先がルート以外にあることが多い。ルート、書いたファイルのディレクトリ、リポジトリ内の
-同じ名前（末尾が一致する）パスのどこにも無いものだけを「無い」とする。npm script と make の target も、
+同じ名前（末尾が一致する）パスのどこにも無いものだけを「見つからない」とする。npm script と make の target も、
 リポジトリ内のすべての package.json と Makefile を見る。
 """
 import itertools
@@ -20,6 +27,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote
 
 import harness
 from record import mask
@@ -294,10 +302,37 @@ def _context(root, cache):
     return cache["files"], cache["index"]
 
 
-def broken_references(root, command, bases, cache):
+SEPARATORS = ("|", "||", "&&", ";", "&")
+REDIRECTS = (">", ">>", "1>", "2>", "&>", "1>>", "2>>", "&>>")
+CREATING = ("mkdir", "touch", "tee")   # 引数のパスを作るコマンド。引数は、今あるものへの参照ではない
+
+
+def _outputs(tokens):
+    """コマンドが作る・書き出すパスの位置（リダイレクトの先、mkdir・touch・tee の引数）。構文だけで決まる。"""
+    found, start, creating, redirected = set(), True, False, False
+    for position, token in enumerate(tokens):
+        if token in SEPARATORS:
+            start, creating, redirected = True, False, False
+            continue
+        if redirected:
+            found.add(position)
+            redirected = False
+        elif token in REDIRECTS:
+            redirected = True
+        elif start and token in CREATING:
+            creating = True
+        elif creating and not token.startswith("-"):
+            found.add(position)
+        start = False
+    return found
+
+
+def broken_references(root, command, bases, cache, missing="見つからない"):
     """1つのコマンドや参照の中の、参照先が無いもの。[(参照, 理由)]。判定できないものは返さない。
 
     cache には、リポジトリのファイル一覧（"files"）を入れておける。無ければ、ここで求める。
+    missing は、パスが見つからないときの理由の書き出し。参照と決まっているもの（hook のコマンドなど）は
+    「参照先が無い」、文章の中のコードとして書かれた語は「見つからない」（参照かどうかは未確認）にする。
     """
     tokens = command.split()
     if not tokens:
@@ -326,7 +361,10 @@ def broken_references(root, command, bases, cache):
         return [missing] if missing else []
     problems = []
     roots = [Path(root)] + [Path(b) for b in bases if Path(b) != Path(root)]
-    for token in tokens:
+    outputs = _outputs(tokens)
+    for position, token in enumerate(tokens):
+        if position in outputs:
+            continue   # これから作る・書き出すパス（`> out.json`、`mkdir -p dist/`）
         token = token.strip("()[],;:。、")
         kind = _looks_like_path(token)
         if not kind:
@@ -335,30 +373,108 @@ def broken_references(root, command, bases, cache):
             continue
         first = token.split("/")[0]
         if kind == "maybe" and first not in directories and not any((b / first).is_dir() for b in roots):
-            continue   # / で区切った語（owner/repo など）。パスかどうか分からない
+            continue   # / で区切った語（owner/repo など）。パスとして読む根拠が無いので、候補にも出さない
         if _elsewhere(token, index):
             continue   # 別の場所にある同じ名前のもの。どれを指すかは分からないが、無いとは言えない
+        if token.startswith(".") and "/" not in token and token.count(".") >= 2 \
+                and any(name.endswith(token) for name in index):
+            continue   # `.test.ts` のような、名前の末尾の説明。末尾が一致するファイルがある
         if _ignored(root, token):
             continue   # 実行時にできるファイル（記録など）。git が無視するものは、無くても誤りではない
-        places = ["ルート"] + ["`%s/`" % os.path.relpath(b, root).replace(os.sep, "/") for b in roots[1:]]
-        problems.append((token, "参照先が無い（探した場所：%s、%s）" % (
-            "、".join(places), "リポジトリ内の同じ名前のファイル" if "/" not in token.strip("/")
-            else "リポジトリ内で末尾が一致するパス")))
+        problems.append((token, "%s（探した場所：%s）" % (missing, _places(root, roots, token))))
     return problems
 
 
-def _code_spans(text):
-    """文書の中の、コードとして書かれた部分（インラインのコードと、コードブロックの各行）。"""
-    spans, fenced = [], False
-    for line in text.splitlines():
+def _places(root, roots, token):
+    places = ["ルート"] + ["`%s/`" % os.path.relpath(b, root).replace(os.sep, "/") for b in roots[1:]]
+    return "、".join(places + ["リポジトリ内の同じ名前のファイル" if "/" not in token.strip("/")
+                               else "リポジトリ内で末尾が一致するパス"])
+
+
+FILE_REFERENCE = re.compile(r"#\[\[(file|folder):([^\]\n]+?)\]\]")
+MARKDOWN_LINK = re.compile(r"!?\[[^\]\n]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+LINE_TEXT_CHARS = 100   # 候補に添える行の文面の長さ（文字数）。最初の値で、根拠は薄い
+
+
+def _scan(text):
+    """文書を行ごとに読み、(コードとして書かれた部分, 書き方から参照と決まるもの) を返す。
+
+    コード：[(行番号, 中身, 行の文面)]。インラインのコードと、コードブロックの各行。
+    参照：[(行番号, 種類, 参照先, 行の文面)]。種類は file・folder（Kiro のファイル参照 #[[file:…]]）か
+    link（Markdown のリンク）。コードの中に書かれたものは、記法の説明や例なので、参照として数えない。
+    """
+    spans, refs, fenced = [], [], False
+    for number, line in enumerate(text.splitlines(), 1):
         if line.lstrip().startswith("```"):
             fenced = not fenced
             continue
         if fenced:
-            spans.append(line.strip())
-        else:
-            spans += [m.group(1).strip() for m in INLINE_CODE.finditer(line)]
-    return [s for s in spans if s]
+            if line.strip():
+                spans.append((number, line.strip(), line.strip()))
+            continue
+        spans += [(number, m.group(1).strip(), line.strip()) for m in INLINE_CODE.finditer(line)
+                  if m.group(1).strip()]
+        prose = INLINE_CODE.sub(" ", line)
+        refs += [(number, m.group(1), m.group(2).strip(), line.strip()) for m in FILE_REFERENCE.finditer(prose)]
+        refs += [(number, "link", m.group(1), line.strip()) for m in MARKDOWN_LINK.finditer(prose)]
+    return spans, refs
+
+
+def _link_target(target):
+    """Markdown のリンク先のうち、リポジトリの中のパス。URL、見出し、絶対パス、型紙は None。"""
+    if not target or target.startswith(("#", "/", "~", "\\")) or re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target):
+        return None
+    path = unquote(target.split("#", 1)[0].split("?", 1)[0])
+    if not path or any(c in NOT_PATH_CHARS for c in path):
+        return None
+    return path
+
+
+def _reference_bases(root, path, kind, scope):
+    """Kiro のファイル参照の基準（kiro.dev/docs/steering の File references）。(基準の一覧, 表示)。
+
+    ワークスペースの steering はルート、ユーザー共通の steering は ~/.kiro/steering/、AGENTS.md は
+    そのファイルのフォルダ。skill などは公式資料に記述が無いので、ルートと、そのファイルのフォルダの
+    どちらかにあれば有るとする。
+    """
+    if kind == "steering":
+        return ([_home() / "steering"], "`~/.kiro/steering/`") if scope == "user" else ([Path(root)], "ルート")
+    folder = os.path.relpath(path.parent, root).replace(os.sep, "/")
+    if kind == "agents_md":
+        return [path.parent], "ルート" if folder == "." else "`%s/`" % folder
+    return [Path(root), path.parent], "ルート、`%s/`" % folder
+
+
+def _explicit(root, path, kind, scope, how, target):
+    """書き方から参照と決まるものが、参照先を持つか。無ければ (参照, 理由)、有れば None。"""
+    if how == "link":
+        relative = _link_target(target)
+        if relative is None:
+            return None
+        bases = [path.parent, Path(root)]
+        where = "このファイルのフォルダ、ルート"
+        label = "Markdown のリンク先が無い"
+    else:
+        relative = re.sub(r":\d+(?:-\d+)?$", "", target) if how == "file" else target
+        bases, where = _reference_bases(root, path, kind, scope)
+        label = "Kiro のファイル参照 `#[[%s:…]]` の参照先が無い" % how
+    if not relative or any((base / relative).exists() for base in bases):
+        return None
+    if scope == "project":
+        inside = os.path.relpath(bases[0] / relative, root).replace(os.sep, "/")
+        if not inside.startswith("..") and _ignored(root, inside):
+            return None   # 実行時にできるファイル。git が無視するものは、無くても誤りではない
+    return relative, "%s（基準：%s）" % (label, where)
+
+
+def _around(line, ref):
+    """候補に添える行の文面。長い行は、参照の前後だけを残す。"""
+    if len(line) <= LINE_TEXT_CHARS:
+        return line
+    at = max(line.find(ref.split()[0] if ref.split() else ref), 0)
+    start = max(0, min(at - LINE_TEXT_CHARS // 3, len(line) - LINE_TEXT_CHARS))
+    return ("…" if start else "") + line[start:start + LINE_TEXT_CHARS] + \
+        ("…" if start + LINE_TEXT_CHARS < len(line) else "")
 
 
 def _json_commands(path, kind):
@@ -385,22 +501,45 @@ def _json_commands(path, kind):
 
 
 def broken_refs(root, texts, files=None):
-    """D2：決まりに書かれた参照のうち、参照先が無いもの。プロジェクト内のファイルだけを見る。"""
+    """D2：決まりに書かれた参照のうち、参照先が見つからないもの。
+
+    confirmed が真（断定）：Kiro やツールが機械的に読む書き方。Kiro のファイル参照（#[[file:…]]、
+    #[[folder:…]]）、Markdown のリンク、hook のコマンド、エージェント定義の resources と許可するコマンド。
+    confirmed が偽（候補）：文章の中で、コードとして書かれた語。パスや npm script として探して見つからなくても、
+    参照なのか、例・使わない手順・これから作る場所なのかは、文脈を読まないと決まらない。
+    行の文面を添えて出し、振り返りのエージェントが読んで決める。
+    ユーザー共通の steering は、Kiro のファイル参照だけを見る（基準が ~/.kiro/steering/ と決まっているため）。
+    """
     found, cache, seen = [], {} if files is None else {"files": files}, set()
+
+    def add(shown, ref, reason, confirmed, number=None, line=None):
+        key = "D2:%s:%s" % (shown, ref)
+        if key in seen:
+            return
+        seen.add(key)
+        row = {"key": key, "path": shown, "ref": mask(ref), "reason": reason, "confirmed": confirmed}
+        if number is not None:
+            row.update(line=number, text=mask(_around(line, ref)))
+        found.append(row)
+
     for shown, path, kind, scope in texts:
-        if scope != "project":
-            continue
         if kind in ("hooks", "agent"):
-            commands = _json_commands(path, kind)
-        else:
-            commands = _code_spans(_read(path) or "")
-        bases = [path.parent]   # 書いたファイルからの相対パス（skill の references/、steering 同士など）
-        for command in commands:
-            for ref, reason in broken_references(root, command, bases, cache):
-                key = "D2:%s:%s" % (shown, ref)
-                if key not in seen:
-                    seen.add(key)
-                    found.append({"key": key, "path": shown, "ref": mask(ref), "reason": reason})
+            if scope == "project":
+                for command in _json_commands(path, kind):
+                    for ref, reason in broken_references(root, command, [path.parent], cache, "参照先が無い"):
+                        add(shown, ref, reason, True)
+            continue
+        spans, refs = _scan(_read(path) or "")
+        for number, how, target, line in refs:
+            if scope == "project" or how != "link":
+                problem = _explicit(root, path, kind, scope, how, target)
+                if problem:
+                    add(shown, problem[0], problem[1], True, number, line)
+        if scope != "project":
+            continue   # ユーザー共通の文書の中のコードは、どのリポジトリを指すか決まらない
+        for number, span, line in spans:
+            for ref, reason in broken_references(root, span, [path.parent], cache):
+                add(shown, ref, reason, False, number, line)
     return found
 
 
@@ -504,18 +643,42 @@ def keys(found):
                   + [row["key"] for row in found["duplicates"]] + ["D5", "D6"])
 
 
-def lines(found, rows):
-    """診断値を、人が読む行にする。骨組みと集約の表示で同じ文面を使う。"""
+REPORT_CAP = 12   # レポートの骨組みに載せる、診断値の一覧1つあたりの件数。最初の値で、根拠は薄い
+
+
+def _capped(rows, cap):
+    if cap is None or len(rows) <= cap:
+        return rows, []
+    return rows[:cap], ["  - ほか %d 件。全件は `aggregate.py --section harness` で出します。" % (len(rows) - cap)]
+
+
+def lines(found, rows, cap=None):
+    """診断値を、人が読む行にする。骨組みと集約の表示で同じ文面を使う。cap は一覧1つあたりの件数。"""
     out = []
     for row in found["unloaded"]:
         out.append("- `%s`：読み込みの条件 %s に当たるファイルが、リポジトリに無い。この決まりは読み込まれていない"
                    "（照合は kiroku による。Kiro の照合の細部は未確認）。" % (
                        row["key"], "、".join("`%s`" % p for p in row["patterns"])))
-    for row in found["broken"]:
-        out.append("- `%s`：%s。" % (row["key"], row["reason"]))
-    for row in found["duplicates"]:
+    confirmed = [r for r in found["broken"] if r.get("confirmed", True)]
+    candidates = [r for r in found["broken"] if not r.get("confirmed", True)]
+    shown, more = _capped(confirmed, cap)
+    for row in shown:
+        out.append("- `%s`：%s。%s" % (row["key"], row["reason"],
+                                      "%d 行目。" % row["line"] if row.get("line") else ""))
+    out += [line[2:] for line in more]
+    if candidates:
+        out.append("- D2 の候補 %d 件：文章の中でコードとして書かれた語のうち、リポジトリに見つからないもの。"
+                   "参照なのか、例・使わない手順・これから作る場所なのかは未確認。"
+                   "手がかりに使う前に、その行を読んで確かめる。" % len(candidates))
+        shown, more = _capped(candidates, cap)
+        for row in shown:
+            out.append("  - `%s`：%s。%d 行目「%s」" % (row["key"], row["reason"], row["line"], row["text"]))
+        out += more
+    shown, more = _capped(found["duplicates"], cap)
+    for row in shown:
         out.append("- `%s`：同じ文が %d 行ある（例：「%s」）。" % (
             row["key"], row["lines"], row["sample"][:60] + ("…" if len(row["sample"]) > 60 else "")))
+    out += [line[2:] for line in more]
     if not (found["unloaded"] or found["broken"] or found["duplicates"]):
         out.append("- 読み込まれない決まり、参照先の無い記述、複数のファイルにある同じ文は、見つからなかった。")
     sense = found["sensors"]
@@ -524,10 +687,16 @@ def lines(found, rows):
     ci = "、".join("`%s`" % n for n in sense["ci"]) or "無し"
     if sense["ci_runs_tests"] is not None:
         ci += "（テストの記録設定の match に一致する行が%s）" % ("ある" if sense["ci_runs_tests"] else "無い")
+    lint, more = _capped(sense["lint"], cap)
+    after = sense.get("after_writes")
     out += ["- `D5`：事後の検査。テストの記録設定 %d 件。hook（kiroku 自身のものを除く）：%s。pre-commit：%s。"
-            "CI：%s。lint・型検査の設定：%s。" % (
+            "CI：%s。lint・型検査の設定：%s。%s" % (
                 sense["test_configs"], hooks, "、".join("`%s`" % n for n in sense["precommit"]) or "無し", ci,
-                "、".join("`%s`" % n for n in sense["lint"]) or "無し")]
+                "、".join("`%s`" % n for n in lint) + ("、ほか %d 個" % (len(sense["lint"]) - len(lint)) if more else "")
+                or "無し",
+                "" if after is None else
+                "記録から：書き込みのあったターン %d 件のうち、最後の書き込みの後に同じターンでテスト実行の記録が"
+                "あるもの %d 件（テストで確かめる必要の無い書き込みも含む）。" % (after["turns"], after["tested"]))]
     if rows:
         out += ["", "型ごとの負担（`D6`。回数、セッション数、分母に対する割合）："]
         for row in rows:

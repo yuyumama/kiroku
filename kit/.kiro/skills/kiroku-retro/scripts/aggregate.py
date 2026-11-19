@@ -883,6 +883,16 @@ def render_harness(data, cap):
 
 NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり",
                "uncovered": "読んだ範囲の外に発話あり", "broken": "ノートを読めない"}
+# 発話が無く、読む対象にならないセッション。「未読」と書くと、未読の合計と食い違って見える。
+NO_PROMPT_LABELS = {True: "対象外（期間内の発話なし）", False: "対象外（ログが無い・読めない）"}
+
+
+def note_label(row):
+    if row["note"] not in ("fresh", "broken") and not row["prompts"]:
+        return NO_PROMPT_LABELS[row["log"] in ("ok", "partial_log")]
+    return NOTE_LABELS[row["note"]]
+
+
 STEERING_GUIDE_CHARS = 8000  # 常時読み込みの目安。超えたら、足す前に分割や条件付きを検討する
 
 
@@ -1046,7 +1056,7 @@ def render_sessions(sessions, cap=None):
     for row in rows:
         lines.append("| `%s` | %s | %s | %s | %d | %d | %s | %s |" % (
             row["session_id"], row["last_activity"], "あり" if row["recorded"] else "ログのみ",
-            row["log"], row["prompts"], row["prompt_chars"], NOTE_LABELS[row["note"]],
+            row["log"], row["prompts"], row["prompt_chars"], note_label(row),
             mask(row.get('agent') or '未確認')))
     if more:
         lines += [""] + more

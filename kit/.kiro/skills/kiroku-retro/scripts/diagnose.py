@@ -10,6 +10,9 @@
   D6  型ごとの負担（回数、セッション数、割合）
 
 判定できない参照は数えない。「確かめられない」ものを「壊れている」とは書かない。
+モノレポでは、参照先がルート以外にあることが多い。ルート、書いたファイルのディレクトリ、リポジトリ内の
+同じ名前（末尾が一致する）パスのどこにも無いものだけを「無い」とする。npm script と make の target も、
+リポジトリ内のすべての package.json と Makefile を見る。
 """
 import itertools
 import json
@@ -187,33 +190,57 @@ def _ignored(root, relative):
 
 
 def _looks_like_path(token):
+    """パスらしさ。False（パスではない）、"path"（確かめる）、"maybe"（最初の区切りがディレクトリとして
+    実在するときだけ確かめる）。
+
+    拡張子の無い a/b は、`owner/repo`、`Given/When/Then`、「登録/削除」のような、/ で区切った語のことが多い。
+    最初の区切りがリポジトリに無ければ、パスとはみなさない。
+    """
     if not token or any(c in NOT_PATH_CHARS for c in token) or "://" in token:
         return False
     if token.startswith(("-", "~", "#", "@", "/", "\\")):
         return False
-    if "/" in token:
-        return bool(token.strip("/"))
-    found = re.fullmatch(r"[\w.-]+\.([A-Za-z0-9]+)", token)
-    return bool(found) and found.group(1).lower() in PATH_EXTENSIONS
+    found = re.fullmatch(r"[\w.-]+\.([A-Za-z0-9]+)", token.rsplit("/", 1)[-1])
+    if found and found.group(1).lower() in PATH_EXTENSIONS:
+        return "path"
+    if "/" not in token:
+        return False
+    if token.endswith("/"):
+        return "path" if token.strip("/") else False
+    return "maybe"
 
 
-def _make_targets(root):
-    for name in ("Makefile", "makefile", "GNUmakefile"):
-        text = _read(Path(root) / name)
-        if text is not None:
-            targets = set()
-            for line in text.splitlines():
-                found = re.match(r"^([A-Za-z0-9_.%/ -]+?)\s*::?(?!=)", line)
-                if found and not line.startswith("\t"):
-                    targets.update(found.group(1).split())
-            return targets
-    return None
+def _repo_index(files):
+    """リポジトリのパス（ファイルとディレクトリ）を、最後の名前で引く表と、ディレクトリの名前の集合。"""
+    index, directories = {}, set()
+    for name in files:
+        parts = name.split("/")
+        directories.update(parts[:-1])
+        for depth in range(1, len(parts) + 1):
+            index.setdefault(parts[depth - 1], set()).add("/".join(parts[:depth]))
+    return index, directories
 
 
-def _npm_scripts(root):
-    text = _read(Path(root) / "package.json")
-    if text is None:
-        return None
+def _elsewhere(token, index):
+    """リポジトリのどこかに、末尾が token と一致するパスがあるか。"""
+    token = token.strip("/")
+    while token.startswith("./"):
+        token = token[2:]
+    if not token or ".." in token.split("/"):
+        return False
+    return any(p == token or p.endswith("/" + token) for p in index.get(token.split("/")[-1], ()))
+
+
+def _make_targets(text):
+    targets = set()
+    for line in text.splitlines():
+        found = re.match(r"^([A-Za-z0-9_.%/ -]+?)\s*::?(?!=)", line)
+        if found and not line.startswith("\t"):
+            targets.update(found.group(1).split())
+    return targets
+
+
+def _package_scripts(text):
     try:
         scripts = json.loads(text).get("scripts")
     except (ValueError, AttributeError):
@@ -221,22 +248,72 @@ def _npm_scripts(root):
     return set(scripts) if isinstance(scripts, dict) else set()
 
 
+MAKEFILES = ("GNUmakefile", "makefile", "Makefile")
+
+
+def _definitions(root, files, names, parse):
+    """リポジトリ内の package.json や Makefile ごとの定義。([(相対パス, 名前の集合)], 読めなかった数)。
+
+    同じディレクトリに複数の Makefile があるときは、make が読むもの（GNUmakefile、makefile、Makefile の順）だけ。
+    """
+    chosen = {}
+    for name in set(files) | {n for n in names if (Path(root) / n).is_file()}:
+        directory, _, base = name.rpartition("/")
+        if base in names and (directory not in chosen or names.index(base) < names.index(chosen[directory])):
+            chosen[directory] = base
+    found, unreadable = [], 0
+    for directory, base in sorted(chosen.items()):
+        relative = directory + "/" + base if directory else base
+        text = _read(Path(root) / relative)
+        value = parse(text) if text is not None else None
+        if value is None:
+            unreadable += 1
+        else:
+            found.append((relative, value))
+    return found, unreadable
+
+
+def _missing_definition(defined, unreadable, label, what, name, written):
+    """npm script や make の target が、どの定義にも無いか。判定できなければ None。"""
+    if any(name in names for _, names in defined):
+        return None
+    if unreadable:
+        return None   # 読めない定義に書かれているかもしれない
+    if not defined:
+        return (written, "%s が無い" % label)
+    if len(defined) == 1:
+        return (written, "%s に %s `%s` が無い" % (defined[0][0], what, name))
+    return (written, "どの %s（%d 個）にも %s `%s` が無い" % (label, len(defined), what, name))
+
+
+def _context(root, cache):
+    if "files" not in cache:
+        cache["files"] = harness.repo_files(root)
+    if "index" not in cache:
+        cache["index"] = _repo_index(cache["files"])
+    return cache["files"], cache["index"]
+
+
 def broken_references(root, command, bases, cache):
-    """1つのコマンドや参照の中の、参照先が無いもの。[(参照, 理由)]。判定できないものは返さない。"""
+    """1つのコマンドや参照の中の、参照先が無いもの。[(参照, 理由)]。判定できないものは返さない。
+
+    cache には、リポジトリのファイル一覧（"files"）を入れておける。無ければ、ここで求める。
+    """
     tokens = command.split()
     if not tokens:
         return []
-    problems = []
+    files, (index, directories) = _context(root, cache)
     if tokens[0] in ("make", "gmake"):
         target = next((t for t in tokens[1:] if not t.startswith("-") and "=" not in t), None)
         if "make" not in cache:
-            cache["make"] = _make_targets(root)
-        targets = cache["make"]
-        if targets is None:
-            problems.append((" ".join(tokens[:2] if target else tokens[:1]), "Makefile が無い"))
-        elif target and target not in targets:
-            problems.append(("make %s" % target, "Makefile に target `%s` が無い" % target))
-        return problems
+            cache["make"] = _definitions(root, files, MAKEFILES, _make_targets)
+        defined, unreadable = cache["make"]
+        if not defined and not unreadable:
+            return [(" ".join(tokens[:2] if target else tokens[:1]), "Makefile が無い")]
+        if target:
+            missing = _missing_definition(defined, unreadable, "Makefile", "target", target, "make %s" % target)
+            return [missing] if missing else []
+        return []
     script = None
     if tokens[0] in ("npm", "pnpm", "yarn") and len(tokens) >= 3 and tokens[1] == "run":
         script, written = tokens[2], " ".join(tokens[:3])
@@ -244,22 +321,29 @@ def broken_references(root, command, bases, cache):
         script, written = "test", "npm test"
     if script:
         if "npm" not in cache:
-            cache["npm"] = _npm_scripts(root)
-        scripts = cache["npm"]
-        if scripts is None:
-            problems.append((written, "package.json が無い"))
-        elif script not in scripts:
-            problems.append((written, "package.json に script `%s` が無い" % script))
-        return problems
+            cache["npm"] = _definitions(root, files, ("package.json",), _package_scripts)
+        missing = _missing_definition(*cache["npm"], "package.json", "script", script, written)
+        return [missing] if missing else []
+    problems = []
+    roots = [Path(root)] + [Path(b) for b in bases if Path(b) != Path(root)]
     for token in tokens:
         token = token.strip("()[],;:。、")
-        if not _looks_like_path(token):
+        kind = _looks_like_path(token)
+        if not kind:
             continue
-        if any((Path(base) / token).exists() for base in [root] + list(bases)):
+        if any((base / token).exists() for base in roots):
             continue
+        first = token.split("/")[0]
+        if kind == "maybe" and first not in directories and not any((b / first).is_dir() for b in roots):
+            continue   # / で区切った語（owner/repo など）。パスかどうか分からない
+        if _elsewhere(token, index):
+            continue   # 別の場所にある同じ名前のもの。どれを指すかは分からないが、無いとは言えない
         if _ignored(root, token):
             continue   # 実行時にできるファイル（記録など）。git が無視するものは、無くても誤りではない
-        problems.append((token, "参照先が無い"))
+        places = ["ルート"] + ["`%s/`" % os.path.relpath(b, root).replace(os.sep, "/") for b in roots[1:]]
+        problems.append((token, "参照先が無い（探した場所：%s、%s）" % (
+            "、".join(places), "リポジトリ内の同じ名前のファイル" if "/" not in token.strip("/")
+            else "リポジトリ内で末尾が一致するパス")))
     return problems
 
 
@@ -300,9 +384,9 @@ def _json_commands(path, kind):
     return found
 
 
-def broken_refs(root, texts):
+def broken_refs(root, texts, files=None):
     """D2：決まりに書かれた参照のうち、参照先が無いもの。プロジェクト内のファイルだけを見る。"""
-    found, cache, seen = [], {}, set()
+    found, cache, seen = [], {} if files is None else {"files": files}, set()
     for shown, path, kind, scope in texts:
         if scope != "project":
             continue
@@ -310,7 +394,7 @@ def broken_refs(root, texts):
             commands = _json_commands(path, kind)
         else:
             commands = _code_spans(_read(path) or "")
-        bases = [path.parent] if kind == "skill" else []
+        bases = [path.parent]   # 書いたファイルからの相対パス（skill の references/、steering 同士など）
         for command in commands:
             for ref, reason in broken_references(root, command, bases, cache):
                 key = "D2:%s:%s" % (shown, ref)
@@ -379,9 +463,11 @@ def sensors(root, files, config, hooks_by_name):
                             ci_runs_tests = True
                     except re.error:
                         continue
-    lint = [n for n in files if n in LINT_FILES]
-    for name, sections in LINT_SECTIONS.items():
-        if name in files and any(s in (_read(Path(root) / name) or "") for s in sections):
+    # モノレポでは、設定がサブディレクトリごとにある。どの階層でも、ファイル名で見る。
+    lint = [n for n in files if n.rsplit("/", 1)[-1] in LINT_FILES]
+    for name in files:
+        sections = LINT_SECTIONS.get(name.rsplit("/", 1)[-1])
+        if sections and any(s in (_read(Path(root) / name) or "") for s in sections):
             lint.append(name)
     return {"test_configs": len(tests), "hooks": hooks, "precommit": precommit, "ci": ci,
             "ci_runs_tests": ci_runs_tests, "lint": sorted(set(lint))}
@@ -391,7 +477,7 @@ def diagnose(root, config, hooks_by_name):
     """D1〜D3 と D5。ファイルだけから決まる。"""
     files = harness.repo_files(root)
     texts = harness_texts(root, files)
-    return {"unloaded": unloaded_steering(texts, files), "broken": broken_refs(root, texts),
+    return {"unloaded": unloaded_steering(texts, files), "broken": broken_refs(root, texts, files),
             "duplicates": duplicates(texts), "sensors": sensors(root, files, config, hooks_by_name)}
 
 

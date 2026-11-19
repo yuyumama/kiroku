@@ -635,6 +635,22 @@ class ReadingPlanTest(ReviewSandbox):
         self.assertIn("未読のセッションはありません", aggregate.render(data))
 
 
+    def test_sessions_without_prompts_are_not_shown_as_unread(self):
+        """発話の無いセッションは読む対象にならないので、一覧でも「未読」と書かない（未読の合計と食い違うため）。"""
+        self.shell("ls missing", 2)              # 記録はあるが、ログにユーザー発話が無い
+        self.log(self.session, [])
+        self.session = "sess_nolog"              # 記録はあるが、ログが無い
+        self.shell("ls missing", 2)
+        self.log("sess_talk", ["依頼"])
+        data = aggregate.aggregate(self.root)
+        text = aggregate.render(data)
+        self.assertEqual(data["reading_plan"]["read"], ["sess_talk"])
+        rows = {line.split("|")[1].strip(): line.split("|")[7].strip()
+                for line in text.splitlines() if line.startswith("| `sess_")}
+        self.assertEqual(rows, {"`sess_talk`": "未読", "`sess_test`": "対象外（期間内の発話なし）",
+                                "`sess_nolog`": "対象外（ログが無い・読めない）"})
+        self.assertIn("## 未読のセッション（合計 1 件）", text)
+
 class LogOnlyTest(ReviewSandbox):
     def test_conversation_without_hook_records_is_read_and_paged(self):
         """Issue #12 改善：記録が0件でもログの会話は読む対象になり、全文ページにも出る。"""

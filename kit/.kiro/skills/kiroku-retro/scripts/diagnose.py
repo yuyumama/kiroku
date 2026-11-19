@@ -327,12 +327,14 @@ def _outputs(tokens):
     return found
 
 
-def broken_references(root, command, bases, cache, missing="見つからない"):
+def broken_references(root, command, bases, cache, missing="見つからない", strict=False):
     """1つのコマンドや参照の中の、参照先が無いもの。[(参照, 理由)]。判定できないものは返さない。
 
     cache には、リポジトリのファイル一覧（"files"）を入れておける。無ければ、ここで求める。
     missing は、パスが見つからないときの理由の書き出し。参照と決まっているもの（hook のコマンドなど）は
     「参照先が無い」、文章の中のコードとして書かれた語は「見つからない」（参照かどうかは未確認）にする。
+    strict は、実行・読み込みされるもの（hook のコマンド、エージェント定義）。ルートからだけ解決し、
+    別の場所の同じ名前のファイルでは「有る」としない（実行すると見つからずに失敗するため）。
     """
     tokens = command.split()
     if not tokens:
@@ -360,7 +362,7 @@ def broken_references(root, command, bases, cache, missing="見つからない")
         missing = _missing_definition(*cache["npm"], "package.json", "script", script, written)
         return [missing] if missing else []
     problems = []
-    roots = [Path(root)] + [Path(b) for b in bases if Path(b) != Path(root)]
+    roots = [Path(root)] + ([] if strict else [Path(b) for b in bases if Path(b) != Path(root)])
     outputs = _outputs(tokens)
     for position, token in enumerate(tokens):
         if position in outputs:
@@ -374,14 +376,15 @@ def broken_references(root, command, bases, cache, missing="見つからない")
         first = token.split("/")[0]
         if kind == "maybe" and first not in directories and not any((b / first).is_dir() for b in roots):
             continue   # / で区切った語（owner/repo など）。パスとして読む根拠が無いので、候補にも出さない
-        if _elsewhere(token, index):
+        if not strict and _elsewhere(token, index):
             continue   # 別の場所にある同じ名前のもの。どれを指すかは分からないが、無いとは言えない
-        if token.startswith(".") and "/" not in token and token.count(".") >= 2 \
+        if not strict and token.startswith(".") and "/" not in token and token.count(".") >= 2 \
                 and any(name.endswith(token) for name in index):
             continue   # `.test.ts` のような、名前の末尾の説明。末尾が一致するファイルがある
         if _ignored(root, token):
             continue   # 実行時にできるファイル（記録など）。git が無視するものは、無くても誤りではない
-        problems.append((token, "%s（探した場所：%s）" % (missing, _places(root, roots, token))))
+        problems.append((token, "%s（基準：ルート）" % missing if strict
+                         else "%s（探した場所：%s）" % (missing, _places(root, roots, token))))
     return problems
 
 
@@ -526,7 +529,7 @@ def broken_refs(root, texts, files=None):
         if kind in ("hooks", "agent"):
             if scope == "project":
                 for command in _json_commands(path, kind):
-                    for ref, reason in broken_references(root, command, [path.parent], cache, "参照先が無い"):
+                    for ref, reason in broken_references(root, command, [], cache, "参照先が無い", strict=True):
                         add(shown, ref, reason, True)
             continue
         spans, refs = _scan(_read(path) or "")

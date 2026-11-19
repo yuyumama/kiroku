@@ -715,6 +715,22 @@ class ShellLogTest(ReviewSandbox):
         self.assertIn("- テストの記録設定に一致したシェル実行：3 回（終了コード 1→0→0）。"
                       "うち文面だけで一致 1 回（実行か言及かは未確認）", text)
 
+    def test_test_calls_that_did_not_run_are_not_counted(self):
+        """承認されずに終わった呼び出し（終了コード -1）は、テストの実行に数えない（#18）。"""
+        rows = [{"type": "user", "content": "テストを流して"}]
+        for number, code in enumerate((-1, -1, 0)):
+            rows += [{"type": "tool_call", "toolName": "execute_bash", "toolCallId": "t%d" % number,
+                      "args": {"command": "pytest -q"}},
+                     {"type": "tool_result", "toolCallId": "t%d" % number, "success": code == 0,
+                      "content": "this call did not run\n\nExit Code: %d" % code}]
+        self.rows(rows, minutes_after=-1)
+        view = aggregate.prompts.distill(self.root, self.session)
+        turn = view["turns"][0]
+        self.assertEqual(([t["exit_code"] for t in turn["tests"]], turn["tests_not_run"]), ([0], 2))
+        text = aggregate.render_session(view)
+        self.assertIn("テストの記録設定に一致したシェル実行：1 回（終了コード 0）", text)
+        self.assertIn("実行が完了しなかった呼び出し（終了コード -1。承認されなかった、止められた、など）：2 回", text)
+
     def test_review_summary_does_not_count_sessions_without_prompts_as_unread(self):
         """見直し用の要約も、発話の無いセッションを未読に数えない（集約の未読の合計とそろえる）。"""
         self.shell("ls missing", 2)

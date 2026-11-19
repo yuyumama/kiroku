@@ -220,6 +220,17 @@ class DiagnoseTest(ReviewSandbox):
         (self.home / "steering" / "common.md").write_text("`scripts/none.sh` を使う。\n", encoding="utf-8")
         self.assertFalse([k for k in self.keys() if "common.md" in k])
 
+    def test_hook_command_is_resolved_from_the_root_only(self):
+        """hook はルートから実行される。別の場所の同じ名前のファイルに末尾が当たっても、有るとはしない（#18）。"""
+        self.write("scripts/check_syntax.py", "")
+        self.write(".kiro/hooks/project.json", json.dumps({"hooks": [
+            {"name": "a", "trigger": "PostFileSave", "action": {"type": "command", "command": "python3 ./check_syntax.py"}},
+            {"name": "b", "trigger": "PostFileSave", "action": {"type": "command", "command": "python3 scripts/check_syntax.py"}}]}))
+        rows = {r["ref"]: r for r in self.found()["broken"]}
+        self.assertEqual(set(rows), {"./check_syntax.py"})
+        self.assertEqual((rows["./check_syntax.py"]["reason"], rows["./check_syntax.py"]["confirmed"]),
+                         ("参照先が無い（基準：ルート）", True))
+
     def test_same_sentence_in_two_files(self):
         rule = "- 金額は整数の円で持ちます。小数は使いません。"
         self.write(".kiro/steering/product.md", "# 前提\n\n%s\n- 短い\n" % rule)

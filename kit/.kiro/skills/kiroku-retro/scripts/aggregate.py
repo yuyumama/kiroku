@@ -1219,6 +1219,9 @@ def render_session(view):
                 "、".join("`%s`×%d" % item for item in commands_failed[:3]),
                 "、ほか %d 種類" % (len(commands_failed) - 3) if len(commands_failed) > 3 else ""))
         tests = turn.get("tests") or []
+        if turn.get("tests_not_run"):
+            lines.append("- テストの記録設定に一致したが、実行が完了しなかった呼び出し（終了コード -1。"
+                         "承認されなかった、止められた、など）：%d 回。実行には数えない" % turn["tests_not_run"])
         if tests:
             text_only = sum(1 for t in tests if t["matched"] == "text")
             lines.append("- テストの記録設定に一致したシェル実行：%d 回（終了コード %s%s）%s" % (

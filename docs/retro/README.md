@@ -71,7 +71,7 @@ kiroku の更新で設定項目が増えても、`config.json` に書き足す�
 ├── skills/kiroku-retro/
 │   ├── SKILL.md
 │   ├── references/    harness-guide.md（案の形の選び方）
-│   └── scripts/       record.py、aggregate.py、excerpt.py、prompts.py、harness.py、notes.py、ledger.py、review.py
+│   └── scripts/       record.py、aggregate.py、excerpt.py、prompts.py、harness.py、notes.py、ledger.py、review.py、reset.py など
 └── kiroku/
     ├── config.json
     └── data/          events.jsonl、ledger.jsonl、notes/、reports/ など
@@ -403,6 +403,21 @@ python3 .kiro/skills/kiroku-retro/scripts/review.py --since 14d
 
 出るのは、週ごとの記録の数、信号ごとの種類の数と繰り返しの度合い、セッションとログの状態、会話からの型の数、案の採用・見送りの数、採用した案のその後、steering の量です。
 数え方は集約にそろえます。判定できなかったシェル実行は、重なった実行を含めた回数で数えます（集約の「記録の不足」と同じ）。レポートの数は、台帳と同じ判定で書き終えたものだけを数え、書きかけの骨組みは別に出します。
+
+## 記録をやり直す
+
+kiroku の記録をゼロからやり直すときは、人が端末から次を実行します。振り返りの専用エージェントには許可していません。
+
+```bash
+python3 .kiro/skills/kiroku-retro/scripts/reset.py --dry-run   # 退避するものを見る
+python3 .kiro/skills/kiroku-retro/scripts/reset.py             # 確認してから実行（--yes で確認を省く）
+```
+
+- `.kiro/kiroku/data/` の中身（記録、state、ノート、台帳、レポートなど）を、`.kiro/kiroku/data/backups/<日時>/` に移します。消しません。
+- 新しい state に「記録の始まり」の時刻を控えます。集約は、それより前の記録と会話を数えません（期間の指定より優先します）。Kiro 自身のセッションログ（`~/.kiro/sessions/`）は残るので、こうしないと、やり直す前の会話が「未読」として戻ってきます。
+- 設定（`config.json`）、フック、エージェント定義、`.gitignore` には触りません。再導入は要りません。
+- 戻すときは、退避先の中身を `.kiro/kiroku/data/` に移し直します（今の `state.json` は上書きして構いません）。
+- 退避先は `data/` の中にあるので、git には載りません。アンインストールでは、`data/` と一緒に消えます（`--keep-reports` でも残るのは `data/reports/` だけです）。
 
 ## アンインストール
 

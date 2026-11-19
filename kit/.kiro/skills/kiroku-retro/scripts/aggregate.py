@@ -55,7 +55,7 @@ import citations  # noqa: E402
 import reads  # noqa: E402
 import diagnose  # noqa: E402
 from record import (count_setting, load_config, load_state, mask, not_run_kind, recording_lock,  # noqa: E402
-                    save_state, script_root)
+                    recording_start, save_state, script_root)
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
@@ -397,10 +397,17 @@ def period_key(moment, by):
     return "全期間"
 
 
+def clamp(root, since):
+    """reset.py で記録をやり直したなら、その時刻より前は数えない（Kiro のセッションログは残るため）。"""
+    start = recording_start(os.path.join(root, ".kiro", "kiroku", "data"))
+    return start if start and (since is None or since < start) else since
+
+
 def aggregate(root, since=None, until=None, by="week", with_prompts=False,
               prompt_offset=0, prompt_limit=20, before_report=None):
     repo = Repo(root)
     data_dir = os.path.join(root, ".kiro", "kiroku", "data")
+    since = clamp(root, since)
     events = load_events(os.path.join(data_dir, "events.jsonl"))
     # 振り返りを始めた後の記録は、振り返りの会話そのものなので、開発の記録から除く。
     retro = prompts.retro_starts(root, sorted({e["session_id"] for e in events if e.get("session_id")}))
@@ -619,6 +626,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "harness": harness.inventory(root),
         "steering": harness.steering_weight(root),
         "diagnostics": diagnose.diagnose(root, load_config(root), prompts.hook_triggers(root)),
+        "recording_start": (lambda m: m.isoformat() if m else None)(recording_start(data_dir)),
         "topics": notes.topics(findings, since, until),
         "note_problems": note_problems,
         "adopted": adopted,
@@ -654,6 +662,9 @@ def render(data, show_prompts=False, section=None, cap=None):
 
     lines = ["# kiroku 集約", ""]
     lines.append("- 期間：%s 〜 %s" % (data["since"] or "最初", data["until"] or "現在"))
+    if data.get("recording_start"):
+        lines.append("- 記録の始まり：%s（reset.py でやり直した。これより前の記録と会話は数えない）"
+                     % data["recording_start"])
     lines.append("- イベント数：%d" % data["event_count"])
     context = data['execution_context']
     lines.append('- 実行エージェント：%s（%s）' % (context['agent'] or '未確認', context['status']))
@@ -1259,6 +1270,7 @@ def main(argv=None):
     since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else now
     if args.session:
+        since = clamp(root, since)
         if args.user_chars < 1 or args.reply_chars < 1:
             parser.error("user-chars と reply-chars は1以上にしてください")
         view = prompts.distill(root, args.session, since, until, args.user_chars, args.reply_chars)

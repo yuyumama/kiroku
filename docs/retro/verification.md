@@ -1241,3 +1241,16 @@ README は、案の番号の重複の検査を「版3のレポートだけに当
 - `sessions_dir` を設定した導入先で、エージェントが振り返り自身のログを抜粋で開けるか（抜粋は `sessions_dir` だけを探す）。
 
 既存の導入先への影響は「`--update` だけで済む」。指定しなければ、レポートは段1と同じ。state に項目を1つ足すが、以前の版のスクリプトはこの項目を読まない。設定、記録、ノート、台帳の形式は変えていない。
+
+## 2026-11-20：ハーネスの地図と、承認からの権限の提案の設計のための確認（公式資料。実機ではない）
+
+[harness-map-design.md](harness-map-design.md) の設計のために、公式資料で次を確かめた。まだ実装していない。
+
+- 権限（[Permissions](https://kiro.dev/docs/permissions/)、2026-11-18 更新）：シェルの規則の `*` は任意の文字の並びで、`**`・`?` は使えない。つないだコマンドは分けて1つずつ判定する。優先は deny > ask > allow > evaluate で、範囲の間に優先は無い。ワークスペースの規則は `~/.kiro/workspace-roots/<hash>/permissions.yaml`（リポジトリの外）、ユーザー共通は `~/.kiro/settings/permissions.yaml`。承認画面の Always allow は、段（完全一致、2語＋`*`、1語＋`*`）と範囲を選んで規則を保存する（CLI 2.36 から）。
+- Approve for me：規則で決まらない操作を LLM の判定で通す・止める・聞く。既定では切ってある。有料の利用者向け。「セキュリティの仕組みの代わりにはならない」。
+- PermissionRequest のフック（[Hooks のトリガー](https://kiro.dev/docs/hooks/types/)、CLI 3.4.0 から）：承認画面が出る直前に動き、規則で決まった呼び出しでは動かない。
+- memories（[Memory](https://kiro.dev/docs/memory/)）：利用者ごとにローカルに保存。「一貫して守らせたい決まりは Steering に書く」。保存場所の記載は無い。
+
+未検証：承認画面で Allow と Always allow を選んだときの、ログの `interaction_resolved` の `selectedOption` の値。既定の権限で、読み取りだけのコマンドに承認画面が出るか。
+
+既存の導入先への影響は「なし」（文書だけの変更）。

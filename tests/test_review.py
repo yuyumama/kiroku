@@ -549,7 +549,10 @@ class ReviewSummaryTest(ReviewSandbox):
         steering.mkdir(parents=True)
         (steering / "payments-rules.md").write_text("社外秘の決まり" * 10, encoding="utf-8")
 
-        text = review.summarize(self.root, None, NOW + datetime.timedelta(minutes=1))
+        # 期間の終わりは、呼ぶときの時刻から決める。NOW は読み込んだときの時刻なので、ほかのテストが長いと、
+        # 記録の時刻が期間の外に出てしまう。
+        text = review.summarize(self.root, None, datetime.datetime.now(datetime.timezone.utc)
+                                + datetime.timedelta(minutes=1))
         for secret in ("secret-build-tool", "payments", "PAYMENT_TABLE", "顧客台帳", "社外秘",
                        "sess_a", self.root):
             self.assertNotIn(secret, text)
@@ -574,7 +577,10 @@ class ReviewSummaryTest(ReviewSandbox):
         data = aggregate.aggregate(self.root)
         self.assertEqual([(g["reason"], g["count"]) for g in data["recording_gaps"]], [("test_end_missing", 3)])
         self.report("2026-11-10-0900", "<!-- kiroku-report:3 -->\n# 振り返り\n\n- 読んだセッション：【ここに書く】\n")
-        text = review.summarize(self.root, None, NOW + datetime.timedelta(minutes=1))
+        # 期間の終わりは、呼ぶときの時刻から決める。NOW は読み込んだときの時刻なので、ほかのテストが長いと、
+        # 記録の時刻が期間の外に出てしまう。
+        text = review.summarize(self.root, None, datetime.datetime.now(datetime.timezone.utc)
+                                + datetime.timedelta(minutes=1))
         self.assertIn("判定できなかったシェル実行（recording_gap）：3 件", text)
         self.assertIn("レポート：0 個（ほかに書きかけの骨組み 1 個）", text)
 

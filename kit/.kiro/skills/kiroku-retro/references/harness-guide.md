@@ -120,6 +120,22 @@ hook のエージェントプロンプト型は、文脈に応じた判断が要
 - 一歩先の案で置き換えた個別の案は、別に書きません。案の数を増やさず、減らします。
 - テストや CI の設定を変える案は、今の実行方法（README、ランナー、kiroku のテストの記録設定）と合わせて書きます。
 
+## 利用者に聞くときの言い換え
+
+手順5で利用者に聞くときに使います。利用者は、プログラマーとは限りません。質問の本文では、言い換えを先に書き、カッコで元の言葉を添えます（例：「決まった場面で自動で動く設定（hook）」）。言い換えで足りないときは、公式資料のリンクを添えます。
+
+| 言葉 | 短い言い換え | 公式資料 |
+|---|---|---|
+| steering | Kiro に、いつも守ってほしい決まりや前提を書いておくファイル | [Steering](https://kiro.dev/docs/steering/) |
+| hook | ファイルの保存や作業の終わりなど、決まった場面で自動で動く設定 | [Hooks](https://kiro.dev/docs/hooks/) |
+| skill | 決まった手順をまとめ、`/名前` で呼び出せるようにしたもの | [Agent Skills](https://kiro.dev/docs/skills/) |
+| エージェント | 使えるツールや権限を、作業ごとに決めた Kiro の設定 | [Custom agents の設定](https://kiro.dev/docs/custom-agents/configuration-reference/) |
+| MCP | Kiro に、外のツールやサービスをつなぐ仕組み | [MCP](https://kiro.dev/docs/mcp/) |
+| pre-commit | コミットする前に、自動で検査を動かす仕組み（git の hook） | [githooks](https://git-scm.com/docs/githooks) |
+| CI | push したときに、別の場所で自動でテストや検査を動かす仕組み（GitHub Actions など） | — |
+| lint | 書き方の誤りや、決まりへの違反を、自動で見つける道具 | — |
+| テスト | コードが期待どおりに動くかを、自動で確かめるプログラム | — |
+
 ## 案を出す前の確認
 
 カスタムエージェントの継承設定は [公式リファレンス](https://kiro.dev/docs/custom-agents/configuration-reference/#disabling-default-resource-inheritance) に従います。既定の継承を無効化する設定はCLIのグローバルまたはワークスペース単位です。設定や実際の読み込みを確認できなければ、その範囲は未確認とします。

@@ -18,9 +18,12 @@ from pathlib import Path
 #   3：節の中の欄（引き継がなかった案の理由、記録の不足への補足）に見出しの行を付け、
 #      欄が空のままのレポートを、骨組みが無くても見分けられるようにする
 #   4：一歩先の改善案の節と、ハーネスの診断の節を足し、人が読む順に並べ替える
-VERSION = 4
+#   5：冒頭の要約の次に、利用者に確かめたこと（案を作る前の質問と答え）の節を足す
+VERSION = 5
 ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = 3   # 一歩先の改善案の上限の既定値（設定の one_step_max）。最初の値で、根拠は薄い
+QUESTION_HEADING = "## 利用者に確かめたこと"
+QUESTION_DEFAULT = 3   # 利用者に聞く質問の上限の既定値（設定の question_max）。最初の値で、根拠は薄い
 MARK = "<!-- kiroku-report:%d -->" % VERSION
 MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
 SLOT = re.compile(r"【ここに書く[^】]*】")
@@ -43,8 +46,8 @@ def version(text):
 # 欄を埋めたあとも値が空であってはならない行と節。目印だけを消した空欄を、書き終えたとみなさない。
 REQUIRED_LINES = ("- 読んだセッション：", "- 読めなかった範囲（未確認）：",
                   "- 載せなかった案と理由：", "- 補足と、利用者に確かめたいこと：")
-REQUIRED_SECTIONS = ("## 一歩先の改善案", "## 観測した型・継続方針", "## ハーネスへの改善案（プロジェクト内）",
-                     "## ハーネスへの改善案（ユーザー共通）", "## 様子見")
+REQUIRED_SECTIONS = (QUESTION_HEADING, "## 一歩先の改善案", "## 観測した型・継続方針",
+                     "## ハーネスへの改善案（プロジェクト内）", "## ハーネスへの改善案（ユーザー共通）", "## 様子見")
 TABLE_HEAD = "| 範囲 | パス | 存在 | 確認の状態 | 役割と読み込みの条件 |"
 
 
@@ -182,7 +185,8 @@ def build(root, data, reasons=None, session=None, version=VERSION):
     version は形式の版。以前の版のレポートを検査するとき、その版の骨組みを作り直すのに使う
     （data も、その版の検証値にそろえたものを渡す。aggregate.as_version）。
     版4は、人が読む順に並べ替えた。一歩先の改善案を先頭に置き、比較表と診断値は後ろに回す。
-    版3までは、作ったときの並びのまま作る（以前のレポートの検査で、行を照合するため）。
+    版5は、冒頭の要約の次に、利用者に確かめたことを置く。案は、その答えを前提にするため。
+    版4までは、作ったときの並びのまま作る（以前のレポートの検査で、行を照合するため）。
     """
     plan, cover = data["reading_plan"], data["coverage"]
     rows, own = _harness_rows(root, data)
@@ -273,7 +277,18 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "次は、スクリプトがファイルと記録から決めた値です。一歩先の改善案の手がかりに使います。",
         "",
     ] + diagnose.lines(data["diagnostics"], data["burden"], diagnose.REPORT_CAP)
-    return "\n".join(header + one_step + body + table + diagnostics + tail)
+    if version < 5:
+        return "\n".join(header + one_step + body + table + diagnostics + tail)
+    asked = data.get("question_max", QUESTION_DEFAULT)
+    questions = [
+        "",
+        QUESTION_HEADING,
+        "",
+        slot("案を作る前に利用者に聞いた質問を、最大 %d 件。`### Q1. …` の見出しで、手がかり、見立て、回答、"
+             "引用（回答）、反映を書く。聞かなかったときは「なし」" % asked if asked else
+             "質問しない設定（question_max が 0）なので「なし」"),
+    ]
+    return "\n".join(header + questions + one_step + body + table + diagnostics + tail)
 
 
 def fixed_parts(text):

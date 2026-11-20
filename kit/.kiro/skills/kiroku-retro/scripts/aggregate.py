@@ -164,6 +164,47 @@ def parse_time(text):
     return datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
+ERROR_STAMP = re.compile(r"(\d{4}-\d\d-\d\dT\S+)\s")   # record.py が record-errors.log の行の先頭に書く時刻
+
+
+def record_error_lines(data_dir, until=None):
+    """record-errors.log の行の数。until を渡すと、その時刻より前に書かれた行だけを数える。
+
+    例外の文面が改行を含むと、1件が複数の行になる。時刻の無い行は、直前の行と同じ時刻に
+    書かれたものとして扱う。最初の時刻より前の行は、until より前とみなす。
+    """
+    count, written = 0, None
+    try:
+        with open(os.path.join(data_dir, "record-errors.log"), encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                found = ERROR_STAMP.match(line)
+                moment = excerpt.parse_time(found.group(1)) if found else None
+                if moment:
+                    written = moment
+                if until is None or written is None or written < until:
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def record_errors_at(data_dir, state, name):
+    """そのレポートの骨組みを作ったときの、記録フックのエラーの行数。分からなければ None。
+
+    骨組みを作った後も、記録フックは動く（振り返り自身のシェル実行でも動く）。検査のときの行数で
+    骨組みを作り直すと、スクリプトが書いた「記録フックのエラー：N 行」と合わなくなる。
+    骨組みを作ったときに控えた数を使う。控えの無い以前の版のレポートは、作った時刻（report_made）
+    までの行を数える。どちらも無ければ None（検査のときの行数で比べる。以前の動き）。
+    """
+    kept = state.get("report_record_errors")
+    value = kept.get(name) if isinstance(kept, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    made = state.get("report_made")
+    moment = excerpt.parse_time(made.get(name)) if isinstance(made, dict) and isinstance(made.get(name), str) else None
+    return record_error_lines(data_dir, until=moment) if moment else None
+
+
 def parse_bound(text, now):
     """`14d` のような日数、または日付・日時を解釈する。"""
     found = re.fullmatch(r"(\d+)d", text)
@@ -708,11 +749,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     log_only = [s for s in session_rows if not s["recorded"]]
     before = sum(1 for s in log_only if first and s["last_activity"]
                  and parse_time(s["last_activity"]) < first)
-    try:
-        with open(os.path.join(data_dir, "record-errors.log"), encoding="utf-8", errors="replace") as handle:
-            record_errors = sum(1 for _ in handle)
-    except OSError:
-        record_errors = 0
+    record_errors = record_error_lines(data_dir)
     coverage = {"sessions": len(session_rows), "recorded": len(session_rows) - len(log_only),
                 "log_only": len(log_only), "first_event": first.isoformat() if first else None,
                 "before_first": before, "after_first": len(log_only) - before if first else None,
@@ -1332,6 +1369,10 @@ def new_report(root, data):
         else:
             heads.pop(chosen, None)
         state["report_heads"] = heads
+        # 骨組みに書いた、記録フックのエラーの行数。検査は、この数で骨組みを作り直す（record_errors_at）。
+        kept = state.get("report_record_errors") if isinstance(state.get("report_record_errors"), dict) else {}
+        kept[chosen] = data["coverage"]["record_errors"]
+        state["report_record_errors"] = kept
         if session:
             made[chosen] = session
             state["report_sessions"] = made
@@ -1400,12 +1441,16 @@ def main(argv=None):
             data = aggregate(root, start, end, before_report=name)
             form = skeleton.version(body)
             data = as_version(data, form)   # 以前の版のレポートは、その版の検証値と骨組みで比べる
+            data_dir = os.path.join(root, ".kiro", "kiroku", "data")
+            state = load_state(data_dir)
+            kept = record_errors_at(data_dir, state, name)
+            if kept is not None:   # 骨組みを作った後に増えた記録フックのエラーで、不一致にしない
+                data = dict(data, coverage=dict(data["coverage"], record_errors=kept))
             errors = reportcheck.validate(body, data['report_facts'], numbers=form >= skeleton.VERSION)
             if form:
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
-                made_by = (load_state(os.path.join(root, ".kiro", "kiroku", "data"))
-                           .get("report_sessions") or {}).get(name, reads.session_of(body))
+                made_by = (state.get("report_sessions") or {}).get(name, reads.session_of(body))
                 # 版1は表記が違うので、行は照合しない（欄の残りだけを見る）。
                 expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION)) \
                     if form >= 2 else ""

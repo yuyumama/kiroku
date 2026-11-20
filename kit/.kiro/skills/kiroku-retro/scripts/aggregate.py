@@ -56,6 +56,7 @@ import skeleton  # noqa: E402
 import citations  # noqa: E402
 import reads  # noqa: E402
 import diagnose  # noqa: E402
+import answers  # noqa: E402
 from record import (count_setting, load_config, load_state, mask, not_run_kind, recording_lock,  # noqa: E402
                     recording_start, save_state, script_root)
 
@@ -803,6 +804,9 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     result['report_facts'] = reportcheck.facts(result)
     result['burden'] = diagnose.burden(result)
     result['one_step_max'] = count_setting(load_config(root), 'one_step_max')
+    result['question_max'] = count_setting(load_config(root), 'question_max')
+    # 以前のレポートで利用者に確かめたこと。同じことを聞き直さないために出す（検証値には入れない）。
+    result['answers'] = answers.previous(root, before_report)
     return result
 
 
@@ -832,6 +836,8 @@ def render(data, show_prompts=False, section=None, cap=None):
     lines.append('- レポートの検証値は `--section facts`、保存後の照合は `--check-report <パス>` で確認します。')
     lines.append("- レポートの保存先：.kiro/kiroku/data/reports/%s.md"
                  % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
+    if "question_max" in data:
+        lines.append("- 利用者に聞く質問の上限：%d 問（設定の question_max。0 なら聞かない）" % data["question_max"])
     if section is None and cap is not None:
         lines.append("- 各一覧は上位だけを出しています。節ごとの全件は `--section <%s>` で出します。"
                      % "|".join(SECTIONS))
@@ -1201,6 +1207,14 @@ def render_review(data, cap=None):
             recent = "数えられない" if row["recent"] is None else "%d 回" % row["recent"]
             lines.append("- `%s` %s（対象の型 `%s`）：期間内の発生 %s" % (
                 row["id"], row["title"], row["target"] or "記載なし", recent))
+    if data.get("answers"):
+        lines += ["", "## 前回までの回答（%d 件）" % len(data["answers"]), "",
+                  "以前のレポートで、利用者に確かめたことです。新しい観測が無ければ、同じことを聞き直しません。"
+                  "使うときは「前回の回答（<レポート名>#Q1）による」と書きます。", ""]
+        answered, more = capped(data["answers"], cap, "review")
+        for row in answered:
+            lines.append("- `%s` %s：%s（反映：%s）" % (row["id"], row["title"], row["answer"], row["reflected"]))
+        lines += more
     if data["rejected"]:
         lines += ["", "## 見送った案（%d 件）" % len(data["rejected"]), "",
                   "同じ対象の型への案は、見送りの後に新しい発生がある場合だけ出します。", ""]
@@ -1294,8 +1308,9 @@ def as_version(data, version):
       - 会話からの型の候補を、版2までの判定（期間の外の継続方針も例外にする）で決め直す。
     更新しただけで、以前に検査を通ったレポートが不一致にならないようにするため。
     振り返りで読むセッションは、これまでどおり今の判定で決める（この関数は検査だけに使う）。
+    版5は節を1つ足しただけで、検証値は版4と同じ。
     """
-    if version >= skeleton.VERSION:
+    if version >= 4:
         return data
     shaped = dict(data, diagnostics=None)   # 版4で足した診断値は、版3までの検証値に無い
     if version < 3:
@@ -1307,6 +1322,21 @@ def as_version(data, version):
         shaped.update(harness=harness_rows, sessions=sessions, reading_plan=plan, topics=topics)
     shaped["report_facts"] = reportcheck.facts(shaped)
     return shaped
+
+
+def clues(data):
+    """利用者への質問の手がかりに書ける名前。
+
+    集約に出た型、診断値、トピック、テスト失敗と、集約の出力に `…` で出たもの（コマンド、パスなど）。
+    手がかりの無い一般的な質問をさせないために使う。名前が集約にあることだけを確かめ、
+    その手がかりが質問に合っているかは判定しない。
+    """
+    facts = data["report_facts"]
+    known = set(facts.get("targets", {})) | set(facts.get("diagnostics") or [])
+    known |= {"topic:" + row["topic"] for row in data["topics"]}
+    known |= {"test:" + row["test_id"] for row in data["test_failures"]}
+    known |= set(re.findall(r"`([^`]+)`", render(data)))
+    return known
 
 
 def new_report(root, data):
@@ -1446,7 +1476,9 @@ def main(argv=None):
             kept = record_errors_at(data_dir, state, name)
             if kept is not None:   # 骨組みを作った後に増えた記録フックのエラーで、不一致にしない
                 data = dict(data, coverage=dict(data["coverage"], record_errors=kept))
-            errors = reportcheck.validate(body, data['report_facts'], numbers=form >= skeleton.VERSION)
+            # 版ごとの規則は、版の番号で固定する（版を上げても、以前の版のレポートの扱いを変えないため）。
+            # 案の番号の重複の検査は版4から、今の探し方での「確認済み」の照合も版4から当てはめる。
+            errors = reportcheck.validate(body, data['report_facts'], numbers=form >= 4)
             if form:
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
@@ -1459,8 +1491,12 @@ def main(argv=None):
                 errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'])
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
-                unread, notices = reads.validate(root, body, legacy=form < skeleton.VERSION)
+                unread, notices = reads.validate(root, body, legacy=form < 4)
                 errors += unread
+            if form >= 5:
+                asked, unverified = answers.validate(root, body, clues(data), data['question_max'])
+                errors += asked
+                notices = list(notices) + unverified
         except (OSError, ValueError, TypeError, KeyError) as exc:
             errors, notices = ['レポートを検査できません：' + str(exc)], []
         for line in errors + notices:

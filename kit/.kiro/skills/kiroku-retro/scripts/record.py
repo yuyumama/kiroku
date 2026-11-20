@@ -58,6 +58,8 @@ DEFAULT_CONFIG = {
     "test_start_max_seconds": 3600,
     # 1回のレポートに書ける、一歩先の改善案の上限。最初の値で、根拠は薄い。
     "one_step_max": 3,
+    # 1回の振り返りで、案を作る前に利用者に聞く質問の上限。最初の値で、根拠は薄い。
+    "question_max": 3,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
@@ -168,7 +170,8 @@ def load_config(root):
 
 
 # 0 以上の整数で指定する項目と、0 にしたときの意味。範囲外や数でない値は、既定値で動く。
-COUNT_KEYS = {"output_tail_chars": "失敗の出力を残さない", "one_step_max": "一歩先の改善案を書かない"}
+COUNT_KEYS = {"output_tail_chars": "失敗の出力を残さない", "one_step_max": "一歩先の改善案を書かない",
+              "question_max": "利用者に質問しない"}
 
 
 def count_setting(config, key):

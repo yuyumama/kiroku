@@ -24,6 +24,7 @@ ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = 3   # 一歩先の改善案の上限の既定値（設定の one_step_max）。最初の値で、根拠は薄い
 QUESTION_HEADING = "## 利用者に確かめたこと"
 QUESTION_DEFAULT = 3   # 利用者に聞く質問の上限の既定値（設定の question_max）。最初の値で、根拠は薄い
+FACTS_INTRO = "照合用の検証値です（スクリプトが書いたもの。読む必要はありません）。"
 MARK = "<!-- kiroku-report:%d -->" % VERSION
 MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
 SLOT = re.compile(r"【ここに書く[^】]*】")
@@ -178,8 +179,11 @@ def _gap_lines(data, reasons):
     return lines or ["- スクリプトが検出した記録の不足はありません。"]
 
 
-def build(root, data, reasons=None, session=None, version=VERSION):
+def build(root, data, reasons=None, session=None, version=VERSION, debug=None):
     """集約から、レポートの骨組みを作る。同じ集約からは、いつも同じ文面になる。
+
+    debug は、/kiroku-retro --debug のときに骨組みを作った時点で控えた値（debug.facts）。
+    渡したときだけ、末尾の検証値の前に「kiroku の不具合の候補（デバッグ）」の節を足す（版5から）。
 
     session は、振り返りをしているセッション。「確認済み」の照合に使うので、骨組みに控える。
     version は形式の版。以前の版のレポートを検査するとき、その版の骨組みを作り直すのに使う
@@ -252,7 +256,7 @@ def build(root, data, reasons=None, session=None, version=VERSION):
         "- 補足と、利用者に確かめたいこと：" + slot("上への補足。無ければ「なし」") if version >= 3
         else slot("上への補足と、利用者に確かめたいこと。無ければ「なし」"),
         "",
-        "照合用の検証値です（スクリプトが書いたもの。読む必要はありません）。",
+        FACTS_INTRO,
         "",
         "```kiroku-facts",
         json.dumps(data["report_facts"], ensure_ascii=False),   # 1行にする。人が読む部分を埋もれさせない
@@ -288,6 +292,23 @@ def build(root, data, reasons=None, session=None, version=VERSION):
              "引用（回答）、反映を書く。聞かなかったときは「なし」" % asked if asked else
              "質問しない設定（question_max が 0）なので「なし」"),
     ]
+    if debug is not None:
+        import debug as debugging   # debug は reads を経て skeleton を読むので、ここで読む
+        at = tail.index(FACTS_INTRO)
+        tail = tail[:at] + [
+            debugging.HEADING,
+            "",
+            debugging.PREAMBLE + "kiroku の開発者に渡すためのものです。"
+            "渡す前に、パス、コマンド、引用に、見せたくないものが無いかを確かめてください。",
+            "",
+            "次は、スクリプトが記録から書いたものです。",
+            "",
+        ] + debugging.lines(debug) + [
+            "",
+            slot("kiroku の不具合と推定されるものを、`### B1. …` の見出しで、現象、期待、根拠と引用、"
+                 "再現の手がかり、確度、影響を書く。無ければ「なし」"),
+            "",
+        ] + tail[at:]
     return "\n".join(header + questions + one_step + body + table + diagnostics + tail)
 
 

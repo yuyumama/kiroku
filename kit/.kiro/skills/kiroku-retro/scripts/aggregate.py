@@ -57,6 +57,7 @@ import citations  # noqa: E402
 import reads  # noqa: E402
 import diagnose  # noqa: E402
 import answers  # noqa: E402
+import debug  # noqa: E402
 from record import (count_setting, load_config, load_state, mask, not_run_kind, recording_lock,  # noqa: E402
                     recording_start, save_state, script_root)
 
@@ -1339,19 +1340,21 @@ def clues(data):
     return known
 
 
-def new_report(root, data):
+def new_report(root, data, with_debug=False):
     """レポートの骨組みを保存先に作る。
 
     同じ名前のファイルがあるとき、作り直すのは、このセッションが作ったまま手を付けていない骨組み
     （作った時点の内容と一致するもの）だけ。それ以外は上書きせず、別の名前で作る。
     作成は排他的に行い、同時に始めた2回の振り返りが同じファイルを使わないようにする。
+    with_debug は /kiroku-retro --debug。デバッグの節に書く値を、骨組みを作った時点で控える。
     """
     directory = os.path.join(root, ".kiro", "kiroku", "data", "reports")
     data_dir = os.path.join(root, ".kiro", "kiroku", "data")
     session = os.environ.get("KIRO_SESSION_ID")
     if session and not re.fullmatch(r"[A-Za-z0-9._-]+", session):
         session = None
-    text = skeleton.build(root, data, GAP_REASONS, session)
+    found = debug.facts(root, skeleton.VERSION, session) if with_debug else None
+    text = skeleton.build(root, data, GAP_REASONS, session, debug=found)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     os.makedirs(directory, exist_ok=True)
     chosen, skipped = None, []
@@ -1403,6 +1406,13 @@ def new_report(root, data):
         kept = state.get("report_record_errors") if isinstance(state.get("report_record_errors"), dict) else {}
         kept[chosen] = data["coverage"]["record_errors"]
         state["report_record_errors"] = kept
+        # デバッグの節に書いた値。検査は、この控えで節を作り直す。指定が無ければ控えを消す。
+        debugged = state.get("report_debug") if isinstance(state.get("report_debug"), dict) else {}
+        if found is not None:
+            debugged[chosen] = found
+        else:
+            debugged.pop(chosen, None)
+        state["report_debug"] = debugged
         if session:
             made[chosen] = session
             state["report_sessions"] = made
@@ -1432,6 +1442,8 @@ def main(argv=None):
     parser.add_argument("--check-report", help="レポートの検証値と対象の型を記録と照合する")
     parser.add_argument("--new-report", action="store_true",
                         help="レポートの骨組みを保存先に作る。事実の部分はスクリプトが書く")
+    parser.add_argument("--debug", action="store_true",
+                        help="--new-report と一緒に使う。骨組みに、kiroku の不具合の候補（デバッグ）の節を足す")
     parser.add_argument("--section", choices=SECTIONS, help="この節だけを、件数を絞らずに出す")
     parser.add_argument("--session", help="このセッションだけを要約表示する")
     parser.add_argument("--user-chars", type=int, default=1500, help="要約表示で、発話1件の最大文字数（既定 1500）")
@@ -1483,16 +1495,31 @@ def main(argv=None):
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
                 made_by = (state.get("report_sessions") or {}).get(name, reads.session_of(body))
+                # デバッグの節も、エージェントが書き込めない state の控えから作り直して比べる。
+                debugged = state.get("report_debug") if isinstance(state.get("report_debug"), dict) else {}
+                found = debugged.get(name) if form >= 5 and isinstance(debugged.get(name), dict) else None
                 # 版1は表記が違うので、行は照合しない（欄の残りだけを見る）。
-                expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION)) \
-                    if form >= 2 else ""
+                try:
+                    expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION),
+                                              debug=found) if form >= 2 else ""
+                except (KeyError, TypeError, ValueError):   # 控えの形が読めない
+                    found = None
+                    expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION))
                 errors += skeleton.validate(body, expected)
+                if debug.HEADING in body.splitlines():
+                    if found is None:
+                        notices.append("kiroku の不具合の候補の節は、控えが無いので、スクリプトが書いた行を照合していません。")
+                    bugs, unverified = debug.validate(root, body, {l.rstrip() for l in expected.splitlines()},
+                                                      skeleton.FACTS_INTRO)
+                    errors += bugs
+                    notices += unverified
             if form >= 4:
                 errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'])
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
-                unread, notices = reads.validate(root, body, legacy=form < 4)
+                unread, unchecked = reads.validate(root, body, legacy=form < 4)
                 errors += unread
+                notices = list(notices) + unchecked
             if form >= 5:
                 asked, unverified = answers.validate(root, body, clues(data), data['question_max'])
                 errors += asked
@@ -1523,7 +1550,7 @@ def main(argv=None):
     data = aggregate(root, since, until, args.by, args.prompts,
                      args.prompt_offset, args.prompt_limit)
     if args.new_report:
-        return new_report(root, data)
+        return new_report(root, data, with_debug=args.debug)
     if args.json:
         json.dump(data, sys.stdout, ensure_ascii=False, indent=2, default=str)
         sys.stdout.write("\n")

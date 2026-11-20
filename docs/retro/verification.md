@@ -1145,3 +1145,25 @@ Kiro CLI 3.4.0 V3（Ubuntu 22.04）で、家計簿デモに `8b0707b` を導入�
 - 実機で確かめられたこと（レビュー）：D5 の値（書き込み4ターン中3ターン）と全体のテスト実行数は実ログと一致した。テスト失敗の分類の根拠3行は正しかった（unittest の FunctionTestCase は classname と file が標準ライブラリを指すので「特定できず」）。`resources` の無いカスタムエージェントにも steering が読み込まれた（手引きの記述どおり）。
 - 直したこと（自動テストのみ）：承認されずに終わった呼び出し（終了コード -1、本文に `this call did not run`）を、要約表示がテストの実行に数えていた。実行には数えず、件数を別に出す。hook のコマンドの相対パスを、別の場所の同じ名前のファイルの末尾一致で「有る」としていた。hook とエージェント定義はルートからだけ解決する。
 - 見送ったこと：`#[[folder:…]]` がファイルを指すなど、参照の種類の取り違えの検出。
+
+## 2026-11-20：振り返りでの質問と、デバッグ欄の設計のための確認（公式資料と自動の再現。実機ではない）
+
+[questions-and-debug-design.md](questions-and-debug-design.md) の設計のために確かめた。まだ実装していない。
+
+### 公式資料で確かめたこと
+
+- [Built-in tools](https://kiro.dev/docs/tools/)（2026-11-12 更新）の一覧に、利用者に質問するツールは無い。`AskUserQuestion` が出てくるのは、Kiro Crew のチャットの資料（[Message controls](https://kiro.dev/docs/crew/chat/message-controls/)）だけだった。
+- [Plan mode](https://kiro.dev/docs/specs/plan/) は、番号つきの質問と選択肢を普通のチャットの文章で出し、「1=a, 2=b」か自分の答えで答えさせる。一部だけ答える、自由に書く、飛ばすこともできる。
+- skill の名前の後ろの文字は、CLI でも IDE でも、エージェントに追加の文脈として渡る（[Agent Skills](https://kiro.dev/docs/skills/)、[IDE の Slash commands](https://kiro.dev/docs/ide/chat/slash-commands/)）。本文の `$ARGUMENTS` と `${N}` の置き換えは CLI だけ。リンク先の「Passing arguments to a skill」の節は、ページに無かった。上の4節（3.2.1 の実機）で、後ろの文字が渡ることは確かめている。
+- headless では、途中の入力ができない（[Headless mode](https://kiro.dev/docs/cli/headless/)）。
+- MCP のツールは、途中でフォームを出して入力を求められる（elicitation）。CLI はローカルの V3 セッションで 2.34 から（[MCP の Tools](https://kiro.dev/docs/mcp/usage/)）。IDE 1.x と headless での扱いは書かれていない。
+
+### 自動で再現したこと
+
+骨組みを作った後に `record-errors.log` が増えると、`--check-report` が、スクリプトが書いた「記録フックのエラー：N 行」の行を不一致にする。一時ディレクトリで、増やす前は終了コード0、1行足した後は終了コード1になることを確かめた。実機では見ていない。直し方は設計書の9節にある。
+
+### 未検証
+
+Kiro CLI 3.4.0 と IDE で `/kiroku-retro --debug` の後ろの文字が渡るか。IDE で振り返り自身のログを読めるか。Kiro の版をログから取れるか。エージェントが質問の後でターンを終えて待つか。MCP の elicitation の実際の表示と、エージェントが答えを受け取る形。
+
+既存の導入先への影響は「なし」（文書だけの変更）。

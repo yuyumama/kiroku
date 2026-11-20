@@ -344,6 +344,47 @@ class SkeletonTest(SkeletonBase):
         self.assertEqual(skeleton.build(self.root, first), skeleton.build(self.root, second))
         self.assertEqual(list(Path(self.root, ".kiro").rglob("__pycache__")), [])
 
+    def later(self, minutes=1):
+        """record.py が record-errors.log の行の先頭に書く形の、少し後の時刻。"""
+        moment = aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc)
+        return (moment + aggregate.datetime.timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
+
+    def test_hook_errors_after_the_skeleton_do_not_change_the_lines_the_script_wrote(self):
+        """骨組みを作った後に記録フックのエラーが増えても、スクリプトが書いた行を不一致にしない。
+
+        振り返りの最中も、振り返り自身のシェル実行で記録フックは動く。検査までの間に
+        record-errors.log が増えると、骨組みの「記録フックのエラー：N 行」と数が合わなくなっていた。
+        """
+        log = self.data / "record-errors.log"
+        log.write_text("2026-11-01T00:00:00Z KeyError: 'x'\n", encoding="utf-8")
+        path, text = self.new_report()
+        self.assertIn("- 記録フックのエラー：1 行", text)
+        filled = self.fill(text)
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write("%s ValueError: 骨組みの後\n" % self.later())
+        done = self.check(path, filled)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        # 集約そのものは、今までどおり今の行数を出す。
+        self.assertEqual(aggregate.aggregate(self.root)["coverage"]["record_errors"], 2)
+
+    def test_reports_without_the_kept_count_count_lines_up_to_when_they_were_made(self):
+        """行数の控えが無いレポート（以前の版で作ったもの）は、作った時刻までの行だけを数える。
+
+        例外の文面が改行を含むと、1件が複数の行になる。時刻の無い行は、直前の行と同じ件として扱う。
+        """
+        log = self.data / "record-errors.log"
+        log.write_text("2026-11-01T00:00:00Z KeyError: 'x'\n  続きの行\n", encoding="utf-8")
+        path, text = self.new_report()
+        self.assertIn("- 記録フックのエラー：2 行", text)
+        state_path = self.data / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.pop("report_record_errors", None)   # 以前の版は控えなかった
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write("%s ValueError: 骨組みの後\n  続きの行\n" % self.later())
+        done = self.check(path, self.fill(text))
+        self.assertEqual(done.returncode, 0, done.stdout)
+
 
 ONE_STEP = ("### P1. テストの実行を終了時の hook にする\n\n"
             "- 観点：V3、V5\n- 段：1→3\n"

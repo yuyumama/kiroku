@@ -867,6 +867,14 @@ class ConfigTest(ReviewSandbox):
             self.assertIn("output_tail_chars = %s は使えません" % json.dumps(value), text)
         self.write(".kiro/kiroku/config.json", json.dumps({"output_tail_chars": 0}))
         self.assertNotIn("使えません", "\n".join(installer.config_notes(self.root)))
+        # 件数の上限の既定は「上限なし」。null だけでは意味が伝わらないので、言葉を添える。
+        self.write(".kiro/kiroku/config.json", json.dumps({"tests": []}))
+        text = "\n".join(installer.config_notes(self.root))
+        self.assertIn("one_step_max = null（上限なし）", text)
+        self.assertIn("question_max = null（上限なし）", text)
+        self.write(".kiro/kiroku/config.json", json.dumps({"question_max": -1}))
+        self.assertIn("question_max = -1 は使えません（0 以上の整数）。既定値 null（上限なし） で動きます",
+                      "\n".join(installer.config_notes(self.root)))
 
 
 class RetroFeedbackTest(ReviewSandbox):

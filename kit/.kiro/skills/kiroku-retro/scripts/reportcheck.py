@@ -80,7 +80,7 @@ def one_step(text, expected, limit):
     if not proposals:
         return ['一歩先の改善案は、案ごとに `### P<番号>. ` の見出しで書いてください。無ければ「なし」と書きます。']
     errors = []
-    if len(proposals) > limit:
+    if limit is not None and len(proposals) > limit:
         errors.append('一歩先の改善案が %d 件あります。上限は %d 件です。価値の大きいものに絞り、残りは個別の改善案か'
                       '様子見にしてください。' % (len(proposals), limit))
     known = set(expected.get('targets', {})) | set(expected.get('diagnostics', []))

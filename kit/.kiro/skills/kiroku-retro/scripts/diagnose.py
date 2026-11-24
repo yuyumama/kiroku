@@ -580,6 +580,31 @@ def duplicates(texts):
              "sample": mask(sorted(lines)[0])} for pair, lines in sorted(pairs.items())]
 
 
+def _uncommented(line, marker):
+    """行から、引用符の外のコメントを除く。marker は "#"（YAML）か "//"（Jenkinsfile）。
+
+    YAML の # は、行頭か空白の後に来たときだけコメントになる（`http://x/#y` の # は残す）。
+    """
+    quote = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            quote = char
+        elif line.startswith(marker, index) and (marker != "#" or index == 0 or line[index - 1].isspace()):
+            return line[:index]
+    return line
+
+
+def ci_lines(name, text):
+    """CI の定義のうち、コメントを除いた行。Issue #24 のレビューで、コメントにテスト名があるだけで
+    「CI がテストを動かす」と判定していたため。文面の一致が実行か言及かは、これまでどおり区別しない。"""
+    marker = "//" if name.rsplit("/", 1)[-1] == "Jenkinsfile" else "#"
+    return [kept for kept in (_uncommented(line, marker) for line in text.splitlines()) if kept.strip()]
+
+
 def sensors(root, files, config, hooks_by_name):
     """D5：事後の検査の一覧。有無だけを見る。動いているか（発火するか）は見ない。"""
     hooks = {}
@@ -598,7 +623,7 @@ def sensors(root, files, config, hooks_by_name):
     if tests and ci:
         ci_runs_tests = False
         for name in ci:
-            for line in (_read(Path(root) / name) or "").splitlines():
+            for line in ci_lines(name, _read(Path(root) / name) or ""):
                 for entry in tests:
                     try:
                         if re.search(entry["match"], line):

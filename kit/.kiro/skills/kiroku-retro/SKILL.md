@@ -27,11 +27,11 @@ description: 開発中の指摘・失敗の記録と、プロジェクト内お�
 
 ## 1. 集約を読む
 
-期間の指定がなければ直近7日を対象にします。
+期間の指定がなければ、前回の振り返りの後から読みます（`--since last`）。いつ実行しても、前回の後の会話と記録をすべて対象にするためです。利用者が期間を指定したときは（「14日」など）、各コマンドの `--since last` を `--since 14d` のように置き換えます。
 `/kiroku-retro` の後ろに `--debug` があるときは、手順7で、kiroku 自体の不具合の候補を書く欄を作ります。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --require-agent
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since last --require-agent
 ```
 
 専用エージェントを確認できず終了コード1になったら、ここで終了し、利用者に `kiro-cli --agent kiroku-retro` での起動と `/kiroku-retro` の入力を案内します。skill のロードと専用エージェントへの切り替えは別です。
@@ -48,7 +48,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --require-agen
   続きが要るときは、その節だけを出します。節の名前は `plan`、`review`、`summary`、`tests`、`tools`、`files`、`harness`、`sessions` です。
 
   ```bash
-  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --section tests
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since last --section tests
   ```
 
 - 「記録の範囲」は、フックによる記録があるセッションの数です。テスト失敗やツール失敗の数は、記録があるセッションだけが対象です。
@@ -61,7 +61,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --require-agen
 読むのは、手順1の集約に並んだ分だけです。手順3でもう一度集約すると次の分が並びますが、それは次回に読みます。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --session <session_id>
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since last --session <session_id>
 ```
 
 出力は要約表示です。ユーザー発話は原文、その後のツール実行は件数、応答は最後の1件の冒頭だけが出ます。
@@ -131,7 +131,7 @@ python3 .kiro/skills/kiroku-retro/scripts/excerpt.py --session <session_id> --in
 ノートを書き終えたら、集約をもう一度実行します。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since last
 ```
 
 この集約の「未読の合計」が、今回の振り返りの後に残った未読の数です。レポートの「未読：K 件」には、この数を書きます。
@@ -223,7 +223,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d
 | 実行前に止められた呼び出しが繰り返す | 止まってよかったか |
 | 手直し候補で、シェルの手がかりが無い | 人が直したか |
 
-- 上限より多いときは、答えで変わる案が大きく、見立てが不確かなものから選びます。選ばなかったものは、レポートの「補足と、利用者に確かめたいこと」に書きます。
+- 件数は絞りません。聞くべきものは全部聞き、答えで変わる案が大きく、見立てが不確かなものから順に並べます。質問の冒頭に「上から重要な順です。全部に答えなくて構いません」と書きます。集約の冒頭に上限の数が出ているとき（設定で決めたとき）は、その数までにし、聞かなかったものはレポートの「補足と、利用者に確かめたいこと」に書きます。
 - 同じ回のほかの質問の答えで中身が変わる質問は、出しません。聞くのは1回だけだからです。
 - 集約の「前回までの回答」に同じことがあれば、新しい観測が無い限り聞き直さず、その答えを使います。
 
@@ -233,6 +233,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d
 
 ```text
 案を作る前に、2つ教えてください。答えによって、出す案が変わります。
+上から重要な順です。全部に答えなくて構いません。
 見立ては、記録からの推測です。すべて見立てのとおりなら「はい」とだけ答えてください。
 違う質問だけ「Q2=c」のように選び直すか、自由に書いてください。答えたくない質問は、飛ばして構いません。
 
@@ -286,7 +287,7 @@ Q2. …
 
 1. 集約の「ハーネスの診断」（`D1`〜`D6`）と、手順3でまとめた型を並べます。
 2. 手引きの8つの観点（V1〜V8）ごとに、当てはまる型と診断値を探します。当てはまらない観点は飛ばします。
-3. 当てはまる観点から、一歩先の改善案を作ります。件数は、骨組みに書かれた上限までです。価値の大きいものから選びます。
+3. 当てはまる観点から、一歩先の改善案を作ります。件数は絞りません。あれば全部書き、価値の大きいものから並べます。骨組みに上限が書かれているとき（設定で決めたとき）は、その数までにします。
 4. 案の段が、観測した事例の段より上がっていることを確かめます。上がらないものは、一歩先の案にしません（個別の案にします）。
 5. 一歩先の案が個別の案と重なるときは、個別の案を書かず、一歩先の案の「まとめる個別の案」に書きます。案の数は、減る方向に働かせます。
 
@@ -310,13 +311,13 @@ Q2. …
 ノートを書き終えたら、スクリプトにレポートの骨組みを作らせます。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --new-report --require-agent
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since last --new-report --require-agent
 ```
 
 `/kiroku-retro` の後ろに `--debug` があったときは、`--debug` を付けて骨組みを作ります。末尾に「kiroku の不具合の候補（デバッグ）」の欄ができます（書き方は下の「kiroku の不具合の候補」）。
 
 ```bash
-python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --new-report --debug --require-agent
+python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since last --new-report --debug --require-agent
 ```
 
 出力に表示されたファイルが、今回のレポートです。対象期間、件数、ハーネスの所在、ハーネスの診断、記録の不足、末尾の検証値は、スクリプトが記録から書いています。
@@ -340,7 +341,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --new-report -
 
 - 引用（回答）は、この振り返りで利用者が書いた発話から、原文のまま写します。「はい」「Q2=c」のような4文字未満の答えは、発話の全体を写します。未回答なら、引用（回答）の行は消します。
 - 前回の回答を使ったときは、使った型や案の行に「前回の回答（<レポート名>#Q1）による」と書きます。この欄には、今回聞いた質問だけを書きます。
-- 検査は、引用（回答）がこの振り返りの利用者の発話にあること、質問の数が上限以内であること、手がかりが集約にあること、反映に書いた案の番号がレポートにあることを確かめます。答えの解釈が正しいかは判定しません。
+- 検査は、引用（回答）がこの振り返りの利用者の発話にあること、質問の数が上限以内であること（設定で上限を決めたとき）、手がかりが集約にあること、反映に書いた案の番号がレポートにあることを確かめます。答えの解釈が正しいかは判定しません。
 
 「一歩先の改善案」の欄には、案ごとに次の形で書きます。案の番号は、この欄から P1 で始め、下の個別の案と通しにします。
 
@@ -362,7 +363,7 @@ python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --since 7d --new-report -
 - 対象の型：<追跡したい型が1つに決まるときだけ>
 ```
 
-検査は、件数が上限以内か、観点が V1〜V8 か、段が上がっているか、手がかりが集約にあるか、確かめ方があるかを確かめます。案の価値と、文章の意味は判定しません。
+検査は、件数が上限以内か（設定で上限を決めたとき）、観点が V1〜V8 か、段が上がっているか、手がかりが集約にあるか、確かめ方があるかを確かめます。案の価値と、文章の意味は判定しません。
 
 「観測した型・継続方針」の欄には、型ごとに次の形で書きます。
 

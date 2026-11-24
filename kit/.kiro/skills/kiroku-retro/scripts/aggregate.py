@@ -2,7 +2,7 @@
 """kiroku の集約。.kiro/kiroku/data/events.jsonl を読み、後計算で分類して要約を出す。
 
 使い方:
-  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since 7d] [--until 2026-12-01] [--by week] [--json]
+  python3 .kiro/skills/kiroku-retro/scripts/aggregate.py [--since last] [--until 2026-12-01] [--by week] [--json]
   python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --section tests
   python3 .kiro/skills/kiroku-retro/scripts/aggregate.py --session <session_id>
 
@@ -205,6 +205,25 @@ def record_errors_at(data_dir, state, name):
     made = state.get("report_made")
     moment = excerpt.parse_time(made.get(name)) if isinstance(made, dict) and isinstance(made.get(name), str) else None
     return record_error_lines(data_dir, until=moment) if moment else None
+
+
+def since_last(root):
+    """`--since last`：前回の振り返りの後から。経過した日数で、読む範囲を変えないための既定。
+
+    書き終えた最新のレポートの検証値の終わり（until）から読む。そのレポートに未読が残っていた
+    （unread が 0 でない）なら、読み残しを落とさないよう、その始まり（since）から読む。
+    レポートが無い、検証値を読めないときは None（すべて。記録の始まりは aggregate の clamp が当てる）。
+    """
+    name = ledger.latest_report(root)
+    if not name:
+        return None
+    try:
+        with open(os.path.join(root, ".kiro", "kiroku", "data", "reports", name + ".md"), encoding="utf-8") as handle:
+            facts = reportcheck.extract(handle.read())
+    except (OSError, UnicodeError, ValueError):
+        return None
+    bound = facts.get("since") if facts.get("unread") else facts.get("until")
+    return excerpt.parse_time(bound) if isinstance(bound, str) else None
 
 
 def parse_bound(text, now):
@@ -838,7 +857,9 @@ def render(data, show_prompts=False, section=None, cap=None):
     lines.append("- レポートの保存先：.kiro/kiroku/data/reports/%s.md"
                  % datetime.datetime.now().strftime("%Y-%m-%d-%H%M"))
     if "question_max" in data:
-        lines.append("- 利用者に聞く質問の上限：%d 問（設定の question_max。0 なら聞かない）" % data["question_max"])
+        asked = data["question_max"]
+        lines.append("- 利用者に聞く質問の上限：%s（設定の question_max。0 なら聞かない）" % (
+            "なし。答えで変わる案が大きい順に並べる" if asked is None else "%d 問" % asked))
     if section is None and cap is not None:
         lines.append("- 各一覧は上位だけを出しています。節ごとの全件は `--section <%s>` で出します。"
                      % "|".join(SECTIONS))
@@ -1434,7 +1455,9 @@ def new_report(root, data, with_debug=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="kiroku の記録を集約する")
     parser.add_argument("--root", default=None, help="リポジトリのルート（既定は現在の git リポジトリ）")
-    parser.add_argument("--since", default="7d", help="開始。14d のような日数、または日付（既定 7d）")
+    parser.add_argument("--since", default="last",
+                        help="開始。last（前回の振り返りの後から。書き終えたレポートが無ければすべて）、"
+                             "14d のような日数、日付、または all（指定が無ければ last）")
     parser.add_argument("--until", default=None, help="終了。日数または日付")
     parser.add_argument("--by", choices=("day", "week", "all"), default="week", help="要約の単位")
     parser.add_argument("--json", action="store_true", help="JSON で出力する")
@@ -1532,7 +1555,10 @@ def main(argv=None):
             print('検証値、対象の型、スクリプトが書いた部分は記録と一致し、引用は元の会話・ファイルに実在します。'
                   '引用の解釈、本文の意味、提案の妥当性は別に確認してください。')
         return 1 if errors else 0
-    since = parse_bound(args.since, now) if args.since not in ("all", "") else None
+    if args.since == "last":
+        since = since_last(root)
+    else:
+        since = parse_bound(args.since, now) if args.since not in ("all", "") else None
     until = parse_bound(args.until, now) if args.until else now
     if args.session:
         since = clamp(root, since)

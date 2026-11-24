@@ -261,6 +261,22 @@ class DiagnoseTest(ReviewSandbox):
         self.assertTrue(sense["ci_runs_tests"])   # テストの記録設定の match（pytest）に一致する行がある
         self.assertEqual(sense["lint"], ["pyproject.toml"])
 
+    def test_test_names_in_ci_comments_do_not_count_as_running_tests(self):
+        """Issue #24 のレビュー：コメントにテスト名を書いただけの CI を「テストを動かす」と判定していた。"""
+        self.write(".github/workflows/ci.yml",
+                   "jobs:\n  t:\n    steps:\n      # pytest は後で足す\n      - run: echo hello  # pytest -q\n")
+        self.assertFalse(self.found()["sensors"]["ci_runs_tests"])
+        # 実際のコマンドの後ろのコメントは除いても、コマンドは残る。引用符の中の # は、コメントではない。
+        self.write(".github/workflows/ci.yml",
+                   "jobs:\n  t:\n    steps:\n      - run: pytest -q  # 速いテストだけ\n"
+                   "      - run: echo \"# not a comment\"\n")
+        self.assertTrue(self.found()["sensors"]["ci_runs_tests"])
+        self.write(".github/workflows/ci.yml", "jobs:\n  t:\n    steps:\n      - run: echo \"#pytest\"\n")
+        self.assertTrue(self.found()["sensors"]["ci_runs_tests"])   # 文面の一致は、これまでどおり実行か言及かを分けない
+        self.write(".github/workflows/ci.yml", "jobs: {}\n")
+        self.write("Jenkinsfile", "pipeline {\n  // sh 'pytest -q'\n  stages { }\n}\n")
+        self.assertFalse(self.found()["sensors"]["ci_runs_tests"])
+
     def test_lint_configs_in_subdirectories_are_listed(self):
         """モノレポ：サブディレクトリの lint・型検査の設定も数える。"""
         self.write("frontend/tsconfig.json", "{}")

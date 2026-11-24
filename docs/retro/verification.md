@@ -1564,3 +1564,203 @@ config.json に無い項目は、既定値で動きます（書き足す必要�
 - 版8のレポートは、承認の答えを結べるようになったので、更新した後に検査し直すと、検証値の対象の型（`approval:…`）が増えることがある。版8は公開から間もなく、実機の確認でも作られていないため、版は上げていない。
 
 既存の導入先への影響は「`--update` だけで済む」。
+
+## 2026-11-25 実機での再確認（CLI 3.5.0、PR #30 の後）
+
+Issue #24 の前回記録を受け、`real-machine-checks.md` の手順0〜8で再確認した。判定は `demo-cases.md` の D28〜D35 に従った。
+
+### 手順0　環境と準備
+
+| 項目 | 実測 |
+|---|---|
+| Kiro | Kiro CLI 3.5.0、V3、既定の開発エージェントは `vibe` |
+| OS | Ubuntu 22.04.5 LTS、Linux 6.8.0-149-generic、x86_64 |
+| Python | 3.10.12 |
+| kiroku | `f9ea4f4`。試験開始前に GitHub の `main` と手元の HEAD が一致 |
+| 開始前の利用枠 | `/usage` は KIRO FREE、`0.00 of 50 covered in plan`（使用0%）、リセット日 2026-12-01 |
+| 作業用フォルダ | `/tmp/kiroku-machine-CUX8BC1K`。前回のフォルダとは別に作成 |
+| 導入・診断 | probe と demo に導入。両方の `doctor.py --command "python3 run_tests.py"` が終了コード0 |
+
+Kiro は `kiro-cli chat --v3 --trust-workspace` で対話 TUI を起動した。デモのコミット用の名前とメールアドレスはコピー内の Git 設定に入れた。承認で規則を保存したのは probe の workspace だけ。Approve for me は有効にしていない。
+
+### 手順1　承認画面とログ
+
+probe のセッションは `sess_ad03ceab-1007-4661-b2d3-ebec1fcccfcf`。
+
+| # | 実際のコマンド | 承認画面・操作 | `pending_interaction` | `outcome` | `selectedOption` | 答えと呼び出しの `toolCallId` ／呼び出し側の一致キー |
+|---|---|---|---|---|---|---|
+| 1 | `git status` | なし | なし | — | — | — |
+| 2 | `python3 run_tests.py` | あり、Allow once | あり | `selected` | `accept` | 異なる ／ `toolCallId` |
+| 3 | `cat README.md` | あり、Deny once | あり | `selected` | `reject` | 異なる ／ `toolCallId` |
+| 4 | `ls -la` | あり、Escape | あり | `cancelled` | キーなし | 異なる ／ `toolCallId` |
+| 5 | `git diff`（引数なし、規則保存前） | なし | なし | — | — | — |
+| 6 | `git diff HEAD` | あり、2語の段、workspace | あり | `selected` | `always-accept` | 異なる ／ `toolCallId` |
+
+答えの `modelToolUseId` の値を持つ呼び出し側のキーが、上表の「一致キー」。表に値そのものは写していない。`interaction_resolved` のその他のキーは4件とも `_meta`、`consentRound`、`executionId`、`modelToolUseId`、`toolCallId`。`pending_interaction` のキー（`type` を除く）は `_meta`、`consentRound`、`executionId`、`interactionType`、`modelToolUseId`、`options`、`question`、`toolCallId`。#6 の `_meta.kiro.consentOutcome` は `scope=workspace`、`applied=true`。
+
+規則は `~/.kiro/workspace-roots/8c9352821ca33d0c/permissions.yaml` に保存された。ハッシュは `~/.kiro/sessions/8c9352821ca33d0c/` と一致。ユーザー共通の `~/.kiro/settings/permissions.yaml` は保存の前後とも存在しなかった。
+
+```yaml
+rules:
+  - capability: shell
+    effect: allow
+    match:
+      - git diff *
+```
+
+### 手順2　規則保存後の画面
+
+| # | 実際のコマンド | 承認画面・操作 | 予想との比較 |
+|---|---|---|---|
+| 1 | `git diff` | なし。保存前もなし | 画面ありの予想とは不一致。保存前後で同じなので、この規則が当たるかは未検証 |
+| 2 | `git diff --stat` | なし | 一致 |
+| 3 | `git -C . diff` | あり、Deny once（`selected` / `reject`） | 一致 |
+| 4 | `git diff --stat && git status` | なし | 両コマンドが単独で通った観察と整合。複合時の内部判定は未検証 |
+
+#1・#3 の最初の依頼では、Kiro が以前の結果を参照してシェルを呼ばなかった。実際に呼び出すよう再依頼し、その結果を表に記録した。#3 の答えでも、`toolCallId` は異なり、答えの `modelToolUseId` は呼び出しの `toolCallId` と一致した。probe の集約は「答えと呼び出しの結び方（ログ全体）」に `modelToolUseId で 5 件`、「候補にしない承認」に `git diff` の Always allow 1回（範囲 workspace）を表示した。
+
+`approvals._glob` で引数なしを独立の完全一致として扱うことと、画面が出ることは別の観察になる。今回の対照では、Kiro のワイルドカード照合と `approvals.rule_for` の近似が食い違うかは切り分けられなかった。
+
+### 手順3・4　開発の会話と初回の振り返り
+
+`demo-cases.md` の発話を記載順に入力した。A は医療カテゴリの追加・報告順・日本語コミットと今回の比較月（3発話）、B はテスト再実行・報告順・整数円（3発話）、C は月次集計後の待機と合計・返金の確認（2発話）。
+
+| セッション | ID | 観察 |
+|---|---|---|
+| A | `sess_9d62d73e-c545-43fb-bd05-a8aac48c0fbf` | 医療カテゴリとテストを追加。README のテストを1回許可 |
+| B | `sess_abddf456-a0ba-4fef-82cf-31f9d19bbdad` | 同じテストを1回許可。医療カテゴリのケースを含め12件成功 |
+| C | `sess_d79eb2f7-e750-4f58-b57d-bbfde4b51cad` | 合計10,600円の表示とデータ3件の合計の一致を確認。Kiro は回答を待った |
+
+初回（`sess_2b9451d5-8169-42fb-a71e-7d1c44fa7def`）は `aggregate.py --since last --require-agent` から始め、未読3件を読んだ。質問の上限は「なし」。冒頭に「上から重要な順です。全部に答えなくて構いません」があり、Q1 はテストの承認2回・2セッション、Q2 は C の月次集計後の返金確認を手がかりにした。2問の後でターンを終えた。Q1 は「わからない」、Q2 は「通常分は合計が一致すればよい。返金だけは人が見る」と答えた。集約は BP-S4 を「満たしていない」と表示したが、質問には出なかった。
+
+初回レポートは demo の `.kiro/kiroku/data/reports/2026-11-25-0130.md`（版8）。Kiro は途中の検査で対象の型と既存ファイルの引用に関する指摘を受けて修正した。完成版を試験者が `--check-report` で検査し終了コード0。検証値は `until=2026-11-24T16:30:26.733562+00:00`、`unread=0`。4案はすべて「判断しない」と答えた。BP-S4 の案は無く、見送りは作成されなかった。
+
+| ケース | 判定 | 根拠 |
+|---|---|---|
+| D28 | 合格 | 集約とレポートの D5 は CI に「テストの記録設定の match に一致する行が無い」。コメントをテスト実行の根拠にしなかった。実コマンドの後ろにコメントが続く対照は今回の実機では未検証。 |
+| D30 | 合格 | C のノートで `manual_check`、集約では「手作業の確認（1 件）」に `topic:集計後の返金行の目視確認` が出た。Q2 で合格条件と例外を聞き、回答から P3（V3）が実際の `data/kakeibo.json` と月次出力の通常分の合計を照合し、返金は人が見る形を提案した。案の実装と返金データを用いた動作は未検証。 |
+| D31 | 合格 | Git リモートを追加する前の集約およびレポートで BP-S5 は「当てはまらない」。2問・4案に CI の推奨は無かった。 |
+
+### 手順5・6　承認の場面と2回目の振り返り
+
+`$WORK/remote.git` を bare リポジトリとして作り、demo でこのパスだけを `origin` に設定した。D1 の初回テスト依頼は Kiro のサーバー指定の再試行待ち（約295秒）の後に同じターンで完了した。初回振り返りの後の `/usage` は `9.02 of 50 covered in plan` だった。
+
+| セッション | テスト | コミット | push / ls |
+|---|---|---|---|
+| D1 `sess_b38ae49e-07e8-45bc-a2e6-27ed30225534` | `python3 run_tests.py`、Allow once | README だけに変更を作り、`git commit` を Allow once | `git push origin main`、Allow once |
+| D2 `sess_0424006d-db5c-40e8-9b64-5dcc7fca4d51` | 同じテスト、Allow once | README にさらに空行を足してステージした後、同じ `git commit` を Deny once | 同じローカル push、Allow once |
+| D3 `sess_ec2a3012-950f-48cd-afd1-37a199fc0292` | — | — | `ls -la` を個別に10回。毎回 Allow once |
+
+D1・D2 の補足として、テストの作業場所を demo に指定し、`git add` と `git commit` を別々に呼ぶよう依頼した。D2 の拒否はログで `outcome=selected`、`selectedOption=reject`。D1 と D2 の後で HEAD は同じ `823b51a`、D2 の README の空行はステージされたままだった。拒否後のコミットの再試行は無かった。
+
+2回目直前の `aggregate.py --since last` の期間開始は `2026-11-24T16:30:26.733562+00:00` で、初回レポートの `until` と一致した。未読は D1・D2・D3 の3件で、初回の A・B・C は入らなかった。
+
+集約の「承認の記録」（ログ7件）から以下を確認した。
+
+- 答えと呼び出しの結び方（ログ全体）：`modelToolUseId で 25 件、toolCallId が同じ 5 件`。
+- 呼び出しに結べなかった答え：行の表示なし（0件時は省略）。
+- 知らない答えの値：節の表示なし（0件時は省略）。
+- 「許可の候補（3 件）」に `approval:python3 run_tests.py`。承認2回（2セッション）、拒否0回、取り消し0回。区分は「手元の検査」、規則の案は `python3 run_tests.py` の完全一致。他の2件は `approval:git add` と `approval:str_replace`。
+- 「候補にしない承認（3 件）」の3行は以下のとおり。
+
+| 見出し | 承認 | 拒否 | 取り消し | 区分・理由 |
+|---|---|---|---|---|
+| `git push` | 2回（2セッション） | 0回 | 0回 | 外に出る。危険の区分のため、許可の候補にしない |
+| `ls` | 10回（1セッション） | 0回 | 0回 | 読み取り。承認したセッションが 1 件（候補は 2 件から） |
+| `git commit` | 1回（1セッション） | 1回 | 0回 | 手元の書き換え。拒否したことがある（中身を見て判断している） |
+
+同じ集約の検証値では `unrecorded_calls.blocked=0`、`interrupted=0`。D2 の拒否は承認集計の拒否1回に出た。
+
+2回目（`sess_64e282e6-c6e9-4a94-987f-6b1af979a70d`）も `--since last` で始めた。質問の上限は「なし」。初回と同じ「上から重要な順です。全部に答えなくて構いません」の案内に続き、Q1 は `python3 run_tests.py`、Q2 は `git add README.md`、Q3 は `str_replace` の許可について、いずれも承認2回・2セッション、拒否0回を手がかりにした。Q1 では初回の「わからない」にも触れた。3問の後で入力を待った。BP-S4、`ls`、`git push`、`git commit` の質問は無かった。承認の3問には「a」（自動で通してよい）と答えた。
+
+2回目のレポートは demo の `.kiro/kiroku/data/reports/2026-11-25-0141.md`（版8）。途中で Kiro が前回案の手がかりの書き方を修正した。完成版に試験者が `--check-report` を実行して終了コード0。
+
+P5 は承認3件をまとめた一歩先の案。テストの規則は `python3 run_tests.py` の完全一致。当たる例は同じコマンド、当たらない例は `python3 -c 'import os'` と `python3 -m http.server`。Always allow の段は完全一致、範囲は This workspace、対象は `~/.kiro/workspace-roots/823cda738ca863a8/permissions.yaml`。エージェント定義の `permissions` に `capability: shell`、`effect: allow`、`match: ["python3 run_tests.py"]` の規則を入れる例と、「規則の当たり方は実機では未検証」の記述があった。P5 には「手がかり」として `approval:python3 run_tests.py` があるが、「対象の型」欄は無かった。`ledger.py list` も P5 を「対象の型：記載なし」と表示した。
+
+| ケース | 判定 | 根拠 |
+|---|---|---|
+| D29 | 前提不足 | 通常の引き継ぎでは期間開始が初回の `until` と一致し、未読は新規3件。3週間の空き、7日より前の未読、前回未読が残る場合は未検証。 |
+| D32 | 前提不足 | 2回目のレポートは完成し、BP-S4 の質問・提案は無かった。初回に BP-S4 の質問・提案がなく、台帳に見送りが無いため「見送り中」による抑制は未検証。集の確認日が見送りより新しい場合も未検証。 |
+| D33 | 不一致 | 前回欠けていたテストの許可候補が出た。質問し、回答後に完全一致の規則と例、段・範囲、対象ファイル、エージェント定義の規則例、未検証の注記が出た。P5 の「対象の型」が空欄のため、台帳で `approval:python3 run_tests.py` として追跡できない。 |
+| D34 | 合格 | 10回すべて画面で許可し、集約は10回・1セッションを表示して候補から除外した。許可の質問・案は無かった。 |
+| D35 | 合格 | push を2セッションで許可し、コミットは1回許可・1回拒否。集約は push を「外に出る」、コミットを「拒否したことがある」で除外した。どちらも許可の質問・案は無かった。 |
+
+### 手順7　更新の互換
+
+`7ae4802` を `$WORK/kiroku-old` に取り出し、3つ目のデモ `$WORK/update` に導入した。開発セッション `sess_a6c2c0aa-0d35-45a8-9af4-aa0cb5b4b47a` で README のテストを1回許可し、`test_run` の `exit_code=0` を確認した。旧版の振り返り `sess_7f73407c-6cbb-48ed-921b-f207a57e4b2f` では2問とも「後で」と回答した。
+
+開発セッションを同じ端末で開いたまま、別の端末から `f9ea4f4` の `install.sh --update` を実行した。終了コード0。出力は以下のとおり。
+
+```text
+新規  .kiro/skills/kiroku-retro/references/best-practices.md
+新規  .kiro/skills/kiroku-retro/scripts/approvals.py
+新規  .kiro/skills/kiroku-retro/scripts/practices.py
+更新  .kiro/skills/kiroku-retro/SKILL.md
+更新  .kiro/skills/kiroku-retro/references/harness-guide.md
+更新  .kiro/skills/kiroku-retro/scripts/aggregate.py
+更新  .kiro/skills/kiroku-retro/scripts/answers.py
+更新  .kiro/skills/kiroku-retro/scripts/citations.py
+更新  .kiro/skills/kiroku-retro/scripts/diagnose.py
+更新  .kiro/skills/kiroku-retro/scripts/excerpt.py
+更新  .kiro/skills/kiroku-retro/scripts/harness.py
+更新  .kiro/skills/kiroku-retro/scripts/ledger.py
+更新  .kiro/skills/kiroku-retro/scripts/notes.py
+更新  .kiro/skills/kiroku-retro/scripts/prompts.py
+更新  .kiro/skills/kiroku-retro/scripts/record.py
+更新  .kiro/skills/kiroku-retro/scripts/reportcheck.py
+更新  .kiro/skills/kiroku-retro/scripts/skeleton.py
+そのまま（導入先の設定）  .kiro/kiroku/config.json
+新規 3、更新 14、変更なし 8
+config.json に無い項目は、既定値で動きます（書き足す必要はありません）：
+  sessions_dir = null
+  write_tools = ["fs_write", "fs_append", "str_replace"]
+  ignore_paths = [".kiro/kiroku/data/**", ".git/**"]
+  output_tail_chars = 2000
+  max_dirty_files = 500
+  retro_read_chars = 50000
+  retro_output_chars = 20000
+  test_start_max_seconds = 3600
+  one_step_max = null（上限なし）
+  question_max = null（上限なし）
+  approval_min_sessions = 2
+完了。テスト結果の記録は .kiro/kiroku/config.json の tests を設定してください。
+```
+
+`config.json` と版5レポートの SHA-256 は更新の前後で一致した。同じ開発セッションを開いたままテストを再実行し、増えた `test_run` も同じセッション ID で `exit_code=0` と記録された。
+
+| 観測時点 | `events.jsonl` | `record-errors.log` |
+|---|---|---|
+| 旧版で最初のテスト直後 | 2行（`prompt` 1、`test_run` 1） | ファイルなし |
+| 更新直前（版5の振り返り後） | 3行（`prompt` 2、`test_run` 1） | ファイルなし |
+| 更新後の再テスト直後 | 5行（`prompt` 3、`test_run` 2） | ファイルなし |
+
+版5は update の `.kiro/kiroku/data/reports/2026-11-25-0147.md`（`<!-- kiroku-report:5 -->`）。独立した `--check-report` は旧版で終了コード0、更新後の現行版で終了コード1（不一致）。レポート自身には「kiroku 自身のファイル（22 個）は、表から除いています。」が残っている。更新後の検査は「スクリプトが書いた行が、消えているか、書き換えられています：kiroku 自身のファイル（25 個）は、表から除いています。」と返した。
+
+更新後に別の振り返り `sess_3cbaa1fd-7821-4b24-8621-152774dbfc37` を開き、2問とも「後で」と回答した。版8レポートは update の `.kiro/kiroku/data/reports/2026-11-25-0151.md`（`<!-- kiroku-report:8 -->`）。途中の検査は対象の型に書いた診断値2箇所を指摘した。Kiro が修正した完成版を試験者が `--check-report` で検査し、終了コード0だった。
+
+### 実機で確かめた範囲と未検証
+
+上の表・検査結果が、CLI 3.5.0（V3）で確認できた範囲。未検証なのは、引数なしの `git diff` に保存規則が当たるか、複合コマンドの内部判定、D33 の案を実際に適用したときの当たり方、ログの順で結ぶ場合や並行した呼び出し、D29・D32 の前提を満たした場合。D28 の実コマンド側の対照および D30 の返金データを用いた動作も今回の実機確認の対象外だった。
+
+「未検証」や「保存前の対照が無い」という記述を見直せる箇所は、[README.md](README.md#毎回の承認から許可の規則を提案する) の承認の節、[ベストプラクティス集の設計の13節](best-practices-design.md#13-未確認のこと)、[手引きの案の書き方](../../kit/.kiro/skills/kiroku-retro/references/harness-guide.md#案の書き方)。保存前後とも画面が出なかった観察と、答えの `modelToolUseId` が呼び出しの `toolCallId` にあったことを追記できる。規則の照合自体を確かめていない点は引き続き残る。
+
+### 作業用ファイルとセッション
+
+- 作業用フォルダは `/tmp/kiroku-machine-CUX8BC1K`。中に `probe/`、`demo/`、`update/`、`remote.git/`、`kiroku-old/`、操作・計測用ファイルがある。
+- `~/.kiro/workspace-roots/` に増えたフォルダは `8c9352821ca33d0c/`。probe の `permissions.yaml` を含む。
+- `~/.kiro/sessions/` に増えたセッションは次の12件。同じ3つの親フォルダの下に Kiro の `.index/` も作られた。
+
+  - `49ff2b031861adc8/sess_3cbaa1fd-7821-4b24-8621-152774dbfc37`
+  - `49ff2b031861adc8/sess_7f73407c-6cbb-48ed-921b-f207a57e4b2f`
+  - `49ff2b031861adc8/sess_a6c2c0aa-0d35-45a8-9af4-aa0cb5b4b47a`
+  - `823cda738ca863a8/sess_0424006d-db5c-40e8-9b64-5dcc7fca4d51`
+  - `823cda738ca863a8/sess_2b9451d5-8169-42fb-a71e-7d1c44fa7def`
+  - `823cda738ca863a8/sess_64e282e6-c6e9-4a94-987f-6b1af979a70d`
+  - `823cda738ca863a8/sess_9d62d73e-c545-43fb-bd05-a8aac48c0fbf`
+  - `823cda738ca863a8/sess_abddf456-a0ba-4fef-82cf-31f9d19bbdad`
+  - `823cda738ca863a8/sess_b38ae49e-07e8-45bc-a2e6-27ed30225534`
+  - `823cda738ca863a8/sess_d79eb2f7-e750-4f58-b57d-bbfde4b51cad`
+  - `823cda738ca863a8/sess_ec2a3012-950f-48cd-afd1-37a199fc0292`
+  - `8c9352821ca33d0c/sess_ad03ceab-1007-4661-b2d3-ebec1fcccfcf`
+
+今回の追記による既存の導入先への影響は「なし」。

@@ -18,6 +18,9 @@ def facts(data):
     for row in data['test_failures']:
         if row['class'] == 'regression':
             targets['test:' + row['test_id']] = {'count': row['count'], 'sessions': row['sessions']}
+    for row in (data.get('approvals') or {}).get('groups') or []:   # 版8から。以前の版の検証値（as_version）では除く
+        if row['candidate']:
+            targets[row['target']] = {'count': row['approved'], 'sessions': row['sessions']}
     plan = data['reading_plan']
     found = {'since': data['since'], 'until': data['until'], 'events': data['event_count'],
             'sessions': {k: data['coverage'][k] for k in ('sessions', 'recorded', 'log_only')},
@@ -114,7 +117,8 @@ def one_step(text, expected, limit, paths=None, targets=()):
                               name, '、'.join('`%s`' % c for c in unquoted)))
         unknown = [c for c in cited if (c.startswith('D') and ':' in c or re.fullmatch(r'D\d', c)
                                         or c.split(':', 1)[0] in ('topic', 'tool', 'denied', 'cancelled',
-                                                                  'timeout', 'test', 'practice')) and c not in known]
+                                                                  'timeout', 'test', 'practice', 'approval'))
+                   and c not in known]
         if unknown:
             errors.append('%s：集約に無い手がかり：%s' % (name, '、'.join(unknown)))
         if not fields.get('確かめ方'):

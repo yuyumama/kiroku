@@ -155,6 +155,49 @@ Q<番号>. <何>を、毎回目で確かめています。何が一致すれば�
 - 合格条件を、推測で埋めません。答えが無ければ、様子見にします。
 - 「b」の答えは、次の振り返りの「前回までの回答」に出ます。新しい観測が無ければ、聞き直しません。
 
+## 毎回の承認から、許可の規則を提案する
+
+集約の「承認の記録」は、開発のセッションで、人が承認画面に答えた呼び出しを数えたものです。回数は聞くきっかけで、許可にする理由ではありません。わざと毎回確かめている操作もあるので、手順5で聞きます。
+
+### 危険の区分
+
+区分は、スクリプトがコマンドの文面から決めます（利用者の発話ではありません）。つないだコマンドは、いちばん危ないものを取ります。
+
+| 区分 | 例 | 扱い |
+|---|---|---|
+| 読み取り | `git status`、`git diff`、`git log`、`ls`、`cat`、`grep` | 許可の候補になる |
+| 手元の検査 | テストの記録設定に当たるコマンド、lint、型検査、ビルド | 許可の候補になる |
+| 手元の書き換え | `git add`、`git commit`、`mkdir`、`mv`、`cp` | 許可の候補になる（質問で確かめる） |
+| 外に出る | `git push`、`git pull`、`curl`、`wget`、`gh`、`npm install`、`pip install`、`npm publish`、`docker push`、`ssh` | 候補にしない |
+| 任意のコードの実行 | `python -c`、`bash -c`、`node -e`、`eval`、`npx`、`docker exec`、`docker run`、`find -exec` | 候補にしない |
+| 取り返しがつかない | `rm -rf`、`git reset --hard`、`git push --force`、`git clean -f`、`sudo`、`chmod -R 777`、`kill` | 候補にせず、deny の案の候補にする |
+| 区分を決められない | 上のどれにも当たらない（`python3 scripts/x.py` など） | 許可の候補になる。中身を読み、要らなければ外す |
+
+出典：Kiro の deny の例（`rm -rf *`、`sudo *`。[Permissions](https://kiro.dev/docs/permissions/)）、Claude Code の「任意のコードを実行できるものは許可の一覧から外す」（`/fewer-permission-prompts`。[Commands](https://code.claude.com/docs/en/commands)）、[oliver-kriska/claude-elixir-phoenix](https://github.com/oliver-kriska/claude-elixir-phoenix) の `phx:permissions`（取り返しのつかない操作は、決して自動で許可しない）。
+
+### 聞き方
+
+```text
+Q<番号>. `<見出し>` を、毎回確かめたいですか。それとも、自動で通してよいですか？
+<承認の回数、セッション数、最後に承認した日（集約の値）と、区分>
+  a. 自動で通してよい → 許可の規則の案を出す
+  b. 毎回確かめたい → 出さない
+  c. わからない → 様子見にする
+  d. その他（自由に書いてください）
+見立て：<選択肢の記号>。<理由を1文で>
+```
+
+### 案の書き方
+
+- 対象の型は `approval:<見出し>` にします。採用した後に、その承認が減ったかを数えて追います。
+- 規則は、集約の「規則の案」をそのまま使います。観測したコマンドの違いを覆う、いちばん狭い段（完全一致、2語＋`*`、1語＋`*`）で、危険な変形には当たらないことをスクリプトが確かめたものです。「規則の案なし」のものは、規則を作らず、理由を書きます。`*` だけの規則と、引数まで絞る規則は書きません。
+- 当たる例と、当たらない例を、集約のとおりに添えます。
+- 主な反映のしかた：「次にこの承認画面が出たら、Always allow を選び、段は〇〇、範囲は This workspace を選ぶ」。ファイルの編集は要りません。This workspace の規則は、ワークスペースの規則のファイル（集約に出るパス、`~/.kiro/workspace-roots/<hash>/permissions.yaml`）に保存されます。利用者ごとで、リポジトリには入りません。対象のファイルには、このパスを書きます。
+- チームで共有したいときのために、リポジトリの中のエージェント定義の `permissions` に書く形も添えます（例：`{"capability": "shell", "match": ["git diff", "git diff *"], "effect": "allow"}`）。
+- deny の案には、当たらない書き方が残ることを書きます（例：`git push --force *` を止めても、`git -C . push --force` は当たらない）。deny は守りの境界ではありません。
+- 区分を決められない承認が多いときは、Approve for me（規則で決まらない操作を、LLM の判定で通す・止める・聞く）を、注意（有料で、判定の費用がかかる。「セキュリティの仕組みの代わりにはならない」）つきで紹介できます。決まった規則（狭い allow と deny）を先に勧めます（[Approve for me](https://kiro.dev/blog/introducing-approve-for-me/)）。
+- 規則の当たり方は、Kiro の資料の書き方（`*` は任意の文字の並び、つないだコマンドは分けて判定）を kiroku が近似したものです。実機では確かめていません。案にも「未検証」と書きます。
+
 ## 案を出す前の確認
 
 カスタムエージェントの継承設定は [公式リファレンス](https://kiro.dev/docs/custom-agents/configuration-reference/#disabling-default-resource-inheritance) に従います。既定の継承を無効化する設定はCLIのグローバルまたはワークスペース単位です。設定や実際の読み込みを確認できなければ、その範囲は未確認とします。

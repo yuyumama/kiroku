@@ -23,7 +23,8 @@ from pathlib import Path
 #      一歩先の改善案と質問の手がかりに、比べたハーネスの表のファイルを書けるようにする
 #   7：ハーネスの診断の後に、ベストプラクティス集との照らし合わせの節を足す（骨組みを作った時点の控えから書く）。
 #      候補と未確認の practice:<ID> を、一歩先の改善案の手がかりと、対象の型に書けるようにする
-VERSION = 7
+#   8：承認の繰り返しの候補（approval:<見出し>）を、対象の型に足す（検証値が変わる）
+VERSION = 8
 PRACTICES_HEADING = "## ベストプラクティス集との照らし合わせ"
 ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = None   # 一歩先の改善案の上限の既定値（設定の one_step_max）。None は上限なし

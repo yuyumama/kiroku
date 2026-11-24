@@ -29,7 +29,7 @@ TARGET = re.compile(r"対象の型[：:]\s*`([^`]+)`")
 FILES = re.compile(r"対象のファイル[：:]\s*(.*)$")
 LENS = re.compile(r"^\s*[-*]\s*観点[：:]\s*(.*)$")   # 一歩先の改善案の観点（V1〜V8）
 REPORT_NAME = re.compile(r"(\d{4}-\d\d-\d\d-\d{4})(\d\d)?(?:-\d+)?$")
-TARGET_KINDS = ("topic", "tool", "denied", "cancelled", "timeout", "test", "practice")
+TARGET_KINDS = ("topic", "tool", "denied", "cancelled", "timeout", "test", "practice", "approval")
 YOUNG_DAYS = 3  # これより日が浅いうちは、効果を判定しない
 
 

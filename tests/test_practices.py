@@ -285,7 +285,8 @@ class PracticeReportTest(test_skeleton.SkeletonBase):
 
     def test_the_section_is_written_from_the_kept_snapshot(self):
         path, text = self.new_report()
-        self.assertTrue(text.startswith("<!-- kiroku-report:7 -->"))
+        self.assertTrue(text.startswith(skeleton.MARK))
+        self.assertGreaterEqual(skeleton.VERSION, 7)
         self.assertIn(skeleton.PRACTICES_HEADING, text)
         self.assertLess(text.index("## ハーネスの診断"), text.index(skeleton.PRACTICES_HEADING))
         self.assertLess(text.index(skeleton.PRACTICES_HEADING), text.index("## 記録の不足、確認事項"))

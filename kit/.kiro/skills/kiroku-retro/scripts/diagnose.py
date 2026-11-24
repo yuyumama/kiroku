@@ -652,16 +652,17 @@ def burden(data):
     """D6：型ごとの負担。回数、セッション数と、分母に対する割合。検証値の対象の型だけを出す。
 
     分母は、記録からの型（tool、denied、cancelled、timeout、test）なら期間内の記録があるセッション、
-    会話からの型（topic）なら期間内に発話があるセッション。
+    会話からの型（topic）と承認（approval。ログから数える）なら期間内に発話があるセッション。
     """
     recorded = data["coverage"]["recorded"]
     talked = sum(1 for s in data["sessions"] if s["prompts"])
     rows = []
     for target, value in data["report_facts"]["targets"].items():
-        base = talked if target.startswith("topic:") else recorded
+        spoken = target.startswith(("topic:", "approval:"))
+        base = talked if spoken else recorded
         rows.append({"target": target, "count": value["count"], "sessions": value["sessions"], "base": base,
                      "share": round(100 * value["sessions"] / base) if base else None,
-                     "base_label": "発話があるセッション" if target.startswith("topic:") else "記録のあるセッション"})
+                     "base_label": "発話があるセッション" if spoken else "記録のあるセッション"})
     return sorted(rows, key=lambda r: (-r["sessions"], -r["count"], r["target"]))
 
 

@@ -59,8 +59,9 @@ import diagnose  # noqa: E402
 import answers  # noqa: E402
 import debug  # noqa: E402
 import practices  # noqa: E402
-from record import (count_setting, load_config, load_state, mask, not_run_kind, recording_lock,  # noqa: E402
-                    recording_start, save_state, script_root)
+import approvals  # noqa: E402
+from record import (count_setting, load_config, load_state, mask, not_run_kind, positive_setting,  # noqa: E402
+                    recording_lock, recording_start, save_state, script_root)
 
 RED, REGRESSION, MERGE, OTHER = "red", "regression", "merge", "other"
 LABELS = {RED: "Red 候補", REGRESSION: "回帰候補", MERGE: "マージ中の失敗", OTHER: "その他"}
@@ -83,7 +84,8 @@ GAP_REASONS = {
     "unknown_shell_response": "シェルの応答から終了コードを読めない",
     "unreadable_tool_call": "セッションログで完了していないシェル実行だが、結果の行が無いか、形式が想定と違うため判定できない",
 }
-SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "practices", "sessions", "facts")
+SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "practices", "approvals", "sessions",
+            "facts")
 OUTPUT_CAPS = (12, 6, 3)  # 一覧1つあたりの件数。出力が長すぎるときは、順に小さくする
 VCS_ACTIONS = ("merge", "pull", "rebase", "checkout", "reset", "cherry-pick", "revert",
                "commit (merge)", "am", "switch", "restore")
@@ -608,6 +610,10 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
 
     all_events, all_failures = events, failures
     findings, note_problems = notes.verify(root)
+    # 承認画面に人が答えた呼び出し（全期間）。許可の候補と、採用した案の追跡に使う。
+    approval_sessions = sorted({e["session_id"] for e in all_events if e.get("session_id")}
+                               | set(prompts.discover(root, prompts.sessions_dir(root))))
+    approval_answers, approval_logs, approval_hashes = approvals.collect(root, approval_sessions, load_config(root))
 
     def occurrences(target, report=None):
         """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。
@@ -636,6 +642,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
             return exact
         if kind == "test":
             return [f["_time"] for f in all_failures if f["class"] == REGRESSION and f["test_id"] == name]
+        if kind == "approval":
+            return approvals.occurrences(approval_answers, target)
         return None
 
     read_after = {}
@@ -660,9 +668,15 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
                 read_after[key] = sum(1 for s in prompts.sessions(root, all_events, start, None)
                                       if s["prompts"] and s["note"] == "fresh")
             return {"unit": "発話を読み終えたセッション", "count": read_after[key], "note": None}
+        if kind == "approval":
+            # 承認画面が出うるのは、発話があり、ログを読めるセッション。
+            count = sum(1 for s in prompts.sessions(root, all_events, start, None)
+                        if s["prompts"] and s["log"] in ("ok", "partial_log"))
+            return {"unit": "ログを読めたセッション（発話あり）", "count": count, "note": None}
         return None
 
-    starts = [e["_time"] for e in all_events[:1]] + [f["_time"] for f in findings if f["_time"]]
+    starts = [e["_time"] for e in all_events[:1]] + [f["_time"] for f in findings if f["_time"]] \
+        + ([min(a["ts"] for a in approval_answers)] if approval_answers else [])   # 承認はログから読む
     adopted, rejected = ledger.tracking(root, occurrences, min(starts) if starts else None,
                                         datetime.datetime.now(datetime.timezone.utc), exposure)
     pending = []
@@ -810,6 +824,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "steering": harness.steering_weight(root),
         "diagnostics": diagnostics,
         "recording_start": (lambda m: m.isoformat() if m else None)(recording_start(data_dir)),
+        "approvals": approvals.summarize(approval_answers, approval_logs, approval_hashes, since, until,
+                                         positive_setting(load_config(root), "approval_min_sessions")),
         "topics": notes.topics(findings, since, until),
         # 版5までの判定（手作業の確認を数えない）。以前の版のレポートの検査だけに使う（as_version）。
         "topics_v5": notes.topics([f for f in findings if f["kind"] != notes.MANUAL_CHECK], since, until),
@@ -889,6 +905,8 @@ def render(data, show_prompts=False, section=None, cap=None):
         lines += render_harness(data, cap)
     if want("practices"):
         lines += render_practices(data["practices"])
+    if want("approvals") and data.get("approvals"):   # 版7までの形にそろえた集約（as_version）には無い
+        lines += render_approvals(data["approvals"], cap)
     if want("sessions"):
         lines += render_sessions(data["sessions"], None if cap is None else cap * 3)
     page = data.get("prompt_page")
@@ -1080,6 +1098,17 @@ def render_harness(data, cap):
         if len(rows) < len(entry["files"]):
             lines.append("  - ほか %d 個。全件は `--section harness` で出します。" % (len(entry["files"]) - len(rows)))
     return lines + render_steering(data["steering"])
+
+
+def render_approvals(found, cap=None):
+    """承認の記録：承認画面に人が答えた呼び出し。許可の候補と、deny の案の候補。"""
+    lines = ["", "## 承認の記録（承認画面に人が答えた呼び出し）", "",
+             "開発のセッションのログ %d 件から、承認画面に答えた呼び出しを数えました（振り返りの会話と、kiroku 自身の"
+             "コマンドは除く）。回数は聞くきっかけで、許可にするかは利用者に聞きます。許可の候補は、別々の %d つ以上の"
+             "セッションで承認し、一度も拒否が無く、危険の区分が「外に出る」「任意のコードの実行」「取り返しがつかない」"
+             "でないものです。規則の当たり方は Kiro の資料からの近似で、実機では確かめていません。"
+             % (found["logs"], found["min_sessions"]), ""]
+    return lines + approvals.lines(found, cap)
 
 
 def render_practices(found):
@@ -1385,9 +1414,12 @@ def as_version(data, version):
     対象の型にした。版5までのレポートは、手作業の確認を数えないトピックで比べる（そのころの
     ノートに、この種類は無かった。更新の後にノートを書き直しても、以前のレポートの検証値を変えない）。
     """
-    if version >= 6:
+    if version >= 8:
         return data
-    shaped = dict(data, topics=data.get("topics_v5", data["topics"]))
+    # 版8で、承認の繰り返しの候補（approval:<見出し>）を対象の型に足した。版7までの検証値には無い。
+    shaped = dict(data, approvals=None)
+    if version < 6:
+        shaped["topics"] = data.get("topics_v5", data["topics"])
     if version >= 4:
         shaped["report_facts"] = reportcheck.facts(shaped)
         shaped["burden"] = diagnose.burden(shaped)   # 対象の型から作るので、作り直す

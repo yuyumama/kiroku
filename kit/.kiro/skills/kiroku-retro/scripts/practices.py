@@ -361,7 +361,13 @@ def check_p1(facts, done):
 
 
 def check_p2(facts, done):
-    return UNKNOWN, "承認の繰り返しは、この版の kiroku では数えていない", []
+    found = facts.data.get("approvals")
+    if not found or not found.get("logs"):
+        return UNKNOWN, "承認の記録を読めるセッションのログが無い", []
+    candidates = found.get("candidates") or []
+    if candidates:
+        return UNMET, "毎回承認している操作の候補：%s" % _names(candidates), ["承認の候補 %d 件" % len(candidates)]
+    return MET, "別々のセッションで繰り返し承認し、拒否の無い操作は無い（ログ %d 件）" % found["logs"], []
 
 
 def _secret_files(root):

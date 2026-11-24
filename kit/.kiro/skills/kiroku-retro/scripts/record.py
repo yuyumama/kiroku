@@ -60,6 +60,9 @@ DEFAULT_CONFIG = {
     "one_step_max": None,
     # 1回の振り返りで、案を作る前に利用者に聞く質問の上限。None は上限なし。0 は聞かない。
     "question_max": None,
+    # 承認を許可の候補にする、承認した別々のセッションの数。1つのセッションに固まった承認は、
+    # その場限りの作業とみなす。最初の値で、根拠は薄い。
+    "approval_min_sessions": 2,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")
@@ -172,6 +175,18 @@ def load_config(root):
 # 0 以上の整数で指定する項目と、0 にしたときの意味。範囲外や数でない値は、既定値で動く。
 COUNT_KEYS = {"output_tail_chars": "失敗の出力を残さない", "one_step_max": "一歩先の改善案を書かない",
               "question_max": "利用者に質問しない"}
+
+
+# 1 以上の整数で指定する項目と、その意味。範囲外や数でない値は、既定値で動く。
+POSITIVE_KEYS = {"approval_min_sessions": "承認を許可の候補にする、別々のセッションの数"}
+
+
+def positive_setting(config, key):
+    """1 以上の整数の設定値。不正な値（0 以下、数でない値、真偽値）は既定値に戻す。"""
+    value = config.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return DEFAULT_CONFIG[key]
+    return value
 
 
 def count_setting(config, key):

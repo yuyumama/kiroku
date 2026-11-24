@@ -1244,7 +1244,7 @@ README は、案の番号の重複の検査を「版3のレポートだけに当
 
 ## 2026-11-20：ハーネスの地図と、承認からの権限の提案の設計のための確認（公式資料。実機ではない）
 
-[harness-map-design.md](harness-map-design.md) の設計のために、公式資料で次を確かめた。まだ実装していない。
+[best-practices-design.md](best-practices-design.md)（旧 harness-map-design.md）の設計のために、公式資料で次を確かめた。まだ実装していない。
 
 - 権限（[Permissions](https://kiro.dev/docs/permissions/)、2026-11-18 更新）：シェルの規則の `*` は任意の文字の並びで、`**`・`?` は使えない。つないだコマンドは分けて1つずつ判定する。優先は deny > ask > allow > evaluate で、範囲の間に優先は無い。ワークスペースの規則は `~/.kiro/workspace-roots/<hash>/permissions.yaml`（リポジトリの外）、ユーザー共通は `~/.kiro/settings/permissions.yaml`。承認画面の Always allow は、段（完全一致、2語＋`*`、1語＋`*`）と範囲を選んで規則を保存する（CLI 2.36 から）。
 - Approve for me：規則で決まらない操作を LLM の判定で通す・止める・聞く。既定では切ってある。有料の利用者向け。「セキュリティの仕組みの代わりにはならない」。

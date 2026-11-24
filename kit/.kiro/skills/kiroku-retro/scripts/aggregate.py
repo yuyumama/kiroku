@@ -810,6 +810,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "diagnostics": diagnostics,
         "recording_start": (lambda m: m.isoformat() if m else None)(recording_start(data_dir)),
         "topics": notes.topics(findings, since, until),
+        # 版5までの判定（手作業の確認を数えない）。以前の版のレポートの検査だけに使う（as_version）。
+        "topics_v5": notes.topics([f for f in findings if f["kind"] != notes.MANUAL_CHECK], since, until),
         "note_problems": note_problems,
         "adopted": adopted,
         "ambiguous_decisions": ledger.ambiguous_decisions(root),
@@ -1155,13 +1157,32 @@ def render_plan(plan):
     return lines
 
 
+def render_checks(topics, cap=None):
+    """手作業の確認：ノートで manual_check としたトピック。合格条件を聞く手がかり（SKILL.md の手順5）。"""
+    checked = sorted((t for t in topics if t["checks"]["count"]),
+                     key=lambda t: (-t["checks"]["sessions"], -t["checks"]["count"], t["topic"]))
+    lines = ["", "## 手作業の確認（%d 件）" % len(checked), "",
+             "振り返りノートで「手作業の確認」とした発話のトピックです。セッションの数にかかわらず、"
+             "対象の型にします。何が一致すれば確認済みにできるか（合格条件）を、利用者に聞く手がかりです。", ""]
+    if not checked:
+        return lines + ["なし"]
+    rows, more = capped(checked, cap, "review")
+    for topic in rows:
+        lines.append("- `topic:%s`：手作業の確認 %d セッション、%d 回。%s" % (
+            topic["topic"], topic["checks"]["sessions"], topic["checks"]["count"], topic["summary"]))
+        for example in topic["checks"]["examples"]:
+            lines.append("  - session `%s` index=%s 「%s」" % (
+                example["session_id"], example["index"], shorten(example["quote"], 120)))
+    return lines + more
+
+
 def render_review(data, cap=None):
     """ノートと台帳から求めたもの。会話からの型の候補、ノートの検査、案の追跡。"""
     topics = data["topics"]
     candidates = [t for t in topics if t["candidate"]]
     lines = ["", "## 会話からの型の候補（%d 件）" % len(candidates), "",
              "振り返りノートの引用をログと照合し、%d つ以上の別のセッションに出たトピックです。"
-             "期間内に述べた継続的な方針は、1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
+             "期間内に述べた継続的な方針と、手作業の確認は、1回でも候補にします。" % notes.PATTERN_SESSIONS, ""]
     if not candidates:
         lines.append("なし")
     for topic in candidates:
@@ -1175,6 +1196,7 @@ def render_review(data, cap=None):
                 example["session_id"], example["index"], shorten(example["quote"], 120)))
             if example.get("context"):
                 lines.append("    - ノートに書かれた経緯：%s" % shorten(example["context"], 120))
+    lines += render_checks(topics, cap)
     others = [t for t in topics if not t["candidate"]]
     if others:
         lines += ["", "### まだ型ではないトピック（同じ話題には、この名前を使う）", ""]
@@ -1331,15 +1353,23 @@ def as_version(data, version):
     更新しただけで、以前に検査を通ったレポートが不一致にならないようにするため。
     振り返りで読むセッションは、これまでどおり今の判定で決める（この関数は検査だけに使う）。
     版5は節を1つ足しただけで、検証値は版4と同じ。
+    版6で、手作業の確認（ノートの種類 manual_check）のあるトピックを、セッションの数にかかわらず
+    対象の型にした。版5までのレポートは、手作業の確認を数えないトピックで比べる（そのころの
+    ノートに、この種類は無かった。更新の後にノートを書き直しても、以前のレポートの検証値を変えない）。
     """
-    if version >= 4:
+    if version >= 6:
         return data
-    shaped = dict(data, diagnostics=None)   # 版4で足した診断値は、版3までの検証値に無い
+    shaped = dict(data, topics=data.get("topics_v5", data["topics"]))
+    if version >= 4:
+        shaped["report_facts"] = reportcheck.facts(shaped)
+        shaped["burden"] = diagnose.burden(shaped)   # 対象の型から作るので、作り直す
+        return shaped
+    shaped["diagnostics"] = None   # 版4で足した診断値は、版3までの検証値に無い
     if version < 3:
         harness_rows = [row for row in data["harness"] if row.get("added_in", 0) <= max(version, 2)]
         sessions = [dict(row, note=row.get("note_v2", row["note"])) for row in data["sessions"]]
         plan = reading_plan([dict(row) for row in sessions], data["reading_plan"]["budget"])
-        topics = sorted((dict(row, candidate=row.get("candidate_v2", row["candidate"])) for row in data["topics"]),
+        topics = sorted((dict(row, candidate=row.get("candidate_v2", row["candidate"])) for row in shaped["topics"]),
                         key=notes.order)   # 骨組みの検証値の行は、版2のときの並びで書かれている
         shaped.update(harness=harness_rows, sessions=sessions, reading_plan=plan, topics=topics)
     shaped["report_facts"] = reportcheck.facts(shaped)
@@ -1536,15 +1566,17 @@ def main(argv=None):
                                                       skeleton.FACTS_INTRO)
                     errors += bugs
                     notices += unverified
+            # 版6から、比べたハーネスの表のファイルも、一歩先の案と質問の手がかりに書ける。
+            paths = skeleton.table_paths(root, data) if form >= 6 else None
             if form >= 4:
-                errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'])
+                errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'], paths)
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
                 unread, unchecked = reads.validate(root, body, legacy=form < 4)
                 errors += unread
                 notices = list(notices) + unchecked
             if form >= 5:
-                asked, unverified = answers.validate(root, body, clues(data), data['question_max'])
+                asked, unverified = answers.validate(root, body, clues(data) | set(paths or ()), data['question_max'])
                 errors += asked
                 notices = list(notices) + unverified
         except (OSError, ValueError, TypeError, KeyError) as exc:

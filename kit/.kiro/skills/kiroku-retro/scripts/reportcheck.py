@@ -48,13 +48,17 @@ def extract(text):
 LENSES = tuple("V%d" % n for n in range(1, 9))   # 一歩先の観点（references/harness-guide.md）
 ONE_STEP_HEADING = "## 一歩先の改善案"
 FIELD = re.compile(r"^\s*[-*]\s*(観点|段|手がかり|確かめ方)[：:]\s*(.*)$")
+FILE_CITATION = re.compile(r"引用（ファイル）[：:]\s*`([^`]+)`")
 
 
-def one_step(text, expected, limit):
+def one_step(text, expected, limit, paths=None):
     """一歩先の改善案の節を確かめる。文章の意味と、案の価値は判定しない。
 
     確かめるのは、件数が上限以内か、各案に観点（V1〜V8）、段（観測の段→案の段。上がっていること）、
     手がかり（集約にある型か診断値を1つ以上）、確かめ方が書かれているか。
+    paths は、比べたハーネスの表のファイル（版6から。それより前の版は None）。手がかりに書けるが、
+    そのときは、その案の中に、そのファイルからの引用（引用（ファイル）：…）が要る。
+    文書に書かれた手作業の確認などを、根拠を示して手がかりにするため。引用の実在は citations が確かめる。
     """
     lines = text.splitlines()
     if ONE_STEP_HEADING not in lines:
@@ -71,19 +75,23 @@ def one_step(text, expected, limit):
     for line in section:
         heading = HEADING.match(line)
         if heading:
-            current = {'number': heading.group(1), 'fields': {}}
+            current = {'number': heading.group(1), 'fields': {}, 'files': set()}
             proposals.append(current)
         elif current is not None:
             field = FIELD.match(line)
             if field:
                 current['fields'][field.group(1)] = field.group(2).strip()
+            quoted = FILE_CITATION.search(line)
+            if quoted:
+                current['files'].add(quoted.group(1).strip())
     if not proposals:
         return ['一歩先の改善案は、案ごとに `### P<番号>. ` の見出しで書いてください。無ければ「なし」と書きます。']
     errors = []
     if limit is not None and len(proposals) > limit:
         errors.append('一歩先の改善案が %d 件あります。上限は %d 件です。価値の大きいものに絞り、残りは個別の改善案か'
                       '様子見にしてください。' % (len(proposals), limit))
-    known = set(expected.get('targets', {})) | set(expected.get('diagnostics', []))
+    files = set(paths or ())
+    known = set(expected.get('targets', {})) | set(expected.get('diagnostics', [])) | files
     for row in proposals:
         fields, name = row['fields'], row['number']
         lenses = re.findall(r'V\d+', fields.get('観点', ''))
@@ -95,8 +103,14 @@ def one_step(text, expected, limit):
                           '（1 事例、2 種類、3 環境）。上がらない案は、個別の改善案にします。' % name)
         cited = re.findall(r'`([^`]+)`', fields.get('手がかり', ''))
         if not any(c in known for c in cited):
-            errors.append('%s：手がかりに、集約にある型か診断値（`D1:…` など）を1つ以上、バッククォートで'
-                          '囲んで書いてください。観測につながらない一般論は、一歩先の案にしません。' % name)
+            errors.append('%s：手がかりに、集約にある型か診断値（`D1:…` など）%sを1つ以上、バッククォートで'
+                          '囲んで書いてください。観測につながらない一般論は、一歩先の案にしません。' % (
+                              name, '、比べたハーネスの表のファイル' if paths is not None else ''))
+        unquoted = sorted(c for c in set(cited) & files if c not in row['files'])
+        if unquoted:
+            errors.append('%s：手がかりのファイル %s からの引用（引用（ファイル）：`…`「…」）を、この案に書いてください。'
+                          'ファイルを手がかりにするときは、根拠にした一節を示します。' % (
+                              name, '、'.join('`%s`' % c for c in unquoted)))
         unknown = [c for c in cited if (c.startswith('D') and ':' in c or re.fullmatch(r'D\d', c)
                                         or c.split(':', 1)[0] in ('topic', 'tool', 'denied', 'cancelled',
                                                                   'timeout', 'test')) and c not in known]

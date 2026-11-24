@@ -1427,3 +1427,112 @@ README は、案の番号の重複の検査を「版3のレポートだけに当
 - ワークスペースの規則のファイルの場所（`<hash>` の対応は CLI 3.2.1 で見たもの）。
 
 既存の導入先への影響は「`--update` だけで済む」。判定のファイルが増え（`--update` で配られる）、骨組みの版が8になり、設定 `approval_min_sessions` の既定値はコードにある。以前のレポートは作ったときの版の規則で検査する。記録、ノート、台帳の形式は変えていない（台帳の対象の型に `approval:` が増えるだけ）。
+
+## 2026-11-24〜25　Issue #24 の実機確認
+
+Kiro CLI 3.5.0（V3）、Ubuntu 22.04.5 LTS（Linux 6.8.0-149-generic、x86_64）、Python 3.10.12、kiroku main `e2cacd7`。probe と demo に個別に導入し、両方で doctor の設定一致を確認した。
+
+### 手順1　既定エージェントの承認
+
+| コマンド | 承認画面・選択 | pending_interaction | outcome | selectedOption |
+|---|---|---|---|---|
+| `git status` | なし | なし | 解決イベントなし | 同左 |
+| `python3 run_tests.py` | Allow once | あり | selected | accept |
+| `git log --oneline -3` | なし。予定の Deny は選べず | なし | 解決イベントなし | 同左 |
+| `ls -la` | Escape | あり | cancelled | キーなし |
+| `git diff HEAD` | Create allow rule → 2語 → workspace | あり | selected | always-accept |
+
+解決イベントに共通するほかのキーは `type`、`toolCallId`、`executionId`、`consentRound`、`modelToolUseId`、`_meta`。最後の行は `_meta.kiro.consentOutcome` に `scope=workspace`、`applied=true`。保存先は `~/.kiro/workspace-roots/5b0ddab4fe8cb247/permissions.yaml`。規則は `capability: shell`、`effect: allow`、`match: ["git diff *"]`。セッションログの親ハッシュと一致した。ユーザー共通の `~/.kiro/settings/permissions.yaml` は前後とも存在しなかった。
+
+### 手順2　同じ probe の新しいセッション
+
+| コマンド | 承認画面 | 手順書の画面予想との比較 |
+|---|---|---|
+| `git diff` | なし | 不一致。kiroku の近似では引数なしは別の完全一致 |
+| `git diff --stat` | なし | 一致 |
+| `git -C . diff` | あり。Deny once、selected / reject | 一致 |
+| `git diff --stat && git status` | なし | 個別の2コマンドがどちらも通る観察と整合 |
+
+画面の有無は実測した。保存前に引数なしの `git diff` を測っていないため、どの規則が許可したかは未検証。複合コマンドの内部判定もログからは特定できない。
+
+### 手順3・4　開発の会話と初回の振り返り
+
+`demo-cases.md` の「実機での会話」の発話を記載順に入力した。A（医療カテゴリ、報告順、日本語コミットと今回の比較月）は `sess_f3f8babc-858e-4b50-8498-b25bd2e0b2cc`、B（再テスト、報告順、整数円）は `sess_0b52a3e6-3fdb-4c4b-bf41-838bc5c1358b`、C（月の集計後に待つ、合計と返金の確認）は `sess_3b46a284-1cea-4f3d-9378-fd3a3f977146`。
+
+初回は `aggregate.py --since last --require-agent` で開始。未読3件を読んでから「上から重要な順です。全部に答えなくて構いません」と表示し、5問でターンを終えた。件数の上限は「なし」。順に、C の合計・返金の確認、BP-P1 の危険操作に対する規則、BP-S2 のテスト hook、BP-S3 の lint、BP-S4 の pre-commit が手がかりだった。Q1 に通常分と返金の合格条件、Q5 に「使いたい」、Q2〜Q4 に「わからない」と回答した。
+
+初回レポートは demo の `.kiro/kiroku/data/reports/2026-11-24-2355.md`。途中の検査では短縮したセッション ID を照合できなかった。エージェントが修正した完成版を試験者が検査して終了コード0。台帳は `2026-11-24-2355#P1 [見送り]`（`practice:BP-S4`）、P2〜P5 は未判断。
+
+| ケース | 判定 | 根拠 |
+|---|---|---|
+| D28 | 合格 | D5 とレポートはいずれも CI の「match に一致する行が無い」。コメントをテスト実行の根拠にしていない。実コマンド側にもコメントを書く対照条件は今回の実機手順の対象外。 |
+| D30 | 不一致 | C のノートと集約で月の合計と返金を手作業の確認として拾い、Q1 で合格条件を聞いた。回答後、固定例の既存テストで確認済みと扱い、実際の月次合計の照合を自動にする案（V3）は5案に含まれなかった。 |
+| D31 | 合格 | リモートを追加する前の集約は BP-S5 を「当てはまらない」と表示。初回の5問・5案に CI の推奨はなかった。 |
+
+### 手順5・6　承認と2回目の振り返り
+
+| セッション | テスト | コミット | push / log |
+|---|---|---|---|
+| D1 `sess_5d86a8d3-3ee2-4a86-a669-87bbc583e097` | Kiro がコピー外の `/workspace/README.md` を参照しようとしたため中断。テストの承認は未実施 | Allow | 手元の bare に `git push origin main`、Allow |
+| D2 `sess_a213c450-9ccf-462f-a2cd-113e8282fd49` | `python3 run_tests.py`、Allow | 作業ツリーがクリーンでコミット呼び出しなし。Deny を選ぶ画面なし | 同じ bare に同じ push、Allow |
+| D3 `sess_a537dd16-4f21-4117-a55f-f9ff98def3f4` | — | — | `git log --oneline -1` を別々に10回実行。承認画面0回 |
+
+D1 の push 前、試験者の操作補助が読み取り専用の `git remote -v` を含む事前確認も停止させた。同じセッションで push の依頼を再開した。集約に出たこの事前確認の取り消しには試験操作の影響がある。
+
+2回目の直前の `--since last` の期間開始は `2026-11-24T14:55:04.170944+00:00`。初回レポートの `until` と一致し、初回の未読は0件。新しい未読は D1・D2・D3 の3件のみ。2回目も冒頭に「上から重要な順です。全部に答えなくて構いません」があり、リモート追加後の CI 定義のコメントを手がかりに BP-S5 を1問だけ聞き、ターンを終えた。見立てに「はい」と回答した。テスト、log、push、commit の許可について質問はなかった。
+
+| ケース | 判定 | 根拠 |
+|---|---|---|
+| D29 | 前提不足 | 通常の引き継ぎで期間開始と未読一覧は期待どおり。3週間経過、7日より前の未読、前回未読が残る分岐は今回の実機では未検証。 |
+| D33 | 不一致 | D1 のテスト依頼は中断したが、同じ demo の B と D2 で完全一致の `python3 run_tests.py` に各1回 Allow、拒否なし。集約は7ログを読み「許可の候補（0 件）」。対象の質問が出ず、許可を自動にするかの回答には進めなかった。 |
+| D34 | 前提不足 | D3 は同じ1セッションの10呼び出しを確認。人による承認が0回で「10回承認」の入力を作れなかった。 |
+| D35 | 不一致 | push はD1・D2で各1回 Allow。許可の質問はなかったが、集約の「候補にしない承認」は `read_file` の取り消し1回だけで、期待した push の「外に出る」行が欠けた。commit の拒否を含む分岐は前提不足。 |
+
+CLI 3.5.0 の上記テストと push で、画面の選択を記録した `interaction_resolved.selectedOption=accept` と `pending_interaction` を照合した。対応するシェルの `tool_call.toolCallId` と承認の `toolCallId` が異なる。kiroku はこのキーの一致を必要とする。手順1の probe を別に集約しても「知らない答え」の表示はなかった。
+
+2回目の質問への回答直後、Kiro のターンが `status=failed`、`stopReason=error` で終了した。診断ログの理由は `monthly usage limit`。2回目のレポートは生成されず、独立した `--check-report` は未実施。承認の案の本文（完全一致、当たる例と当たらない例、段・範囲、対象ファイル、エージェント定義、「未検証」の表記）は検査できなかった。
+
+| ケース | 判定 | 根拠 |
+|---|---|---|
+| D32 | 未実施 | 台帳の見送り、2回目の集約の「見送り中」、BP-S4 を質問しなかったことまで確認。月間利用上限でレポートが生成されず、案にも出さないという条件は未検証。 |
+
+### 手順7　旧版からの更新
+
+`7ae4802` を新しい update コピーに導入した。旧版のテスト依頼も月間利用上限でツール呼び出し前に終了。旧版の開発セッションを同じ ID で再表示し、開いたまま `e2cacd7` の `--update` を実行した。終了コードは0。インストーラーの出力は次のとおり。
+
+```text
+新規  .kiro/skills/kiroku-retro/references/best-practices.md
+新規  .kiro/skills/kiroku-retro/scripts/approvals.py
+新規  .kiro/skills/kiroku-retro/scripts/practices.py
+更新  .kiro/skills/kiroku-retro/SKILL.md
+更新  .kiro/skills/kiroku-retro/references/harness-guide.md
+更新  .kiro/skills/kiroku-retro/scripts/aggregate.py
+更新  .kiro/skills/kiroku-retro/scripts/answers.py
+更新  .kiro/skills/kiroku-retro/scripts/citations.py
+更新  .kiro/skills/kiroku-retro/scripts/diagnose.py
+更新  .kiro/skills/kiroku-retro/scripts/harness.py
+更新  .kiro/skills/kiroku-retro/scripts/ledger.py
+更新  .kiro/skills/kiroku-retro/scripts/notes.py
+更新  .kiro/skills/kiroku-retro/scripts/record.py
+更新  .kiro/skills/kiroku-retro/scripts/reportcheck.py
+更新  .kiro/skills/kiroku-retro/scripts/skeleton.py
+そのまま（導入先の設定）  .kiro/kiroku/config.json
+新規 3、更新 12、変更なし 10
+config.json に無い項目は、既定値で動きます（書き足す必要はありません）：
+  sessions_dir = null
+  write_tools = ["fs_write", "fs_append", "str_replace"]
+  ignore_paths = [".kiro/kiroku/data/**", ".git/**"]
+  output_tail_chars = 2000
+  max_dirty_files = 500
+  retro_read_chars = 50000
+  retro_output_chars = 20000
+  test_start_max_seconds = 3600
+  one_step_max = null（上限なし）
+  question_max = null（上限なし）
+  approval_min_sessions = 2
+完了。テスト結果の記録は .kiro/kiroku/config.json の tests を設定してください。
+```
+
+更新前後で `events.jsonl` は1行から2行になり、いずれも `type=prompt`。更新後に同じセッションで依頼が記録されることを確認した。両時点で `record-errors.log` は存在しなかった。再度のテスト依頼も月間利用上限で終了し、テスト実行後のイベントの互換性は未検証。版5のレポート生成と更新前後の検査、および更新先での版8レポート生成・検査は未実施。検査の終了コードは得られなかった。
+
+既存の導入先への影響は、今回の検証記録の追記については「なし」。

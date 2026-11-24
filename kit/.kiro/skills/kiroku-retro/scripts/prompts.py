@@ -417,15 +417,15 @@ def unrecorded_calls(root, session_ids, since=None, until=None):
             continue
         cutoff = retro_start([r for r in rows if r[1].get("type") in excerpt.SHOWN_TYPES],
                              marks.get(session))
-        results, resolved = {}, {}
+        results = {}
+        resolved = excerpt.pair_interactions(rows)[0]
         for _, payload in rows:
             call_id = payload.get("toolCallId")
             if not isinstance(call_id, str):
                 continue
             if payload.get("type") == "tool_result":
                 results[call_id] = payload
-            elif payload.get("type") == "interaction_resolved":
-                resolved.setdefault(call_id, []).append(payload)
+            # 承認画面の答えは、呼び出しと toolCallId が違うことがある（CLI 3.5.0）。結び方は excerpt に任せる。
         hooks = collections.defaultdict(list)   # ターンごとの、それまでに動いたフックの名前
         for stamp, payload in rows:
             kind = payload.get("type")

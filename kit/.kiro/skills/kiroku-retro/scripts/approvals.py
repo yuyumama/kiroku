@@ -1,11 +1,15 @@
 """承認の記録：開発のセッションで、人が承認画面に答えた呼び出しを数え、許可の規則の候補を出す。
 
-ログの形（Kiro CLI 3.3.0 で実測。docs/retro/verification.md）：
-  承認画面に答えると、tool_call と同じ toolCallId の interaction_resolved が残る。
+ログの形（Kiro CLI 3.3.0 と 3.5.0 で実測。docs/retro/verification.md）：
+  承認画面に答えると、interaction_resolved が残る。
     承認（Allow）            outcome=selected、selectedOption=accept
+    規則にして承認（Always allow）  outcome=selected、selectedOption=always-accept（3.5.0。
+                             _meta.kiro.consentOutcome に scope と applied）
     拒否（Deny）             outcome=selected、selectedOption=reject
     取り消し（Escape など）   outcome=cancelled（selectedOption のキーが無い）
-  Always allow を選んだときの値は、まだ確かめていない。知らない値は「不明」として別に数え、承認には数えない。
+  3.3.0 では呼び出し（tool_call）と toolCallId が同じだったが、3.5.0 のシェルの呼び出しでは違った。
+  結び方は excerpt.pair_interactions に任せ、結べなかった答えは数えて表に出す。
+  知らない値は「不明」として別に数え、承認には数えない。
 
 回数は、利用者に聞くきっかけであって、許可にする理由ではない。わざと毎回確かめている操作もある。
 危険の区分は、コマンドの文面から決める（利用者の発話ではないので、発話を語で分類しない決まりには当たらない）。
@@ -24,7 +28,7 @@ import excerpt
 import prompts
 from record import mask
 
-APPROVED, REJECTED, CANCELLED, UNKNOWN = "approved", "rejected", "cancelled", "unknown"
+APPROVED, ALWAYS, REJECTED, CANCELLED, UNKNOWN = "approved", "always", "rejected", "cancelled", "unknown"
 PREFIX = "approval:"
 CLASSES = {"irreversible": "取り返しがつかない", "code": "任意のコードの実行", "external": "外に出る",
            "other": "区分を決められない", "write": "手元の書き換え", "check": "手元の検査", "read": "読み取り"}
@@ -66,6 +70,7 @@ DANGEROUS = ("git push --force origin main", "git push origin main", "git -C . p
              "docker run image", "find . -delete", "find . -exec rm {} ;", "chmod -R 777 .", "kill -9 1",
              "make deploy", "eval 'rm -rf build'")
 NO_WIDE_TIERS = ("sudo", "env")   # Kiro も、この語で始まるコマンドには2語・1語の段を出さない
+PAIRING = {"toolCallId": "toolCallId が同じ", "modelToolUseId": "modelToolUseId で", "order": "ログの順で"}
 TIERS = {"exact": "完全一致", "two": "2語＋`*`", "one": "1語＋`*`"}
 WEB_TOOLS = ("web_fetch", "fetch")
 
@@ -275,6 +280,11 @@ def _decision(resolved):
         return CANCELLED, None
     if option == "accept":
         return APPROVED, None
+    if option == "always-accept":
+        consent = ((resolved.get("_meta") or {}).get("kiro") or {}).get("consentOutcome") \
+            if isinstance(resolved.get("_meta"), dict) else None
+        scope = consent.get("scope") if isinstance(consent, dict) else None
+        return ALWAYS, scope if isinstance(scope, str) else None
     if option == "reject":
         return REJECTED, None
     return UNKNOWN, "outcome=%s、selectedOption=%s" % (outcome, option if "selectedOption" in resolved else "キーなし")
@@ -291,11 +301,13 @@ def _domain(args):
 def collect(root, session_ids, config):
     """承認画面に答えた呼び出し。開発のセッションだけ（振り返りの後と、kiroku 自身のコマンドを除く）。
 
-    戻り値は (答え, 読めたログの数, ワークスペースのハッシュの一覧)。答えは
-    {session_id, ts, decision, raw, tool, heading, command, key, class}。
+    戻り値は (答え, 読めたログの数, ワークスペースのハッシュの一覧, 結び方)。答えは
+    {session_id, ts, decision, raw, tool, heading, command, key, class}。結び方は
+    {"methods": {結び方: 件数}, "unpaired": [結べなかった答えの時刻]}。
     """
     directory, marks = prompts.sessions_dir(root), prompts.retro_marks(root)
     found, read, hashes = [], 0, collections.Counter()
+    pairing = {"methods": collections.Counter(), "unpaired": []}
     for session in session_ids:
         path = excerpt.find_log(session, directory)
         if not path:
@@ -309,13 +321,22 @@ def collect(root, session_ids, config):
         cutoff = prompts.retro_start([r for r in rows if r[1].get("type") in excerpt.SHOWN_TYPES], marks.get(session))
         calls = {p.get("toolCallId"): p for _, p in rows
                  if p.get("type") == "tool_call" and isinstance(p.get("toolCallId"), str)}
+        paired, unpaired, ways = excerpt.pair_interactions(rows)
+        owner = {id(answer): call_id for call_id, answers in paired.items() for answer in answers}
+        unpaired_ids = {id(answer) for answer in unpaired}
         for stamp, payload in rows:
             if payload.get("type") != "interaction_resolved":
                 continue
             moment = excerpt.parse_time(stamp)
-            call = calls.get(payload.get("toolCallId"))
-            if moment is None or (cutoff and moment >= cutoff) or call is None:
+            if moment is None or (cutoff and moment >= cutoff):
                 continue
+            if id(payload) in unpaired_ids:
+                pairing["unpaired"].append(moment)   # 黙って捨てず、集約に件数を出す
+                continue
+            call = calls.get(owner.get(id(payload)))
+            if call is None:
+                continue
+            pairing["methods"][ways[id(payload)]] += 1
             decision, raw = _decision(payload)
             tool = call.get("toolName") if isinstance(call.get("toolName"), str) else "不明"
             args = call.get("args") if isinstance(call.get("args"), dict) else {}
@@ -333,7 +354,7 @@ def collect(root, session_ids, config):
                 row.update(heading=tool, **{"class": "read" if tool in ("fs_read", "read") else
                                             "write" if tool in ("fs_write", "write") else "other"})
             found.append(row)
-    return found, read, [h for h, _ in hashes.most_common()]
+    return found, read, [h for h, _ in hashes.most_common()], pairing
 
 
 def rules_file(hashes):
@@ -353,8 +374,11 @@ def rules_file(hashes):
     return None
 
 
-def summarize(answers, read, hashes, since, until, min_sessions):
-    """見出しごとにまとめ、候補を決める。回数とセッション数は期間内、拒否は全期間で見る。"""
+def summarize(answers, read, hashes, since, until, pairing, min_sessions):
+    """見出しごとにまとめ、候補を決める。回数とセッション数は期間内、拒否は全期間で見る。
+
+    Always allow で規則にした見出しは、もう規則があるので候補にしない。
+    """
     def inside(row):
         return (since is None or row["ts"] >= since) and (until is None or row["ts"] < until)
 
@@ -370,9 +394,11 @@ def summarize(answers, read, hashes, since, until, min_sessions):
         approved = [r for r in period if r["decision"] == APPROVED]
         sessions = {r["session_id"] for r in approved}
         ever_rejected = any(r["decision"] == REJECTED for r in rows)
+        always = [r for r in rows if r["decision"] == ALWAYS]
         kind = min((r["class"] for r in rows), key=ORDER.index)
         entry = {"heading": name, "target": PREFIX + name, "tool": period[-1]["tool"], "class": kind,
                  "approved": len(approved), "sessions": len(sessions),
+                 "always": sum(1 for r in period if r["decision"] == ALWAYS),
                  "rejected": sum(1 for r in period if r["decision"] == REJECTED),
                  "cancelled": sum(1 for r in period if r["decision"] == CANCELLED),
                  "unknown": sum(1 for r in period if r["decision"] == UNKNOWN),
@@ -384,6 +410,9 @@ def summarize(answers, read, hashes, since, until, min_sessions):
             entry["why"] = "取り返しがつかない操作。許可の候補にせず、deny の案の候補にする"
         elif kind in EXCLUDED:
             entry["why"] = "危険の区分のため、許可の候補にしない"
+        elif always:
+            entry["why"] = "Always allow で規則にした（%s、範囲：%s）" % (
+                _when(always[-1]["ts"]), always[-1]["raw"] or "不明")
         elif ever_rejected:
             entry["why"] = "拒否したことがある（中身を見て判断している）"
         elif len(sessions) < min_sessions:
@@ -401,13 +430,16 @@ def summarize(answers, read, hashes, since, until, min_sessions):
     unknown = collections.Counter(r["raw"] for r in answers if r["decision"] == UNKNOWN and inside(r))
     return {"groups": out, "logs": read, "rules_file": rules, "min_sessions": min_sessions,
             "candidates": [e["target"] for e in out if e["candidate"]],
-            "unknown_values": sorted(unknown.items())}
+            "unknown_values": sorted(unknown.items()),
+            "pairing": dict(sorted((pairing or {}).get("methods", {}).items())),
+            "unpaired": sum(1 for t in (pairing or {}).get("unpaired", [])
+                            if (since is None or t >= since) and (until is None or t < until))}
 
 
 def occurrences(answers, target):
     """台帳の対象の型（approval:<見出し>）の、承認の時刻。採用した後に承認が減ったかを数える。"""
     name = target[len(PREFIX):]
-    return [r["ts"] for r in answers if r["heading"] == name and r["decision"] == APPROVED]
+    return [r["ts"] for r in answers if r["heading"] == name and r["decision"] in (APPROVED, ALWAYS)]
 
 
 def _when(moment):
@@ -423,6 +455,11 @@ def lines(found, cap=None):
             rules["path"], "あり。更新 %s" % _when(rules["changed"]) if rules["exists"] else "まだ無い"))
     else:
         out.append("- ワークスペースの規則のファイル：見つからない（ログが Kiro の既定の置き場に無い）")
+    if found.get("pairing"):
+        out.append("- 答えと呼び出しの結び方（ログ全体）：%s" % "、".join(
+            "%s %d 件" % (PAIRING.get(k, k), v) for k, v in found["pairing"].items()))
+    if found.get("unpaired"):
+        out.append("- 呼び出しに結べなかった答え：%d 件（数えていない。ログの形が変わった可能性がある）" % found["unpaired"])
     groups = found["groups"]
     candidates = [g for g in groups if g["candidate"]]
     denies = [g for g in groups if g["deny"]]
@@ -451,7 +488,7 @@ def lines(found, cap=None):
         out.append("- ほか %d 件。全件は `--section approvals` で出します。" % (len(others) - len(shown)))
     if found["unknown_values"]:
         out += ["", "### 知らない答えの値（承認には数えていない）", ""]
-        out += ["- %s：%d 回（実機で確かめるまで、承認に数えない。Always allow の値かもしれない）" % (raw, count)
+        out += ["- %s：%d 回（kiroku が知らない値。承認に数えない）" % (raw, count)
                 for raw, count in found["unknown_values"]]
     return out
 
@@ -459,6 +496,8 @@ def lines(found, cap=None):
 def _counts(g):
     text = "承認 %d 回（%d セッション）、拒否 %d 回、取り消し %d 回" % (g["approved"], g["sessions"], g["rejected"],
                                                           g["cancelled"])
+    if g.get("always"):
+        text += "、Always allow %d 回" % g["always"]
     if g["unknown"]:
         text += "、不明 %d 回" % g["unknown"]
     return text + "、最後の承認 %s" % _when(g["last_approved"])

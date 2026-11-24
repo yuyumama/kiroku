@@ -26,23 +26,33 @@ SEVENTH_FORMAT_VERSION = "cdf4c0b"   # 版7の骨組みを作っていた main�
 ANSWERS = {"accept": {"outcome": "selected", "selectedOption": "accept"},
            "reject": {"outcome": "selected", "selectedOption": "reject"},
            "cancel": {"outcome": "cancelled"},
-           "always": {"outcome": "selected", "selectedOption": "accept_always"}}
+           "always": {"outcome": "selected", "selectedOption": "accept_always"},   # 知らない値の例
+           # CLI 3.5.0 で実測した Always allow（verification.md の 2026-11-24〜25）
+           "always-accept": {"outcome": "selected", "selectedOption": "always-accept",
+                             "_meta": {"kiro": {"consentOutcome": {"scope": "workspace", "applied": True}}}}}
 
 
-def log(home, root, session, items, days_ago=0, hash_name="0123456789abcdef", prompt="作業して"):
-    """承認画面に答えたログを作る。items は (コマンド, 答え) の一覧。答えは ANSWERS の名前か、発話（"user:…"）。"""
+def log(home, root, session, items, days_ago=0, hash_name="0123456789abcdef", prompt="作業して", same_ids=True):
+    """承認画面に答えたログを作る。items は (コマンド, 答え) の一覧。答えは ANSWERS の名前か、発話（"user:…"）。
+
+    same_ids が偽なら、答えと呼び出しの toolCallId を変える（CLI 3.5.0 のシェルの呼び出しで実測した形）。
+    コマンドが None の答えは、呼び出しを伴わない（結べない答え）。
+    """
     directory = Path(home) / "sessions" / hash_name / session
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "session.json").write_text(json.dumps({"id": session, "workspacePaths": [root]}), encoding="utf-8")
     start = NOW - datetime.timedelta(days=days_ago, minutes=30)
     rows = [{"type": "user", "content": prompt}]
     for number, (command, answer) in enumerate(items):
-        if command.startswith("user:"):
+        if command and command.startswith("user:"):
             rows.append({"type": "user", "content": command[5:]})
             continue
         call = "c%d" % number
-        rows.append(dict({"type": "interaction_resolved", "toolCallId": call, "executionId": "e",
+        rows.append(dict({"type": "interaction_resolved", "toolCallId": call if same_ids else "tooluse_%d" % number,
+                          "modelToolUseId": "tooluse_%d" % number, "executionId": "e",
                           "consentRound": 1}, **ANSWERS[answer]))
+        if command is None:
+            continue
         rows.append({"type": "tool_call", "toolCallId": call, "toolName": "execute_bash",
                      "status": "completed" if answer in ("accept", "always") else "denied",
                      "args": {"command": command}, "executionId": "e", "turnId": "t1",
@@ -108,6 +118,54 @@ class ApprovalTest(test_review.ReviewSandbox):
         self.assertTrue(group(data, "rm -rf")["deny"])
         self.assertTrue(group(data, "git reset")["deny"])
         self.assertIn("### 取り返しがつかない操作の承認（deny の案の候補。2 件）", aggregate.render(data, section="approvals"))
+
+    def test_answers_with_another_call_id_are_paired_by_log_order(self):
+        """CLI 3.5.0 では、シェルの呼び出しと答えの toolCallId が違った（D33・D35 の不一致の原因）。"""
+        self.approve("sess_a", [("python3 run_tests.py", "accept"), ("git push origin main", "accept")], same_ids=False)
+        self.approve("sess_b", [("python3 run_tests.py", "accept"), ("git push origin main", "accept")], same_ids=False)
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["approvals"]["candidates"], ["approval:python3 run_tests.py"])
+        push = group(data, "git push")
+        self.assertEqual((push["approved"], push["candidate"], push["class"]), (2, False, "external"))
+        self.assertEqual(data["approvals"]["pairing"], {"order": 4})
+        self.assertIn("答えと呼び出しの結び方（ログ全体）：ログの順で 4 件", aggregate.render(data, section="approvals"))
+
+    def test_answers_that_cannot_be_paired_are_shown_not_dropped(self):
+        self.approve("sess_a", [("git diff", "accept"), (None, "accept")], same_ids=False)
+        data = aggregate.aggregate(self.root)
+        self.assertEqual(data["approvals"]["unpaired"], 1)
+        self.assertIn("呼び出しに結べなかった答え：1 件", aggregate.render(data, section="approvals"))
+
+    def test_always_allow_is_a_rule_already_and_not_a_candidate(self):
+        self.approve("sess_a", [("git diff HEAD", "accept")])
+        self.approve("sess_b", [("git diff HEAD", "always-accept")], same_ids=False)
+        data = aggregate.aggregate(self.root)
+        found = group(data, "git diff")
+        self.assertEqual((found["approved"], found["always"], found["unknown"], found["candidate"]), (1, 1, 0, False))
+        self.assertIn("Always allow で規則にした", found["why"])
+        self.assertIn("範囲：workspace", found["why"])
+        self.assertEqual(data["approvals"]["unknown_values"], [])
+        self.assertEqual(len(approvals.occurrences(aggregate.approvals.collect(
+            self.root, ["sess_a", "sess_b"], aggregate.load_config(self.root))[0], "approval:git diff")), 2)
+
+    def test_a_denied_shell_call_with_another_call_id_is_not_counted_as_blocked(self):
+        """止められた呼び出しの集計も、同じ結び方を使う。拒否した呼び出しを「実行前に止められた」に数えない。"""
+        directory = Path(self.home) / "sessions" / "0123456789abcdef" / "sess_deny"
+        directory.mkdir(parents=True)
+        (directory / "session.json").write_text(json.dumps({"id": "sess_deny", "workspacePaths": [self.root]}))
+        rows = [{"type": "user", "content": "作業して"},
+                {"type": "interaction_resolved", "toolCallId": "tooluse_1", "modelToolUseId": "tooluse_1",
+                 "outcome": "selected", "selectedOption": "reject", "executionId": "e"},
+                {"type": "tool_call", "toolCallId": "c1", "toolName": "execute_bash", "status": "denied",
+                 "args": {"command": "git -C . diff"}, "executionId": "e", "turnId": "t1"},
+                {"type": "tool_result", "toolCallId": "c1", "content": "The user rejected this tool call.",
+                 "success": False, "executionId": "e", "turnId": "t1"}]
+        with open(directory / "messages.jsonl", "w", encoding="utf-8") as handle:
+            for index, payload in enumerate(rows):
+                stamp = (NOW - datetime.timedelta(minutes=10) + datetime.timedelta(seconds=index)).isoformat()
+                handle.write(json.dumps({"id": str(index), "timestamp": stamp, "payload": payload}) + "\n")
+        found, unknown = aggregate.prompts.unrecorded_calls(self.root, ["sess_deny"])
+        self.assertEqual((found, unknown), ([], []))
 
     def test_unknown_answers_are_counted_apart_and_not_as_approvals(self):
         self.approve("sess_a", [("git log", "always"), ("git log", "cancel")])

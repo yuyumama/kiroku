@@ -613,7 +613,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     # 承認画面に人が答えた呼び出し（全期間）。許可の候補と、採用した案の追跡に使う。
     approval_sessions = sorted({e["session_id"] for e in all_events if e.get("session_id")}
                                | set(prompts.discover(root, prompts.sessions_dir(root))))
-    approval_answers, approval_logs, approval_hashes = approvals.collect(root, approval_sessions, load_config(root))
+    approval_answers, approval_logs, approval_hashes, approval_pairing = approvals.collect(
+        root, approval_sessions, load_config(root))
 
     def occurrences(target, report=None):
         """台帳の「対象の型」から、発生時刻の一覧を返す。数えられない型は None。
@@ -825,6 +826,7 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
         "diagnostics": diagnostics,
         "recording_start": (lambda m: m.isoformat() if m else None)(recording_start(data_dir)),
         "approvals": approvals.summarize(approval_answers, approval_logs, approval_hashes, since, until,
+                                         approval_pairing,
                                          positive_setting(load_config(root), "approval_min_sessions")),
         "topics": notes.topics(findings, since, until),
         # 版5までの判定（手作業の確認を数えない）。以前の版のレポートの検査だけに使う（as_version）。

@@ -21,9 +21,9 @@ from pathlib import Path
 #   5：冒頭の要約の次に、利用者に確かめたこと（案を作る前の質問と答え）の節を足す
 VERSION = 5
 ONE_STEP_HEADING = "## 一歩先の改善案"
-ONE_STEP_DEFAULT = 3   # 一歩先の改善案の上限の既定値（設定の one_step_max）。最初の値で、根拠は薄い
+ONE_STEP_DEFAULT = None   # 一歩先の改善案の上限の既定値（設定の one_step_max）。None は上限なし
 QUESTION_HEADING = "## 利用者に確かめたこと"
-QUESTION_DEFAULT = 3   # 利用者に聞く質問の上限の既定値（設定の question_max）。最初の値で、根拠は薄い
+QUESTION_DEFAULT = None   # 利用者に聞く質問の上限の既定値（設定の question_max）。None は上限なし
 FACTS_INTRO = "照合用の検証値です（スクリプトが書いたもの。読む必要はありません）。"
 MARK = "<!-- kiroku-report:%d -->" % VERSION
 MARK_RE = re.compile(r"<!-- kiroku-report:(\d+) -->")
@@ -32,6 +32,11 @@ OWN_FILES = (".kiro/skills/kiroku-retro/", ".kiro/hooks/kiroku.json", ".kiro/age
              ".kiro/kiroku/")
 SCOPES = {"project": "プロジェクト内", "user": "ユーザー共通"}
 UNREAD_STATE = "未確認"   # 「確認の状態」に、読んでいないことを書くときの言葉
+
+
+def _how_many(limit):
+    """欄の説明に書く件数。上限が無ければ、あるだけ全部。"""
+    return "件数の上限なし（あれば全部）" if limit is None else "最大 %d 件" % limit
 
 
 def slot(hint=""):
@@ -271,8 +276,9 @@ def build(root, data, reasons=None, session=None, version=VERSION, debug=None):
         "",
         ONE_STEP_HEADING,
         "",
-        slot("観測した型・診断値より一段上の案を、最大 %d 件。`### P1. …` の見出しで書き、番号は下の改善案と通しにする。"
-             "観点・段・手がかり・確かめ方を書く。無ければ「なし」" % limit),
+        slot("書かない設定（one_step_max が 0）なので「なし」" if limit == 0 else
+             "観測した型・診断値より一段上の案を、%s。`### P1. …` の見出しで書き、番号は下の改善案と通しにする。"
+             "観点・段・手がかり・確かめ方を書く。無ければ「なし」" % _how_many(limit)),
     ]
     diagnostics = [
         "",
@@ -288,9 +294,9 @@ def build(root, data, reasons=None, session=None, version=VERSION, debug=None):
         "",
         QUESTION_HEADING,
         "",
-        slot("案を作る前に利用者に聞いた質問を、最大 %d 件。`### Q1. …` の見出しで、手がかり、見立て、回答、"
-             "引用（回答）、反映を書く。聞かなかったときは「なし」" % asked if asked else
-             "質問しない設定（question_max が 0）なので「なし」"),
+        slot("質問しない設定（question_max が 0）なので「なし」" if asked == 0 else
+             "案を作る前に利用者に聞いた質問を、%s。`### Q1. …` の見出しで、手がかり、見立て、回答、"
+             "引用（回答）、反映を書く。聞かなかったときは「なし」" % _how_many(asked)),
     ]
     if debug is not None:
         import debug as debugging   # debug は reads を経て skeleton を読むので、ここで読む

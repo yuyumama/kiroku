@@ -126,7 +126,7 @@ def validate(root, text, known, limit):
     """(不一致, 知らせ) を返す。照合できないときは、不一致にせず、知らせに理由を書く。
 
     known は、手がかりに書ける名前（集約に出た型、診断値、コマンド、パスなど）。
-    limit は、質問の上限（設定の question_max）。
+    limit は、質問の上限（設定の question_max）。None は上限なし。
     """
     body = section(text)
     if body is None:
@@ -139,7 +139,7 @@ def validate(root, text, known, limit):
         return ["利用者に確かめたことは、質問ごとに `### Q<番号>. ` の見出しで書いてください。"
                 "聞かなかったときは「なし」と書きます。"], []
     errors = []
-    if len(questions) > limit:
+    if limit is not None and len(questions) > limit:
         errors.append("利用者への質問が %d 件あります。上限は %d 件です（設定の question_max）。"
                       "答えで変わる案が大きく、見立てが不確かなものに絞ってください。" % (len(questions), limit))
     for number, count in sorted(collections.Counter(q["number"] for q in questions).items()):

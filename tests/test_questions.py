@@ -68,9 +68,29 @@ class QuestionTest(test_skeleton.SkeletonBase):
 
     def test_the_section_comes_after_the_header_with_the_limit(self):
         path, text = self.new_report()
-        self.assertIn(skeleton.QUESTION_HEADING + "\n\n【ここに書く：案を作る前に利用者に聞いた質問を、最大 3 件。", text)
+        self.assertIn(skeleton.QUESTION_HEADING + "\n\n【ここに書く：案を作る前に利用者に聞いた質問を、"
+                      "件数の上限なし（あれば全部）。", text)
         self.assertLess(text.index("- 読めなかった範囲（未確認）："), text.index(skeleton.QUESTION_HEADING))
-        self.assertIn("- 利用者に聞く質問の上限：3 問", aggregate.render(aggregate.aggregate(self.root)))
+        self.assertIn("- 利用者に聞く質問の上限：なし。答えで変わる案が大きい順に並べる",
+                      aggregate.render(aggregate.aggregate(self.root)))
+        self.setting("question_max", 2)
+        self.assertIn("最大 2 件", self.new_report()[1])
+        self.assertIn("- 利用者に聞く質問の上限：2 問", aggregate.render(aggregate.aggregate(self.root)))
+
+    def test_without_a_limit_every_question_asked_is_checked(self):
+        """件数の上限の既定は無い（2026-11-24 の決定）。何問でも、引用の照合は1問ずつ行う。"""
+        asked = "\n\n".join(QUESTION.replace("### Q1. ", "### Q%d. " % n) for n in range(1, 6))
+        code, out = self.result(self.answered("はい"), asked)
+        self.assertEqual(code, 0, out)
+        wrong = asked.replace("### Q5. 作業の終わりに、テストを自動で実行する仕組みを使うか\n\n- 手がかり：`tool:make test`\n"
+                              "- 見立て：a（使ってみたい）。同じテストの失敗が続いている\n- 回答：a（見立てのとおり）\n"
+                              "- 引用（回答）：「はい」",
+                              "### Q5. 作業の終わりに、テストを自動で実行する仕組みを使うか\n\n- 手がかり：`tool:make test`\n"
+                              "- 見立て：a（使ってみたい）。同じテストの失敗が続いている\n- 回答：b\n"
+                              "- 引用（回答）：「Q5=b」")
+        code, out = self.result(self.answered("はい"), wrong)
+        self.assertEqual(code, 1, out)
+        self.assertIn("Q5：引用（回答）「Q5=b」が、この振り返りでの利用者の発話にありません", out)
 
     def test_an_answer_the_user_wrote_passes(self):
         code, out = self.result(self.answered("はい"), QUESTION)

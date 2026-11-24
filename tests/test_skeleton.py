@@ -423,7 +423,7 @@ class OneStepTest(SkeletonBase):
                                           "## ハーネスの診断", "## 記録の不足、確認事項")]
         self.assertEqual(order, sorted(order))
         self.assertIn("- `D2:.kiro/steering/build.md:make build`：Makefile が無い。", text)
-        self.assertIn("最大 3 件", text)
+        self.assertIn("観測した型・診断値より一段上の案を、件数の上限なし（あれば全部）。", text)
         self.assertIn('"diagnostics": [', text)
 
     def test_a_well_formed_one_step_proposal_passes_and_is_a_proposal_in_the_ledger(self):
@@ -460,6 +460,19 @@ class OneStepTest(SkeletonBase):
             self.assertEqual(done.returncode, 1, label + done.stdout)
             if label in messages:
                 self.assertIn(messages[label], done.stdout, label)
+
+    def test_without_a_limit_every_one_step_proposal_is_written(self):
+        """件数の上限の既定は無い（2026-11-24 の決定）。あれば全部書き、形は1件ずつ確かめる。"""
+        more = "\n\n".join(ONE_STEP.replace("### P1. テストの実行を終了時の hook にする", "### P%d. 案 %d" % (n, n))
+                           for n in (1, 3, 4, 5))
+        path, body = self.written(more)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertNotIn("上限は", done.stdout)
+        path, body = self.written(more.replace("### P5. 案 5\n\n- 観点：V3、V5", "### P5. 案 5\n\n- 観点：V9"))
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("P5：観点を V1〜V8", done.stdout)
 
     def test_the_number_of_one_step_proposals_is_capped_by_the_setting(self):
         config = json.loads((self.data.parent / "config.json").read_text(encoding="utf-8"))
@@ -718,3 +731,39 @@ class ReadRecordTest(SkeletonTest):
         done = self.check(path, body)
         self.assertEqual(done.returncode, 1)
         self.assertIn("書き換えられています", done.stdout)
+
+
+class SinceLastTest(SkeletonBase):
+    """期間の既定「前回の振り返りの後から」（--since last）。経過した日数で、読む範囲を変えない。"""
+
+    def finished(self, name, since, until, unread):
+        facts = {"since": since, "until": until, "unread": unread}
+        path = self.data / "reports" / (name + ".md")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# 振り返り\n\n```kiroku-facts\n%s\n```\n" % json.dumps(facts), encoding="utf-8")
+        return path
+
+    def test_reads_from_the_end_of_the_last_finished_report(self):
+        self.assertIsNone(aggregate.since_last(self.root))   # レポートが無ければ、すべて
+        self.finished("2026-11-01-0900", "2026-10-25T00:00:00+00:00", "2026-11-01T00:00:00+00:00", 0)
+        self.finished("2026-11-10-0900", "2026-11-01T00:00:00+00:00", "2026-11-10T00:00:00+00:00", 0)
+        self.assertEqual(aggregate.since_last(self.root).isoformat(), "2026-11-10T00:00:00+00:00")
+        # 書きかけの骨組みは、前回の振り返りに数えない。
+        self.new_report()
+        self.assertEqual(aggregate.since_last(self.root).isoformat(), "2026-11-10T00:00:00+00:00")
+
+    def test_unread_left_last_time_are_read_again(self):
+        self.finished("2026-11-10-0900", "2026-11-01T00:00:00+00:00", "2026-11-10T00:00:00+00:00", 2)
+        self.assertEqual(aggregate.since_last(self.root).isoformat(), "2026-11-01T00:00:00+00:00")
+        self.finished("2026-11-12-0900", None, "2026-11-12T00:00:00+00:00", 1)
+        self.assertIsNone(aggregate.since_last(self.root))   # 前回が「すべて」から読み、読み残しがある
+
+    def test_the_command_line_uses_it(self):
+        self.finished("2026-11-10-0900", "2026-11-01T00:00:00+00:00", "2026-11-10T00:00:00+00:00", 0)
+        done = self.cli("--since", "last")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("- 期間：2026-11-10T00:00:00+00:00 〜 ", done.stdout)
+        done = self.cli("--since", "last", "--new-report")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        made = sorted((self.data / "reports").glob("*.md"), key=lambda p: p.stem)[-1].read_text(encoding="utf-8")
+        self.assertIn('"since": "2026-11-10T00:00:00+00:00"', made)

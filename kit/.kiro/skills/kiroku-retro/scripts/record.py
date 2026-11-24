@@ -56,10 +56,10 @@ DEFAULT_CONFIG = {
     "retro_output_chars": 20000,
     # 終わりのフックが来なかった実行前記録を捨てるまでの秒数。最初の値で、根拠は薄い。
     "test_start_max_seconds": 3600,
-    # 1回のレポートに書ける、一歩先の改善案の上限。最初の値で、根拠は薄い。
-    "one_step_max": 3,
-    # 1回の振り返りで、案を作る前に利用者に聞く質問の上限。最初の値で、根拠は薄い。
-    "question_max": 3,
+    # 1回のレポートに書ける、一歩先の改善案の上限。None は上限なし（あれば全部出す）。0 は書かない。
+    "one_step_max": None,
+    # 1回の振り返りで、案を作る前に利用者に聞く質問の上限。None は上限なし。0 は聞かない。
+    "question_max": None,
 }
 EXIT_CODE_RE = re.compile(r"Exit Code:\s*(-?\d+)\s*$")
 TIMEOUT_RE = re.compile(r"(?i)\btimed out after\b")

@@ -1324,3 +1324,57 @@ README は、案の番号の重複の検査を「版3のレポートだけに当
 - 文書に書かれた人の確認を、手順4で拾えるか。
 
 既存の導入先への影響は「`--update` だけで済む」。ノートの種類が1つ増え、骨組みの版が6になる。以前のノートとレポートは、そのまま読める。以前の版のレポートは、作ったときの版の規則で検査する。設定、記録、台帳の形式は変えていない。
+
+## 2026-11-24：ベストプラクティス集との照らし合わせ（骨組みの版7。自動テストと比較のみ。実機は未検証）
+
+[best-practices-design.md](best-practices-design.md) の段c（6節）を実装した。
+
+### 出典の読み直し（2026-11-24、公式資料と公開ページ）
+
+集の各項目の出典を読み直し、確認日を付けた。11 ページすべて読めた。
+
+- [Kiro, Steering](https://kiro.dev/docs/steering/)（2026-10-21 更新）：CLI V3 は always、fileMatch、manual、auto。AGENTS.md は条件を持たず、常に読み込まれる。1ファイルに1領域、理由を書く、秘密を書かない。
+- [Kiro, Hooks のトリガー](https://kiro.dev/docs/hooks/types/)（2026-11-18 更新）：Agent Stop の用途に「code compilation, testing, formatting」、File Save に「Run linting and formatting」、Session Start に「Inject workspace-specific instructions into the agent's context」。Post Task Execution もある。
+- [Kiro, Permissions](https://kiro.dev/docs/permissions/)（2026-11-18 更新）：capability の一覧、deny > ask > allow > evaluate、エージェント定義の `permissions`。deny の例は `rm -rf *`、`sudo *`、読み取りの `**/.env`、`**/.env.*`、`**/*.pem`。`git push --force` の例は無い（例のコマンドに入れたのは、claude-elixir-phoenix の分け方による。2026-11-20 に確認）。
+- [Kiro, Agent Skills](https://kiro.dev/docs/skills/)（2026-11-18 更新）、[Kiro, Specs](https://kiro.dev/docs/specs/)（2026-11-12 更新）：Specs のページには置き場所の記載が無く、`.kiro/specs` は Permissions のページに出る。
+- [Claude Code, Best practices](https://code.claude.com/docs/en/best-practices)（日付なし）：「Give Claude something it can run that comes back pass or fail.」「If something has to happen every time, make it a hook, a deny rule, or a managed setting.」
+- [Codex, AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[kodustech/agent-readiness](https://github.com/kodustech/agent-readiness)（`linter`、`formatter`、`pre-commit-hooks`、`test-script`、`ci-runs-tests`、`lock-file`。`ai-context` は AGENTS.md を挙げていない）、[Factory](https://factory.com/news/agent-readiness)（2026-01-20。pre-commit が無いと「ten minutes for CI feedback instead of five seconds」）、[Böckeler](https://martinfowler.com/articles/harness-engineering.html)（2026-04-02。guides と sensors、keep quality left）、[Anthropic](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)（2025-11-26。進み具合のファイルと git の履歴、テストの道具）。
+- BP-P2 の出典（Claude Code の Commands、Codex の Rules）は 2026-11-20 に読んだもので、今回は読み直していない。BP-P1・BP-P2 の確認日は 2026-11-20 にした。
+
+### 変更
+
+- `references/best-practices.md`（集の版1、15項目）と `scripts/practices.py`（項目ごとの判定）を足した。状態は「満たしている」「満たしていない」「当てはまらない」「未確認」。当てはまって満たしていない項目が候補（`practice:<ID>`）。兆しのある候補を先に並べる。
+- 集約に「ベストプラクティス集との照らし合わせ」の節（`--section practices`）を足した。見出しに集の版と、いちばん古い確認日（何か月前か。表示だけ）を出す。
+- 見送った項目（台帳で、対象の型が `practice:<ID>` の案を見送ったもの）は、集のその項目の確認日が見送った日より新しくなるまで、候補にしない。採用した項目は、追跡に今の状態を出す。
+- 骨組みを版7にした。ハーネスの診断の後に照らし合わせの節を置き、骨組みを作った時点の行と候補を state の `report_practices` に控える。検査は控えから行を作り直す。候補と未確認の項目は、対象の型と一歩先の案の手がかりに書ける。質問の手がかりには、控えにあるすべての項目を書ける。集の文面の引用は不一致にする。
+- 台帳の対象の型に `practice` を足した。常時読み込みの目安（8,000 文字）は `harness.py` に移し、集約と BP-G3 で同じ値を使う。
+
+### 自動テストで確かめたこと
+
+- 集の ID と判定の ID が一致し、重複が無い。各項目に、何のためか、当てはまる条件、満たした証拠、案の形、聞き方、出典（URL）、確認日がある。集を読めないときは、隠さずに出す。
+- 項目ごとの判定（空のプロジェクト、テストと決まり、package.json と Makefile、終了時・保存時の hook、リモートの有無と CI、lint と pre-commit、deny 規則（すべてを止めて除外する形を含む。kiroku 自身の定義は数えない）、秘密のファイル、常時読み込みの長さ、型の候補と skill、ロックファイル（上の階層、固定した requirements）、spec と開始時の hook）。
+- 兆しのある候補が先に並ぶ。見送った項目は候補から外れ、経過した日数では戻らず、その項目の確認日が新しくなったときだけ戻る。ほかの項目の更新では戻らない。同じファイルから同じ結果になる。
+- レポート：版7の節が控えから書かれる。候補と未確認の項目は対象の型に書け、満たしている項目と当てはまらない項目は書けない。一歩先の案の手がかりにも書ける。骨組みの後に照らし合わせが変わっても、控えで照合して通る。控えの行を書き換えると不一致。控えが無いときは、今の照らし合わせで見て、そう表示する。集の文面の引用は不一致。採用した項目の追跡に、今の状態が出て、満たすと変わる。
+- 版6（`e727611`）で作って検査を通ったレポートが、更新した後も通る。
+
+### 気づいた誤り（コミットの前に直した）
+
+最初の実装で、骨組みを作るときの控えの変数を、同じ関数の後ろにある記録フックのエラーの行数の控えが上書きしていた。state に違う値が控えられ、検査が「控えが無い」として今の照らし合わせを使っていた。足したテスト（控えの中身を確かめるもの）で見つけ、変数の名前を分けて直した。
+
+### 今の版との比較（スクリプトで再現。LLM は動かしていない）
+
+今の版（`e727611`）には、外の知見と照らし合わせる仕組みが無い。デモのコピーで、新しい版の照らし合わせを確かめた。
+
+| ケース | 新しい版 |
+|---|---|
+| デモそのもの | 候補：BP-G2（常時読み込みの決まりのテストのコマンドが `make test` で、記録設定の `run_tests\.py` に当たらない）、BP-S2（保存時の hook `check-python-syntax` は、テストにも lint にも当たらない）、BP-S3、BP-S4。未確認：BP-P1（実行前の hook `guard-shell` があると添える）、BP-P2、BP-R1、BP-R2。当てはまらない：BP-S5、BP-P3、BP-G3、BP-G4、BP-E1（外部の依存が無い） |
+| D31（リモートが無い） | BP-S5 は「当てはまらない」。リモートを足すと「満たしていない（CI の定義が無い）」になる |
+| D32（BP-S4 の案を 2026-11-24 に見送った） | BP-S4 は「見送り中」で、候補から外れる。見送りを集の確認日（2026-11-24）より前の日付にすると、「見送ったが、その後に集のこの項目が更新された」として候補に戻る |
+
+### 未検証
+
+- 実機で、エージェントが候補を質問にし（集の聞き方と言い換え）、答えから `practice:<ID>` の案を作るか。未確認の項目を、会話から判断できるか。
+- Kiro の規則の当たり方（`*`、`**`、全体に当てるか）は、資料の書き方からの近似。実機で確かめていない。
+- 項目の当てはまる条件の近似（テストのファイルの形、コードの拡張子、秘密のファイルを3階層まで探す、など）が、ほかのプロジェクトで妥当か。最初の値で、根拠は薄い。
+
+既存の導入先への影響は「`--update` だけで済む」。集と判定のファイルが増え（`--update` で配られる）、骨組みの版が7になり、state に `report_practices` が増える。以前の版のスクリプトはこの項目を読まない。設定、記録、ノート、台帳の形式は変えていない（台帳の対象の型に `practice:` が増えるだけ）。

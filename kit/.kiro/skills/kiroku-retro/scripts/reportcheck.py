@@ -51,7 +51,7 @@ FIELD = re.compile(r"^\s*[-*]\s*(観点|段|手がかり|確かめ方)[：:]\s*(
 FILE_CITATION = re.compile(r"引用（ファイル）[：:]\s*`([^`]+)`")
 
 
-def one_step(text, expected, limit, paths=None):
+def one_step(text, expected, limit, paths=None, targets=()):
     """一歩先の改善案の節を確かめる。文章の意味と、案の価値は判定しない。
 
     確かめるのは、件数が上限以内か、各案に観点（V1〜V8）、段（観測の段→案の段。上がっていること）、
@@ -59,6 +59,7 @@ def one_step(text, expected, limit, paths=None):
     paths は、比べたハーネスの表のファイル（版6から。それより前の版は None）。手がかりに書けるが、
     そのときは、その案の中に、そのファイルからの引用（引用（ファイル）：…）が要る。
     文書に書かれた手作業の確認などを、根拠を示して手がかりにするため。引用の実在は citations が確かめる。
+    targets は、骨組みを作った時点のベストプラクティス集の候補と未確認の項目（practice:<ID>。版7から）。
     """
     lines = text.splitlines()
     if ONE_STEP_HEADING not in lines:
@@ -91,7 +92,7 @@ def one_step(text, expected, limit, paths=None):
         errors.append('一歩先の改善案が %d 件あります。上限は %d 件です。価値の大きいものに絞り、残りは個別の改善案か'
                       '様子見にしてください。' % (len(proposals), limit))
     files = set(paths or ())
-    known = set(expected.get('targets', {})) | set(expected.get('diagnostics', [])) | files
+    known = set(expected.get('targets', {})) | set(expected.get('diagnostics', [])) | files | set(targets)
     for row in proposals:
         fields, name = row['fields'], row['number']
         lenses = re.findall(r'V\d+', fields.get('観点', ''))
@@ -113,7 +114,7 @@ def one_step(text, expected, limit, paths=None):
                               name, '、'.join('`%s`' % c for c in unquoted)))
         unknown = [c for c in cited if (c.startswith('D') and ':' in c or re.fullmatch(r'D\d', c)
                                         or c.split(':', 1)[0] in ('topic', 'tool', 'denied', 'cancelled',
-                                                                  'timeout', 'test')) and c not in known]
+                                                                  'timeout', 'test', 'practice')) and c not in known]
         if unknown:
             errors.append('%s：集約に無い手がかり：%s' % (name, '、'.join(unknown)))
         if not fields.get('確かめ方'):
@@ -121,9 +122,11 @@ def one_step(text, expected, limit, paths=None):
     return errors
 
 
-def validate(text, expected, numbers=True):
+def validate(text, expected, numbers=True, extra=()):
     """numbers は、案の番号の重複を不一致にするか。版2までのレポートは、そのころの規則どおり見ない
-    （台帳は、どの版のレポートでも、重複した番号への判断を記録しない）。"""
+    （台帳は、どの版のレポートでも、重複した番号への判断を記録しない）。
+    extra は、検証値の外で対象の型に認めるもの（骨組みを作った時点のベストプラクティス集の候補と未確認の項目。
+    版7から）。"""
     errors = []
     try:
         if extract(text) != expected:
@@ -142,8 +145,12 @@ def validate(text, expected, numbers=True):
             current = False
         elif current:
             target = TARGET.search(line)
-            if target and target.group(1).strip() not in expected['targets']:
-                errors.append('集約にない対象の型：' + target.group(1).strip())
+            name = target.group(1).strip() if target else None
+            if name and name.startswith('practice:') and name not in expected['targets'] and name not in extra:
+                errors.append('ベストプラクティス集の候補にない対象の型：%s（対象の型に書けるのは、骨組みの'
+                              '「ベストプラクティス集との照らし合わせ」の「候補」と「未確認」の項目だけです）' % name)
+            elif name and name not in expected['targets'] and name not in extra:
+                errors.append('集約にない対象の型：' + name)
     for number, names in titles.items() if numbers else ():
         if len(names) > 1:
             # 同じ番号の案が複数あると、「P1 は採用」がどの案のことか決まらない。

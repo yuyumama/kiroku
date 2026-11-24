@@ -182,6 +182,14 @@ class QuestionTest(test_skeleton.SkeletonBase):
         self.assertEqual(done.returncode, 1, done.stdout)
         self.assertIn("手がかりの無い一般的な質問はしません", done.stdout)
 
+    def test_a_best_practice_item_can_be_the_clue(self):
+        """版7から、ベストプラクティス集の項目（候補・未確認を含む、骨組みの控えにあるもの）を手がかりにできる。"""
+        clued = QUESTION.replace("`tool:make test`", "`practice:BP-P1`")
+        code, out = self.result(self.answered("はい"), clued)
+        self.assertEqual(code, 0, out)
+        code, out = self.result(self.answered("はい"), QUESTION.replace("`tool:make test`", "`practice:BP-X9`"))
+        self.assertEqual(code, 1, out)
+
     def test_a_manual_check_topic_can_be_the_clue(self):
         """手作業の確認から、合格条件を聞く（references/harness-guide.md の雛形）。"""
         said = "月末の集計は、いつもどおり私が画面で合計を確かめておきます"

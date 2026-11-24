@@ -58,6 +58,7 @@ import reads  # noqa: E402
 import diagnose  # noqa: E402
 import answers  # noqa: E402
 import debug  # noqa: E402
+import practices  # noqa: E402
 from record import (count_setting, load_config, load_state, mask, not_run_kind, recording_lock,  # noqa: E402
                     recording_start, save_state, script_root)
 
@@ -82,7 +83,7 @@ GAP_REASONS = {
     "unknown_shell_response": "シェルの応答から終了コードを読めない",
     "unreadable_tool_call": "セッションログで完了していないシェル実行だが、結果の行が無いか、形式が想定と違うため判定できない",
 }
-SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "sessions", "facts")
+SECTIONS = ("plan", "review", "summary", "tests", "tools", "files", "harness", "practices", "sessions", "facts")
 OUTPUT_CAPS = (12, 6, 3)  # 一覧1つあたりの件数。出力が長すぎるときは、順に小さくする
 VCS_ACTIONS = ("merge", "pull", "rebase", "checkout", "reset", "cherry-pick", "revert",
                "commit (merge)", "am", "switch", "restore")
@@ -825,6 +826,8 @@ def aggregate(root, since=None, until=None, by="week", with_prompts=False,
     }
     result['report_facts'] = reportcheck.facts(result)
     result['burden'] = diagnose.burden(result)
+    # ベストプラクティス集との照らし合わせ。毎回すべての項目を決める（検証値には入れない。骨組みは控えから作る）。
+    result['practices'] = practices.evaluate(root, result, load_config(root))
     result['one_step_max'] = count_setting(load_config(root), 'one_step_max')
     result['question_max'] = count_setting(load_config(root), 'question_max')
     # 以前のレポートで利用者に確かめたこと。同じことを聞き直さないために出す（検証値には入れない）。
@@ -884,6 +887,8 @@ def render(data, show_prompts=False, section=None, cap=None):
         lines += render_files(data, cap)
     if want("harness"):
         lines += render_harness(data, cap)
+    if want("practices"):
+        lines += render_practices(data["practices"])
     if want("sessions"):
         lines += render_sessions(data["sessions"], None if cap is None else cap * 3)
     page = data.get("prompt_page")
@@ -1077,6 +1082,25 @@ def render_harness(data, cap):
     return lines + render_steering(data["steering"])
 
 
+def render_practices(found):
+    """ベストプラクティス集との照らし合わせ。候補（兆しのあるものが先）、未確認、ほかの順に、全項目を出す。"""
+    if found["version"] is None:
+        return ["", "## ベストプラクティス集との照らし合わせ", ""] + practices.lines(found)
+    oldest = found["oldest_checked"]
+    months = None
+    if oldest:
+        then = datetime.date.fromisoformat(oldest)
+        today = datetime.date.today()
+        months = (today.year - then.year) * 12 + today.month - then.month - (today.day < then.day)
+    lines = ["", "## ベストプラクティス集との照らし合わせ（集の版 %s、いちばん古い確認日 %s%s）" % (
+        found["version"], oldest or "なし", "（%d か月前）" % max(months, 0) if months is not None else ""), "",
+        "集（`%s`）の項目ごとに、スクリプトがファイルと記録から決めた状態です。"
+        "「候補」と「未確認」の `practice:<ID>` は、一歩先の改善案の手がかりと対象の型に使えます。"
+        "「未確認」は、会話と文書から判断し、要るときだけ利用者に聞きます。項目の意味と聞き方は、集を読みます。"
+        "集の文面は引用しません。" % practices.SHOWN_PATH, ""]
+    return lines + practices.lines(found)
+
+
 NOTE_LABELS = {"none": "未読", "fresh": "ノートあり", "stale": "ノートの後に発話あり",
                "uncovered": "読んだ範囲の外に発話あり", "broken": "ノートを読めない"}
 # 発話が無く、読む対象にならないセッション。「未読」と書くと、未読の合計と食い違って見える。
@@ -1089,7 +1113,7 @@ def note_label(row):
     return NOTE_LABELS[row["note"]]
 
 
-STEERING_GUIDE_CHARS = 8000  # 常時読み込みの目安。超えたら、足す前に分割や条件付きを検討する
+STEERING_GUIDE_CHARS = harness.STEERING_GUIDE_CHARS  # 常時読み込みの目安（ベストプラクティス集の BP-G3 と同じ）
 
 
 def render_steering(weight):
@@ -1216,9 +1240,13 @@ def render_review(data, cap=None):
     if not data["adopted"]:
         lines.append("なし")
     adopted, more_adopted = capped(data["adopted"], cap, "review")
+    # ベストプラクティス集の項目は、回数ではなく、今の状態で追う（満たしたかどうか）。
+    states = {practices.PREFIX + r["id"]: r["status"] for r in (data.get("practices") or {}).get("items") or []}
     for row in adopted:
         split = row.get("split", "採用")
-        if row["before"] is None:
+        if row["before"] is None and row.get("target") in states:
+            counts = "ベストプラクティス集との照らし合わせの今の状態：%s" % states[row["target"]]
+        elif row["before"] is None:
             counts = row["verdict"]
         elif row["verdict"] == "まだ日が浅い":
             counts = "%sから %s 日。まだ日が浅い（%d 日後から判定）" % (split, row["after_days"], ledger.YOUNG_DAYS)
@@ -1376,6 +1404,16 @@ def as_version(data, version):
     return shaped
 
 
+def kept_practices(state, name):
+    """骨組みを作った時点の、ベストプラクティス集との照らし合わせの控え。無い、形が違うときは None。"""
+    compared = state.get("report_practices") if isinstance(state.get("report_practices"), dict) else {}
+    kept = compared.get(name)
+    if not isinstance(kept, dict) or not all(isinstance(kept.get(k), list) for k in ("candidates", "ids", "lines")) \
+            or not all(isinstance(line, str) for line in kept["lines"]):
+        return None
+    return kept
+
+
 def clues(data):
     """利用者への質問の手がかりに書ける名前。
 
@@ -1405,7 +1443,8 @@ def new_report(root, data, with_debug=False):
     if session and not re.fullmatch(r"[A-Za-z0-9._-]+", session):
         session = None
     found = debug.facts(root, skeleton.VERSION, session) if with_debug else None
-    text = skeleton.build(root, data, GAP_REASONS, session, debug=found)
+    compared_now = practices.snapshot(data["practices"])   # 集を更新しても、このレポートの照合が崩れないよう控える
+    text = skeleton.build(root, data, GAP_REASONS, session, debug=found, practices=compared_now)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     os.makedirs(directory, exist_ok=True)
     chosen, skipped = None, []
@@ -1464,6 +1503,10 @@ def new_report(root, data, with_debug=False):
         else:
             debugged.pop(chosen, None)
         state["report_debug"] = debugged
+        # ベストプラクティス集との照らし合わせ。検査は、この控えで節を作り直し、候補を対象の型に認める。
+        compared = state.get("report_practices") if isinstance(state.get("report_practices"), dict) else {}
+        compared[chosen] = compared_now
+        state["report_practices"] = compared
         if session:
             made[chosen] = session
             state["report_sessions"] = made
@@ -1543,7 +1586,15 @@ def main(argv=None):
                 data = dict(data, coverage=dict(data["coverage"], record_errors=kept))
             # 版ごとの規則は、版の番号で固定する（版を上げても、以前の版のレポートの扱いを変えないため）。
             # 案の番号の重複の検査は版4から、今の探し方での「確認済み」の照合も版4から当てはめる。
-            errors = reportcheck.validate(body, data['report_facts'], numbers=form >= 4)
+            # 版7から、ベストプラクティス集との照らし合わせ。骨組みを作った時点の控えで節を作り直し、
+            # 控えの候補と未確認の項目（practice:<ID>）を、対象の型と手がかりに認める。
+            # 控えが無ければ、今の照らし合わせで見る。
+            compared = kept_practices(state, name) if form >= 7 else None
+            judged = compared or (practices.snapshot(data["practices"]) if form >= 7 else None)
+            practice_targets = set(judged.get("targets") or judged["candidates"]) if judged else set()
+            errors = reportcheck.validate(body, data['report_facts'], numbers=form >= 4, extra=practice_targets)
+            if form >= 7 and compared is None:
+                notices.append("ベストプラクティス集との照らし合わせの節は、控えが無いので、スクリプトが書いた行を照合していません。")
             if form:
                 # 骨組みを作ったセッションは、エージェントが書き込めない state に控えてある。
                 # レポートの中の記載ではなく、控えのほうで作り直して比べる。
@@ -1554,10 +1605,11 @@ def main(argv=None):
                 # 版1は表記が違うので、行は照合しない（欄の残りだけを見る）。
                 try:
                     expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION),
-                                              debug=found) if form >= 2 else ""
+                                              debug=found, practices=compared) if form >= 2 else ""
                 except (KeyError, TypeError, ValueError):   # 控えの形が読めない
                     found = None
-                    expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION))
+                    expected = skeleton.build(root, data, GAP_REASONS, made_by, version=min(form, skeleton.VERSION),
+                                              practices=compared)
                 errors += skeleton.validate(body, expected)
                 if debug.HEADING in body.splitlines():
                     if found is None:
@@ -1569,14 +1621,16 @@ def main(argv=None):
             # 版6から、比べたハーネスの表のファイルも、一歩先の案と質問の手がかりに書ける。
             paths = skeleton.table_paths(root, data) if form >= 6 else None
             if form >= 4:
-                errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'], paths)
+                errors += reportcheck.one_step(body, data['report_facts'], data['one_step_max'], paths,
+                                               targets=practice_targets)
             if skeleton.version(body) >= 2:
                 errors += citations.validate(root, body)
                 unread, unchecked = reads.validate(root, body, legacy=form < 4)
                 errors += unread
                 notices = list(notices) + unchecked
             if form >= 5:
-                asked, unverified = answers.validate(root, body, clues(data) | set(paths or ()), data['question_max'])
+                known = clues(data) | set(paths or ()) | set(judged["ids"] if judged else ())
+                asked, unverified = answers.validate(root, body, known, data['question_max'])
                 errors += asked
                 notices = list(notices) + unverified
         except (OSError, ValueError, TypeError, KeyError) as exc:

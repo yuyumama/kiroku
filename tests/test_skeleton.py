@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from test_kiroku import KIT, aggregate
+import test_review   # テストのクラスは名前で取り込まない（取り込むと、そのテストがここでも走る）
 from test_review import ReviewSandbox
 import test_unrecorded
 
@@ -32,6 +33,7 @@ PROPOSAL = ("### P1. テストの実行方法を直す\n\n- 対象の型：`tool
 OLD_VERSION = "0499158"   # 版2の骨組みを作っていた main（PR #13 の前）
 THIRD_FORMAT_VERSION = "89731e1"   # 版3の骨組みを作っていた main（PR #13 のマージ）
 FOURTH_FORMAT_VERSION = "647e60c"   # 版4の骨組みを作っていた main（PR #20 のマージ。質問を足す前）
+FIFTH_FORMAT_VERSION = "3edb683"   # 版5の骨組みを作っていた main（PR #25 のマージ。手作業の確認を足す前）
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -415,16 +417,70 @@ class OneStepTest(SkeletonBase):
         filled = skeleton.SLOT.sub("なし", self.propose(filled, PROPOSAL.replace("### P1.", "### P2.")))
         return path, filled.replace(skeleton.slot("確認済み／未確認"), "確認済み")
 
-    def test_fifth_format_puts_questions_and_one_step_first_and_diagnostics_after_the_table(self):
+    def test_the_current_format_puts_questions_and_one_step_first_and_diagnostics_after_the_table(self):
         path, text = self.new_report()
-        self.assertTrue(text.startswith("<!-- kiroku-report:5 -->"))
+        self.assertTrue(text.startswith(skeleton.MARK))
         order = [text.index(h) for h in ("- 読めなかった範囲（未確認）：", "## 利用者に確かめたこと", "## 一歩先の改善案",
                                           "## 観測した型・継続方針", "## 様子見", "## 比べたハーネス",
                                           "## ハーネスの診断", "## 記録の不足、確認事項")]
         self.assertEqual(order, sorted(order))
         self.assertIn("- `D2:.kiro/steering/build.md:make build`：Makefile が無い。", text)
         self.assertIn("観測した型・診断値より一段上の案を、件数の上限なし（あれば全部）。", text)
+        self.assertIn("手がかり（集約の型、診断値、比べたハーネスの表のファイル。ファイルなら、その引用も）", text)
         self.assertIn('"diagnostics": [', text)
+        fifth = skeleton.build(self.root, aggregate.as_version(aggregate.aggregate(self.root), 5), version=5)
+        self.assertTrue(fifth.startswith("<!-- kiroku-report:5 -->"))
+        self.assertNotIn("比べたハーネスの表のファイル", fifth)
+
+    def test_a_file_in_the_harness_table_can_be_the_clue_with_a_quote_from_it(self):
+        """版6から、比べたハーネスの表のファイルを手がかりにできる。根拠の一節の引用が要る。
+
+        文書に書かれた手作業の確認（「リリース前に目で確かめる」など）から、案を作るため。
+        """
+        clued = ONE_STEP.replace("`D2:.kiro/steering/build.md:make build`、`tool:make test`",
+                                 "`.kiro/steering/testing.md`") + \
+            "\n- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」"
+        path, body = self.written(clued)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        unquoted = clued.replace("\n- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」", "")
+        path, body = self.written(unquoted)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("P1：手がかりのファイル `.kiro/steering/testing.md` からの引用", done.stdout)
+        wrong = clued.replace("「テストは make test で実行する。」", "「テストは pytest で実行する。」")
+        path, body = self.written(wrong)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("ファイル `.kiro/steering/testing.md` に、この引用が無い", done.stdout)
+        # 表に無いファイル（README など）は、手がかりにならない。
+        self.write("README.md", "テストは make test で実行する。\n")
+        outside = clued.replace("`.kiro/steering/testing.md`", "`README.md`")
+        path, body = self.written(outside)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("集約にある型か診断値（`D1:…` など）、比べたハーネスの表のファイルを1つ以上", done.stdout)
+        # kiroku 自身のファイルは、表に出ないので手がかりにならない。
+        own = clued.replace("`.kiro/steering/testing.md`「テストは make test で実行する。」",
+                            "`.kiro/skills/kiroku-retro/SKILL.md`「kiroku 自身」").replace(
+            "- 手がかり：`.kiro/steering/testing.md`", "- 手がかり：`.kiro/skills/kiroku-retro/SKILL.md`")
+        path, body = self.written(own)
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+
+    def test_fifth_format_reports_keep_their_clue_rule(self):
+        """版5までのレポートでは、ファイルは手がかりにならない（作ったときの版の規則で検査する）。"""
+        clued = ONE_STEP.replace("`D2:.kiro/steering/build.md:make build`、`tool:make test`",
+                                 "`.kiro/steering/testing.md`") + \
+            "\n- 引用（ファイル）：`.kiro/steering/testing.md`「テストは make test で実行する。」"
+        path, body = self.written(clued)
+        body = body.replace(skeleton.MARK, "<!-- kiroku-report:5 -->")
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("集約にある型か診断値（`D1:…` など）を1つ以上", done.stdout)
+        path, body = self.written(ONE_STEP)
+        done = self.check(path, body.replace(skeleton.MARK, "<!-- kiroku-report:5 -->"))
+        self.assertEqual(done.returncode, 0, done.stdout)
 
     def test_a_well_formed_one_step_proposal_passes_and_is_a_proposal_in_the_ledger(self):
         path, body = self.written(ONE_STEP)
@@ -506,6 +562,41 @@ class OneStepTest(SkeletonBase):
         after = self.cli("--check-report", str(path))
         self.assertEqual(after.returncode, 0, after.stdout)
         self.assertFalse(skeleton.is_draft(filled))   # 質問の節が無くても、書き終えたまま
+
+    def test_fifth_format_report_from_the_previous_version_still_passes(self):
+        """版5（手作業の確認を足す前の main）で作り、検査を通ったレポートが、更新しただけで不一致にならない。
+
+        更新の後の振り返りが、同じ期間のノートに手作業の確認を書き足しても、以前のレポートの
+        対象の型と検証値は変わらない（版5までは、手作業の確認を数えない）。
+        """
+        work = Path(tempfile.mkdtemp(prefix="kiroku-old-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        scripts = old_scripts(work, FIFTH_FORMAT_VERSION)
+        if scripts is None:
+            self.skipTest("以前の版（%s）が git の履歴にありません" % FIFTH_FORMAT_VERSION)
+        said = "月末の集計は、いつもどおり私が画面で合計を確かめておきます"
+        self.log("sess_talk", [said])
+        self.note("sess_talk", [])   # 読み終えたが、拾うものは無かった（以前の版の振り返り）
+        old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        path = sorted((self.data / "reports").glob("*.md"))[-1]
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<!-- kiroku-report:5 -->"))
+        filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+        path.write_text(filled, encoding="utf-8")
+        before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
+        self.assertEqual(before.returncode, 0, before.stdout)
+        after = self.cli("--check-report", str(path))
+        self.assertEqual(after.returncode, 0, after.stdout)
+        self.assertFalse(skeleton.is_draft(filled))
+        # 更新の後の振り返りが、ノートに手作業の確認を書き足した。
+        self.note("sess_talk", [test_review.finding(said, "月末の集計の確認", "manual_check")])
+        again = self.cli("--check-report", str(path))
+        self.assertEqual(again.returncode, 0, again.stdout)
+        # 新しい版の骨組みでは、1回でも対象の型になる。
+        newer, made = self.new_report()
+        self.assertTrue(made.startswith(skeleton.MARK))
+        self.assertIn('"topic:月末の集計の確認": {"count": 1, "sessions": 1}', made)
 
     def test_third_format_report_from_the_previous_version_still_passes(self):
         """版3（PR #13 の main）で作り、検査を通ったレポートが、更新しただけで不一致にならない。"""

@@ -23,7 +23,10 @@ KINDS = {
     "correction": "やり方の指摘",
     "standing_policy": "継続的な方針",
     "unsure": "確認事項",
+    # 利用者が自分で確かめた・これから確かめる・目で見た、と述べた発話。合格条件を聞き出す手がかり。
+    "manual_check": "手作業の確認",
 }
+MANUAL_CHECK = "manual_check"
 MIN_QUOTE_CHARS = 4
 MAX_TOPIC_CHARS = 40
 PATTERN_SESSIONS = 2  # 会話からの型とみなす、別々のセッションの数
@@ -159,7 +162,10 @@ def verify(root):
 
 
 def topics(findings, since=None, until=None):
-    """照合できた引用を、トピックごとにまとめる。"""
+    """照合できた引用を、トピックごとにまとめる。
+
+    手作業の確認（manual_check）は、トピックごとに別にも数える（checks）。合格条件を聞く手がかりにするため。
+    """
     grouped = {}
     for row in findings:
         if row["status"] != "verified":
@@ -167,7 +173,7 @@ def topics(findings, since=None, until=None):
         entry = grouped.setdefault(row["topic"], {
             "topic": row["topic"], "kinds": set(), "period_kinds": set(), "summary": row["summary"],
             "all_sessions": set(), "sessions": set(), "firm_sessions": set(), "count": 0,
-            "examples": []})
+            "examples": [], "checks": {"sessions": set(), "count": 0, "examples": []}})
         entry["kinds"].add(row["kind"])
         entry["all_sessions"].add(row["session_id"])
         moment = row["_time"]
@@ -177,9 +183,16 @@ def topics(findings, since=None, until=None):
             if row["kind"] != "unsure":
                 entry["firm_sessions"].add(row["session_id"])
             entry["count"] += 1
+            example = {"session_id": row["session_id"], "index": row["index"],
+                       "quote": row["quote"], "context": row["context"]}
             if len(entry["examples"]) < 3:
-                entry["examples"].append({"session_id": row["session_id"], "index": row["index"],
-                                          "quote": row["quote"], "context": row["context"]})
+                entry["examples"].append(example)
+            if row["kind"] == MANUAL_CHECK:
+                checks = entry["checks"]
+                checks["sessions"].add(row["session_id"])
+                checks["count"] += 1
+                if len(checks["examples"]) < 3:
+                    checks["examples"].append(example)
     rows = []
     for entry in grouped.values():
         sessions = len(entry["sessions"])
@@ -189,8 +202,11 @@ def topics(findings, since=None, until=None):
         del entry["firm_sessions"]
         # 継続方針の例外（1回でも候補）は、期間内に照合できた継続方針があるときだけ。
         # 期間の後に書かれた方針が、期間内の単発の指摘を型に変えないようにする。
+        # 期間内の手作業の確認も、1回でも候補にする（骨組みの版6から）。採用した後に、
+        # その確認の発話が減ったかを、案の追跡で数えられるようにするため。
         entry["candidate"] = firm >= PATTERN_SESSIONS or \
-            (firm >= 1 and "standing_policy" in entry["period_kinds"])
+            (firm >= 1 and "standing_policy" in entry["period_kinds"]) or \
+            MANUAL_CHECK in entry["period_kinds"]
         # 版2までの判定（継続方針が期間の外にあっても例外にした）。以前の版のレポートの検査だけに使う。
         entry["candidate_v2"] = firm >= PATTERN_SESSIONS or \
             (firm >= 1 and "standing_policy" in entry["kinds"])
@@ -198,6 +214,7 @@ def topics(findings, since=None, until=None):
         entry["period_kinds"] = sorted(entry["period_kinds"])   # 期間内
         entry["all_sessions"] = len(entry["all_sessions"])
         entry["sessions"] = sessions
+        entry["checks"]["sessions"] = len(entry["checks"]["sessions"])
         rows.append(entry)
     return sorted(rows, key=order)
 

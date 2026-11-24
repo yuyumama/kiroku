@@ -102,6 +102,42 @@ class NotesTest(ReviewSandbox):
                                      "standing_policy")])
         self.assertTrue(aggregate.aggregate(self.root)["topics"][0]["candidate"])
 
+    def test_a_manual_check_is_a_candidate_from_one_session(self):
+        """手作業の確認は、1回でも型の候補（対象の型）にする（骨組みの版6）。合格条件を聞く手がかり。"""
+        self.log("sess_a", ["月末の集計は、いつもどおり私が画面で合計を確かめておきます"])
+        self.note("sess_a", [finding("月末の集計は、いつもどおり私が画面で合計を確かめておきます",
+                                     "月末の集計の確認", "manual_check")])
+        data = aggregate.aggregate(self.root)
+        topic = data["topics"][0]
+        self.assertEqual((topic["candidate"], topic["sessions"], topic["checks"]["sessions"], topic["checks"]["count"]),
+                         (True, 1, 1, 1))
+        self.assertEqual(data["note_problems"], [])
+        self.assertIn("topic:月末の集計の確認", data["report_facts"]["targets"])
+        text = aggregate.render(data)
+        self.assertIn("## 手作業の確認（1 件）", text)
+        self.assertIn("- `topic:月末の集計の確認`：手作業の確認 1 セッション、1 回。", text)
+        self.assertIn("  - session `sess_a` index=0 「月末の集計は、いつもどおり私が画面で合計を確かめておきます」", text)
+        self.assertIn("（手作業の確認）", text)   # 候補の種類にも出る
+        # 版5までの判定（以前のレポートの検査に使う）は、手作業の確認を数えない。
+        self.assertEqual(data["topics_v5"], [])
+        self.assertNotIn("topic:月末の集計の確認", aggregate.as_version(data, 5)["report_facts"]["targets"])
+
+    def test_a_manual_check_outside_the_period_does_not_make_a_candidate(self):
+        self.log("sess_old", ["リリースの前に、画面を目で確かめてからにします"], days_ago=10)
+        self.note("sess_old", [finding("リリースの前に、画面を目で確かめてからにします", "リリース前の目視", "manual_check")])
+        since = NOW - datetime.timedelta(days=7)
+        data = aggregate.aggregate(self.root, since)
+        self.assertEqual([t["candidate"] for t in data["topics"]], [False])
+        self.assertIn("## 手作業の確認（0 件）", aggregate.render(data))
+        self.assertTrue(aggregate.aggregate(self.root)["topics"][0]["candidate"])
+
+    def test_no_manual_check_says_none(self):
+        self.log("sess_a", ["テストは make test で回して"])
+        self.note("sess_a", [finding("テストは make test で回して")])
+        text = aggregate.render(aggregate.aggregate(self.root))
+        self.assertIn("## 手作業の確認（0 件）\n\n振り返りノートで", text)
+        self.assertIn("を、利用者に聞く手がかりです。\n\nなし", text)
+
     def test_policy_stated_after_the_period_does_not_promote_a_past_single_finding(self):
         """Issue #12 指摘7：期間の後の継続方針が、期間内の1回の指摘を型に変えていた。"""
         self.log("sess_old", ["テストは make test で回して"], days_ago=10)

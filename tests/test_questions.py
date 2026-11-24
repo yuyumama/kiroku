@@ -171,6 +171,38 @@ class QuestionTest(test_skeleton.SkeletonBase):
             code, out = self.result(self.answered("はい"), QUESTION.replace("`tool:make test`", clue))
             self.assertEqual(code, 0, clue + out)
 
+    def test_a_file_in_the_harness_table_can_be_the_clue(self):
+        """版6から、比べたハーネスの表のファイルも、質問の手がかりにできる（文書に書かれた手作業の確認を聞くため）。"""
+        clued = QUESTION.replace("`tool:make test`", "`.kiro/skills/add-category/SKILL.md`")
+        code, out = self.result(self.answered("はい"), clued)
+        self.assertEqual(code, 0, out)
+        # 版5までのレポートは、作ったときの規則のまま（集約の出力に無いパスは、手がかりにならない）。
+        path, filled = self.written(self.answered("はい"), clued)
+        done = self.check(path, filled.replace(skeleton.MARK, "<!-- kiroku-report:5 -->"))
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("手がかりの無い一般的な質問はしません", done.stdout)
+
+    def test_a_manual_check_topic_can_be_the_clue(self):
+        """手作業の確認から、合格条件を聞く（references/harness-guide.md の雛形）。"""
+        said = "月末の集計は、いつもどおり私が画面で合計を確かめておきます"
+        rows = [{"type": "user", "content": said}]
+        self.write(".kiro/kiroku/data/notes/sess_dev.json", json.dumps({"session_id": "sess_dev", "findings": [
+            {"kind": "manual_check", "topic": "月末の集計の確認", "summary": "月末の合計を、毎回目で確かめている",
+             "quote": said, "index": 0, "context": "未確認"}]}, ensure_ascii=False))
+        test_skeleton.test_unrecorded.UnrecordedCallTest.session_log(self, "sess_dev", rows)
+        asked = ("### Q1. 月末の集計で、何が一致すれば確認済みにできるか\n\n"
+                 "- 手がかり：`topic:月末の集計の確認`\n"
+                 "- 見立て：c（わからない）。何を見ているかが、会話からは分からない\n"
+                 "- 回答：a。通常分は合計が一致すればよい。返金だけは人が見る\n"
+                 "- 引用（回答）：「通常分は合計が一致すればよい。返金だけは人が見る」\n"
+                 "- 反映：P1 を出した")
+        path, filled = self.written(self.answered("通常分は合計が一致すればよい。返金だけは人が見る"), asked)
+        done = self.check(path, filled)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        # 1回の手作業の確認でも対象の型になり、型ごとの負担（D6）にも出る。
+        self.assertIn('"topic:月末の集計の確認": {"count": 1, "sessions": 1}', filled)
+        self.assertIn("`topic:月末の集計の確認`", filled.split("## ハーネスの診断", 1)[1])
+
     def test_reflected_proposals_must_be_in_the_report(self):
         code, out = self.result(self.answered("はい"), QUESTION.replace("P1 を出した", "P7 を出した"))
         self.assertEqual(code, 1, out)

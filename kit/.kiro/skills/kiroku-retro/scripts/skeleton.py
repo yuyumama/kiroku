@@ -19,7 +19,9 @@ from pathlib import Path
 #      欄が空のままのレポートを、骨組みが無くても見分けられるようにする
 #   4：一歩先の改善案の節と、ハーネスの診断の節を足し、人が読む順に並べ替える
 #   5：冒頭の要約の次に、利用者に確かめたこと（案を作る前の質問と答え）の節を足す
-VERSION = 5
+#   6：手作業の確認のあるトピックを、セッションの数にかかわらず対象の型にする（検証値が変わる）。
+#      一歩先の改善案と質問の手がかりに、比べたハーネスの表のファイルを書けるようにする
+VERSION = 6
 ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = None   # 一歩先の改善案の上限の既定値（設定の one_step_max）。None は上限なし
 QUESTION_HEADING = "## 利用者に確かめたこと"
@@ -37,6 +39,22 @@ UNREAD_STATE = "未確認"   # 「確認の状態」に、読んでいないこ�
 def _how_many(limit):
     """欄の説明に書く件数。上限が無ければ、あるだけ全部。"""
     return "件数の上限なし（あれば全部）" if limit is None else "最大 %d 件" % limit
+
+
+def table_paths(root, data):
+    """比べたハーネスの表に、ファイルとして出るパス（kiroku 自身のファイルを除く）。
+
+    版6から、一歩先の改善案と質問の手がかりに書ける。文書に書かれた手作業の確認から案を作るため。
+    """
+    names = []
+    for entry in data["harness"]:
+        if entry["status"] != "present":
+            continue
+        for path in entry["files"]:
+            name = _display(root, entry["scope"], path)
+            if not (entry["scope"] == "project" and name.startswith(OWN_FILES)):
+                names.append(name)
+    return names
 
 
 def slot(hint=""):
@@ -278,7 +296,9 @@ def build(root, data, reasons=None, session=None, version=VERSION, debug=None):
         "",
         slot("書かない設定（one_step_max が 0）なので「なし」" if limit == 0 else
              "観測した型・診断値より一段上の案を、%s。`### P1. …` の見出しで書き、番号は下の改善案と通しにする。"
-             "観点・段・手がかり・確かめ方を書く。無ければ「なし」" % _how_many(limit)),
+             "観点・段・手がかり%s・確かめ方を書く。無ければ「なし」" % (
+                 _how_many(limit), "（集約の型、診断値、比べたハーネスの表のファイル。ファイルなら、その引用も）"
+                 if version >= 6 else "")),
     ]
     diagnostics = [
         "",

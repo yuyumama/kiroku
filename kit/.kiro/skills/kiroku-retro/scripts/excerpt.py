@@ -189,3 +189,58 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _strings(value, depth=0):
+    """値の中の文字列をすべて集める（入れ子は3段まで）。"""
+    if isinstance(value, str):
+        return {value}
+    found = set()
+    if depth < 3 and isinstance(value, dict):
+        for item in value.values():
+            found |= _strings(item, depth + 1)
+    elif depth < 3 and isinstance(value, list):
+        for item in value:
+            found |= _strings(item, depth + 1)
+    return found
+
+
+def pair_interactions(rows):
+    """承認画面の答え（interaction_resolved）を、呼び出し（tool_call）に結ぶ。
+
+    CLI 3.3.0 では、両方の toolCallId が同じだった。CLI 3.5.0 では、シェルの呼び出しで違っていた
+    （verification.md の 2026-11-24〜25）。そこで次の順に探す。
+      toolCallId        同じ toolCallId の呼び出し
+      modelToolUseId    答えの modelToolUseId を、どこかの値に持つ呼び出し
+      order             答えの後で、まだ結んでいない最初の呼び出し（executionId があれば同じもの）
+    どれでも見つからない答えは、黙って捨てず unpaired に返す。
+    戻り値は ({呼び出しの toolCallId: [答え]}, 結べなかった答え, {id(答え): 結び方})。
+    """
+    calls = [(index, payload) for index, (_, payload) in enumerate(rows)
+             if payload.get("type") == "tool_call" and isinstance(payload.get("toolCallId"), str)]
+    known = {payload["toolCallId"] for _, payload in calls}
+    used, paired, unpaired, ways = set(), {}, [], {}
+    for index, (_, answer) in enumerate(rows):
+        if answer.get("type") != "interaction_resolved":
+            continue
+        target, how = None, None
+        if answer.get("toolCallId") in known:
+            target, how = answer["toolCallId"], "toolCallId"
+        model = answer.get("modelToolUseId")
+        if target is None and isinstance(model, str) and model:
+            target = next((p["toolCallId"] for _, p in calls if p["toolCallId"] not in used
+                           and model in _strings({k: v for k, v in p.items() if k != "args"})), None)
+            how = "modelToolUseId" if target else None
+        if target is None:
+            execution = answer.get("executionId")
+            target = next((p["toolCallId"] for i, p in calls if i > index and p["toolCallId"] not in used
+                           and (not execution or not p.get("executionId") or p.get("executionId") == execution)),
+                          None)
+            how = "order" if target else None
+        if target is None:
+            unpaired.append(answer)
+            continue
+        used.add(target)
+        paired.setdefault(target, []).append(answer)
+        ways[id(answer)] = how
+    return paired, unpaired, ways

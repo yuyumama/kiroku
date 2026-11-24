@@ -21,7 +21,10 @@ from pathlib import Path
 #   5：冒頭の要約の次に、利用者に確かめたこと（案を作る前の質問と答え）の節を足す
 #   6：手作業の確認のあるトピックを、セッションの数にかかわらず対象の型にする（検証値が変わる）。
 #      一歩先の改善案と質問の手がかりに、比べたハーネスの表のファイルを書けるようにする
-VERSION = 6
+#   7：ハーネスの診断の後に、ベストプラクティス集との照らし合わせの節を足す（骨組みを作った時点の控えから書く）。
+#      候補と未確認の practice:<ID> を、一歩先の改善案の手がかりと、対象の型に書けるようにする
+VERSION = 7
+PRACTICES_HEADING = "## ベストプラクティス集との照らし合わせ"
 ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = None   # 一歩先の改善案の上限の既定値（設定の one_step_max）。None は上限なし
 QUESTION_HEADING = "## 利用者に確かめたこと"
@@ -202,8 +205,11 @@ def _gap_lines(data, reasons):
     return lines or ["- スクリプトが検出した記録の不足はありません。"]
 
 
-def build(root, data, reasons=None, session=None, version=VERSION, debug=None):
+def build(root, data, reasons=None, session=None, version=VERSION, debug=None, practices=None):
     """集約から、レポートの骨組みを作る。同じ集約からは、いつも同じ文面になる。
+
+    practices は、ベストプラクティス集との照らし合わせの控え（practices.snapshot）。版7から、渡したときだけ
+    ハーネスの診断の後に節を足す。集を更新しても、以前のレポートの行が変わらないよう、控えから書く。
 
     debug は、/kiroku-retro --debug のときに骨組みを作った時点で控えた値（debug.facts）。
     渡したときだけ、末尾の検証値の前に「kiroku の不具合の候補（デバッグ）」の節を足す（版5から）。
@@ -318,6 +324,16 @@ def build(root, data, reasons=None, session=None, version=VERSION, debug=None):
              "案を作る前に利用者に聞いた質問を、%s。`### Q1. …` の見出しで、手がかり、見立て、回答、"
              "引用（回答）、反映を書く。聞かなかったときは「なし」" % _how_many(asked)),
     ]
+    if version >= 7 and practices is not None:
+        diagnostics += [
+            "",
+            PRACTICES_HEADING,
+            "",
+            "次は、スクリプトがファイルと記録から決めた状態です（集の版 %s。骨組みを作った時点の控え）。"
+            "「候補」と「未確認」の `practice:<ID>` は、一歩先の改善案の手がかりと、対象の型に使えます。"
+            "集の文面は引用しません。" % practices.get("version"),
+            "",
+        ] + list(practices.get("lines") or [])
     if debug is not None:
         import debug as debugging   # debug は reads を経て skeleton を読むので、ここで読む
         at = tail.index(FACTS_INTRO)

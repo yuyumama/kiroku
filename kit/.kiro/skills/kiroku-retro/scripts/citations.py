@@ -12,6 +12,7 @@ import re
 
 import excerpt
 import notes
+import practices
 import prompts
 from ledger import HEADING, TARGET
 from record import mask
@@ -125,6 +126,9 @@ def validate(root, text):
             if role == "file":
                 name = PATH.search(rest[:rest.find("「")])
                 problem = "パスを `…` で書いてください" if not name else _in_file(root, name.group(1), quote)
+                if name and resolve(root, name.group(1)) == os.path.realpath(os.path.join(root, practices.SHOWN_PATH)):
+                    # 集は kiroku が配るもので、更新のたびに文面が変わる。引用すると、以前のレポートの照合が崩れる。
+                    problem = "ベストプラクティス集の文面は引用しません。項目は `practice:<ID>` と集の版で指してください"
                 if not problem:
                     cited_files.add(resolve(root, name.group(1)))
             else:

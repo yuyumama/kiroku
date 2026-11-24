@@ -7,6 +7,7 @@ from pathlib import Path
 # git が使えないときに、AGENTS.md を探さないディレクトリ。最初の値で、根拠は薄い。
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 KIROKU_DATA = ".kiro/kiroku/"
+STEERING_GUIDE_CHARS = 8000  # 常時読み込みの目安。超えたら、足す前に分割や条件付きを検討する
 
 
 def repo_files(root):

@@ -25,7 +25,9 @@ from pathlib import Path
 #      候補と未確認の practice:<ID> を、一歩先の改善案の手がかりと、対象の型に書けるようにする
 #   8：承認の繰り返しの候補（approval:<見出し>）を、対象の型に足す（検証値が変わる）
 #   9：approval:・practice: を書いた案に、対象の型の行を求める（骨組みの文面は版8と同じ）
-VERSION = 9
+#   10：冒頭に「まとめ」の欄を足す。専門家ではない利用者が、最初の数行で要点と決めることを読めるようにする
+VERSION = 10
+SUMMARY_HEADING = "## まとめ"
 PRACTICES_HEADING = "## ベストプラクティス集との照らし合わせ"
 ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = None   # 一歩先の改善案の上限の既定値（設定の one_step_max）。None は上限なし
@@ -76,7 +78,7 @@ def version(text):
 # 欄を埋めたあとも値が空であってはならない行と節。目印だけを消した空欄を、書き終えたとみなさない。
 REQUIRED_LINES = ("- 読んだセッション：", "- 読めなかった範囲（未確認）：",
                   "- 載せなかった案と理由：", "- 補足と、利用者に確かめたいこと：")
-REQUIRED_SECTIONS = (QUESTION_HEADING, "## 一歩先の改善案", "## 観測した型・継続方針",
+REQUIRED_SECTIONS = (SUMMARY_HEADING, QUESTION_HEADING, "## 一歩先の改善案", "## 観測した型・継続方針",
                      "## ハーネスへの改善案（プロジェクト内）", "## ハーネスへの改善案（ユーザー共通）", "## 様子見")
 TABLE_HEAD = "| 範囲 | パス | 存在 | 確認の状態 | 役割と読み込みの条件 |"
 
@@ -354,7 +356,14 @@ def build(root, data, reasons=None, session=None, version=VERSION, debug=None, p
                  "再現の手がかり、確度、影響を書く。無ければ「なし」"),
             "",
         ] + tail[at:]
-    return "\n".join(header + questions + one_step + body + table + diagnostics + tail)
+    summary = [
+        "",
+        SUMMARY_HEADING,
+        "",
+        slot("専門用語を使わず、5行以内。1行目に、いちばん大事なこと。続けて、決めてほしいこと（案の番号と、"
+             "ふだんの言葉でひとこと）。変えることが無ければ「今回は、変えることはありません」"),
+    ] if version >= 10 else []
+    return "\n".join(header + summary + questions + one_step + body + table + diagnostics + tail)
 
 
 def fixed_parts(text):

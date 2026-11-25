@@ -352,6 +352,21 @@ class SkeletonTest(SkeletonBase):
         moment = aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc)
         return (moment + aggregate.datetime.timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
 
+    def test_kiroku_files_added_by_an_update_do_not_change_the_lines_the_script_wrote(self):
+        """kiroku の更新でファイルが増えても、以前のレポートを不一致にしない（2026-11-25 の実機の確認）。
+
+        骨組みの「kiroku 自身のファイル（N 個）」は、更新で数が変わる。記録の事実ではないので、数は照合しない。
+        """
+        path, text = self.new_report()
+        self.assertIn("kiroku 自身のファイル（1 個）は、表から除いています。", text)
+        filled = self.fill(text)
+        self.write(".kiro/skills/kiroku-retro/scripts/new.py", "# 更新で増えたファイル\n")
+        self.write(".kiro/skills/kiroku-retro/references/new.md", "増えた\n")
+        done = self.check(path, filled)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        done = self.check(path, filled.replace("kiroku 自身のファイル（1 個）は、表から除いています。", ""))
+        self.assertEqual(done.returncode, 1, done.stdout)   # 行を消すのは、これまでどおり不一致
+
     def test_hook_errors_after_the_skeleton_do_not_change_the_lines_the_script_wrote(self):
         """骨組みを作った後に記録フックのエラーが増えても、スクリプトが書いた行を不一致にしない。
 

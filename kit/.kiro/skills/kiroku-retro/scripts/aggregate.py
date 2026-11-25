@@ -1627,6 +1627,8 @@ def main(argv=None):
             judged = compared or (practices.snapshot(data["practices"]) if form >= 7 else None)
             practice_targets = set(judged.get("targets") or judged["candidates"]) if judged else set()
             errors = reportcheck.validate(body, data['report_facts'], numbers=form >= 4, extra=practice_targets)
+            if form >= 9:   # 版9から。以前のレポートは、作ったときの規則のまま
+                errors += reportcheck.untracked(body, set(data['report_facts']['targets']) | practice_targets)
             if form >= 7 and compared is None:
                 notices.append("ベストプラクティス集との照らし合わせの節は、控えが無いので、スクリプトが書いた行を照合していません。")
             if form:

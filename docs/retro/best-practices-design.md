@@ -280,8 +280,8 @@
 
 ## 13. 未確認のこと
 
-- （2026-11-25 に CLI 3.5.0 で確かめた）Allow は `accept`、Always allow は `always-accept`（範囲は `_meta.kiro.consentOutcome`）。既定の権限で `git status`、`git log` には承認画面が出ず、`ls -la` には出た。ワークスペースの規則のファイルの `<hash>` は、ログの置き場のフォルダ名と一致した。答えと呼び出しの `toolCallId` は、シェルの呼び出しで違った。
-- Kiro の規則の当たり方の細部。`git diff *` は `git diff --stat` に当たり、`git -C . diff` には当たらなかった（CLI 3.5.0）。引数の無い `git diff` に当たるかは、保存前の対照が無く未確定。
+- （2026-11-25 に CLI 3.5.0 で確かめた）Allow は `accept`、Always allow は `always-accept`（範囲は `_meta.kiro.consentOutcome`）。既定の権限で `git status`、`git log` には承認画面が出ず、`ls -la` には出た。ワークスペースの規則のファイルの `<hash>` は、ログの置き場のフォルダ名と一致した。答えと呼び出しの `toolCallId` は違い、答えの `modelToolUseId` が呼び出しの `toolCallId` と一致した。引数なしの `git diff` は、既定で承認画面が出なかった。
+- Kiro の規則の当たり方の細部。`git diff *` は `git diff --stat` に当たり、`git -C . diff` には当たらなかった（CLI 3.5.0）。引数の無い `git diff` に当たるかは、既定で画面が出ないため確かめられない。
 - memories の保存場所と、ログでの形。
 - OpenAI「Harness engineering」の記事の本文（403 で未読。アーカイブ経由の取得は、制限の迂回にあたるため行っていない）。
 - 外部の知識が逆効果になる場面があること（SkillsBench の初版では、手で整えた skill で平均16.2ポイント上がった一方、84タスク中16で下がった）。ベストプラクティス集の案も、比較で確かめてから広げる。

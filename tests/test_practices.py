@@ -308,7 +308,7 @@ class PracticeReportTest(test_skeleton.SkeletonBase):
         done = self.check(path, self.target(text, "practice:BP-E1"))   # 当てはまらない項目
         self.assertEqual(done.returncode, 1, done.stdout)
         one_step = test_skeleton.ONE_STEP.replace("`D2:.kiro/steering/build.md:make build`、`tool:make test`",
-                                                  "`practice:BP-S3`")
+                                                  "`practice:BP-S3`\n- 対象の型：`practice:BP-S3`")
         body = self.target(text, "tool:make test", one_step)
         done = self.check(path, body)
         self.assertEqual(done.returncode, 0, done.stdout)

@@ -22,6 +22,7 @@ from test_skeleton import LEDGER, PROPOSAL, skeleton
 approvals = aggregate.approvals
 practices = aggregate.practices
 NOW = test_review.NOW
+EIGHTH_FORMAT_VERSION = "e6b93b0"   # 版8の骨組みを作っていた main（対象の型の行を求める前）
 SEVENTH_FORMAT_VERSION = "cdf4c0b"   # 版7の骨組みを作っていた main（PR #27 のマージ。承認の記録を足す前）
 ANSWERS = {"accept": {"outcome": "selected", "selectedOption": "accept"},
            "reject": {"outcome": "selected", "selectedOption": "reject"},
@@ -293,7 +294,7 @@ class ApprovalReportTest(test_skeleton.SkeletonBase):
 
     def test_an_approval_candidate_is_a_target_and_is_followed(self):
         path, text = self.new_report()
-        self.assertTrue(text.startswith("<!-- kiroku-report:8 -->"))
+        self.assertTrue(text.startswith(skeleton.MARK))
         self.assertIn('"approval:git diff": {"count": 2, "sessions": 2}', text)
         self.assertIn("`approval:git diff`", text.split("## ハーネスの診断", 1)[1])   # 型ごとの負担（D6）
         proposal = PROPOSAL.replace("`tool:make test`", "`approval:git diff`")
@@ -309,6 +310,46 @@ class ApprovalReportTest(test_skeleton.SkeletonBase):
         tracked = aggregate.aggregate(self.root)["adopted"][0]
         self.assertEqual((tracked["target"], tracked["before"]), ("approval:git diff", 2))
         self.assertEqual(tracked["observed"]["unit"], "ログを読めたセッション（発話あり）")
+
+    def test_a_proposal_with_an_approval_clue_needs_its_target_line(self):
+        """D33（2026-11-25 の実機の確認）：手がかりに approval: を書いたのに、対象の型の行が無く、台帳が追えなかった。"""
+        path, text = self.new_report()
+        one_step = ("### P1. テストの実行を、承認なしで通す\n\n- 観点：V5\n- 段：1→2\n"
+                    "- 手がかり：`approval:git diff`\n- 確かめ方：次の振り返りで `approval:git diff` が0回になる")
+        marker = "## 一歩先の改善案\n\n"
+        start = text.index(marker) + len(marker)
+        body = text[:start] + one_step + text[text.index("\n", start):]
+        body = skeleton.SLOT.sub("なし", self.propose(body, PROPOSAL.replace("### P1.", "### P2."))
+                                 .replace(skeleton.slot("確認済み／未確認"), "確認済み"))
+        done = self.check(path, body)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("P1：`approval:git diff` を書いた案には、「- 対象の型：`approval:git diff`」の行も書いてください", done.stdout)
+        done = self.check(path, body.replace("- 段：1→2\n", "- 段：1→2\n- 対象の型：`approval:git diff`\n"))
+        self.assertEqual(done.returncode, 0, done.stdout)
+        # 版8までのレポートは、作ったときの規則のまま（対象の型の行を求めない）。
+        done = self.check(path, body.replace(skeleton.MARK, "<!-- kiroku-report:8 -->"))
+        self.assertEqual(done.returncode, 0, done.stdout)
+
+    def test_eighth_format_report_from_the_previous_version_still_passes(self):
+        """版8（対象の型の行を求める前の main）で作り、検査を通ったレポートが、更新しただけで不一致にならない。"""
+        work = Path(tempfile.mkdtemp(prefix="kiroku-old-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        scripts = test_skeleton.old_scripts(work, EIGHTH_FORMAT_VERSION)
+        if scripts is None:
+            self.skipTest("以前の版（%s）が git の履歴にありません" % EIGHTH_FORMAT_VERSION)
+        old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        path = sorted((self.data / "reports").glob("*.md"))[-1]
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<!-- kiroku-report:8 -->"))
+        filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL.replace(
+            "- 対象の型：`tool:make test`\n", "- 手がかり：`approval:git diff`\n")))
+        path.write_text(filled, encoding="utf-8")
+        before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
+        self.assertEqual(before.returncode, 0, before.stdout)
+        self.write(".kiro/skills/kiroku-retro/scripts/new.py", "# 更新で増えたファイル\n")
+        after = self.cli("--check-report", str(path))
+        self.assertEqual(after.returncode, 0, after.stdout)
 
     def test_seventh_format_report_from_the_previous_version_still_passes(self):
         """版7（承認の記録を足す前の main）で作り、検査を通ったレポートが、承認のログがあっても通る。"""

@@ -33,7 +33,8 @@ PROPOSAL = ("### P1. テストの実行方法を直す\n\n- 対象の型：`tool
 OLD_VERSION = "0499158"   # 版2の骨組みを作っていた main（PR #13 の前）
 THIRD_FORMAT_VERSION = "89731e1"   # 版3の骨組みを作っていた main（PR #13 のマージ）
 FOURTH_FORMAT_VERSION = "647e60c"   # 版4の骨組みを作っていた main（PR #20 のマージ。質問を足す前）
-FIFTH_FORMAT_VERSION = "3edb683"   # 版5の骨組みを作っていた main（PR #25 のマージ。手作業の確認を足す前）
+FIFTH_FORMAT_VERSION = "3edb683"
+NINTH_FORMAT_VERSION = "8d6984c"   # 版9の骨組みを作っていた main（まとめの欄を足す前）   # 版5の骨組みを作っていた main（PR #25 のマージ。手作業の確認を足す前）
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -449,7 +450,7 @@ class OneStepTest(SkeletonBase):
     def test_the_current_format_puts_questions_and_one_step_first_and_diagnostics_after_the_table(self):
         path, text = self.new_report()
         self.assertTrue(text.startswith(skeleton.MARK))
-        order = [text.index(h) for h in ("- 読めなかった範囲（未確認）：", "## 利用者に確かめたこと", "## 一歩先の改善案",
+        order = [text.index(h) for h in ("- 読めなかった範囲（未確認）：", "## まとめ", "## 利用者に確かめたこと", "## 一歩先の改善案",
                                           "## 観測した型・継続方針", "## 様子見", "## 比べたハーネス",
                                           "## ハーネスの診断", "## 記録の不足、確認事項")]
         self.assertEqual(order, sorted(order))
@@ -460,6 +461,22 @@ class OneStepTest(SkeletonBase):
         fifth = skeleton.build(self.root, aggregate.as_version(aggregate.aggregate(self.root), 5), version=5)
         self.assertTrue(fifth.startswith("<!-- kiroku-report:5 -->"))
         self.assertNotIn("比べたハーネスの表のファイル", fifth)
+
+    def test_the_summary_comes_first_and_must_be_written(self):
+        """版10：冒頭の「まとめ」は、専門家ではない利用者が最初に読む欄。目印を消しただけの空欄は書きかけ。"""
+        path, text = self.new_report()
+        self.assertIn("## まとめ\n\n【ここに書く：専門用語を使わず、5行以内。", text)
+        filled = self.fill(text)
+        marker = "## まとめ\n\n"
+        start = filled.index(marker) + len(marker)
+        blank = filled[:start] + filled[filled.index("\n", start):]
+        done = self.check(path, blank)
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("まとめ", done.stdout)
+        done = self.check(path, filled.replace(marker + "なし", marker + "今回は、変えることはありません。"))
+        self.assertEqual(done.returncode, 0, done.stdout)
+        ninth = skeleton.build(self.root, aggregate.aggregate(self.root), version=9)
+        self.assertNotIn("## まとめ", ninth)
 
     def test_a_file_in_the_harness_table_can_be_the_clue_with_a_quote_from_it(self):
         """版6から、比べたハーネスの表のファイルを手がかりにできる。根拠の一節の引用が要る。
@@ -626,6 +643,27 @@ class OneStepTest(SkeletonBase):
         newer, made = self.new_report()
         self.assertTrue(made.startswith(skeleton.MARK))
         self.assertIn('"topic:月末の集計の確認": {"count": 1, "sessions": 1}', made)
+
+    def test_ninth_format_report_from_the_previous_version_still_passes(self):
+        """版9（まとめの欄を足す前の main）で作り、検査を通ったレポートが、更新しただけで不一致にならない。"""
+        work = Path(tempfile.mkdtemp(prefix="kiroku-old-"))
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        scripts = old_scripts(work, NINTH_FORMAT_VERSION)
+        if scripts is None:
+            self.skipTest("以前の版（%s）が git の履歴にありません" % NINTH_FORMAT_VERSION)
+        old = self.cli("--since", "7d", "--new-report", script=str(scripts / "aggregate.py"))
+        self.assertEqual(old.returncode, 0, old.stdout + old.stderr)
+        path = sorted((self.data / "reports").glob("*.md"))[-1]
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("<!-- kiroku-report:9 -->"))
+        self.assertNotIn("## まとめ", text)
+        filled = skeleton.SLOT.sub("なし", self.propose(text, PROPOSAL))
+        path.write_text(filled, encoding="utf-8")
+        before = self.cli("--check-report", str(path), script=str(scripts / "aggregate.py"))
+        self.assertEqual(before.returncode, 0, before.stdout)
+        after = self.cli("--check-report", str(path))
+        self.assertEqual(after.returncode, 0, after.stdout)
+        self.assertFalse(skeleton.is_draft(filled))   # まとめの欄が無くても、書き終えたまま
 
     def test_third_format_report_from_the_previous_version_still_passes(self):
         """版3（PR #13 の main）で作り、検査を通ったレポートが、更新しただけで不一致にならない。"""

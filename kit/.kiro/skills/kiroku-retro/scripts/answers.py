@@ -102,11 +102,14 @@ def found(log, quote, index=None):
     """引用が、振り返りを始めた後の利用者の発話にあるか。
 
     4 文字未満の引用（「はい」「2」など）は、発話の全体と一致するときだけ認める（ノートの引用と同じ）。
+    ただし、質問の番号つきの答え（「Q1 a」「Q2=c」）は、短くても、発話の一部として認める。
+    1 通の発話でまとめて答えたとき、質問ごとに引用できるようにするため。
     /kiroku-retro の発話そのものは、答えに数えない。
     """
     rows, start = log
     needle = notes.fold(quote)
     whole = len(needle) < notes.MIN_QUOTE_CHARS
+    numbered = re.fullmatch(r"[QqＱｑ]\d+[=＝:：]?[A-Za-zａ-ｚＡ-Ｚ]", needle) is not None
     order = ([index] if isinstance(index, int) and start < index < len(rows) else []) \
         + list(range(start + 1, len(rows)))
     for position in order:
@@ -117,6 +120,9 @@ def found(log, quote, index=None):
         if not text.strip() or text.lstrip().startswith("/kiroku-retro"):
             continue
         candidates = (notes.fold(text), notes.fold(mask(text)))
+        if numbered and any(re.search(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(needle), c)
+                            for c in candidates):
+            return True
         if (needle in candidates) if whole else any(needle in c for c in candidates):
             return True
     return False

@@ -24,7 +24,8 @@ from pathlib import Path
 #   7：ハーネスの診断の後に、ベストプラクティス集との照らし合わせの節を足す（骨組みを作った時点の控えから書く）。
 #      候補と未確認の practice:<ID> を、一歩先の改善案の手がかりと、対象の型に書けるようにする
 #   8：承認の繰り返しの候補（approval:<見出し>）を、対象の型に足す（検証値が変わる）
-VERSION = 8
+#   9：approval:・practice: を書いた案に、対象の型の行を求める（骨組みの文面は版8と同じ）
+VERSION = 9
 PRACTICES_HEADING = "## ベストプラクティス集との照らし合わせ"
 ONE_STEP_HEADING = "## 一歩先の改善案"
 ONE_STEP_DEFAULT = None   # 一歩先の改善案の上限の既定値（設定の one_step_max）。None は上限なし
@@ -37,6 +38,7 @@ SLOT = re.compile(r"【ここに書く[^】]*】")
 OWN_FILES = (".kiro/skills/kiroku-retro/", ".kiro/hooks/kiroku.json", ".kiro/agents/kiroku-retro.json",
              ".kiro/kiroku/")
 SCOPES = {"project": "プロジェクト内", "user": "ユーザー共通"}
+OWN_COUNT = "kiroku 自身のファイル（"   # 表から除いた kiroku のファイルの数の行の頭
 UNREAD_STATE = "未確認"   # 「確認の状態」に、読んでいないことを書くときの言葉
 
 
@@ -245,7 +247,7 @@ def build(root, data, reasons=None, session=None, version=VERSION, debug=None, p
         "|---|---|---|---|---|",
     ] + rows
     if own:
-        table += ["", "kiroku 自身のファイル（%d 個）は、表から除いています。" % own]
+        table += ["", OWN_COUNT + "%d 個）は、表から除いています。" % own]
     body = [
         "",
         "## 観測した型・継続方針",
@@ -387,6 +389,10 @@ def validate(report, expected):
                       % "、".join(blank))
     position = 0
     for part in fixed_parts(expected):
+        # kiroku 自身のファイルの数は、kiroku を更新すると変わる（ファイルが増える）。記録の事実ではないので、
+        # 数までは照合しない。照合すると、更新しただけで以前のレポートが不一致になる（2026-11-25 の実機の確認）。
+        if part.startswith(OWN_COUNT):
+            part = OWN_COUNT
         for index in range(position, len(lines)):
             if lines[index].rstrip().startswith(part):
                 position = index + 1

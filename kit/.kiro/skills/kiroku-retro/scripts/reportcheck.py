@@ -126,6 +126,33 @@ def one_step(text, expected, limit, paths=None, targets=()):
     return errors
 
 
+TRACKED = ('approval:', 'practice:')   # 回数や状態で追う型。手がかりに書いたら、対象の型にも書く
+
+
+def untracked(text, known):
+    """`approval:…`・`practice:…` を書いたのに、「対象の型」の行が無い案（版9から）。
+
+    対象の型が無いと、台帳が採否と、その後の承認の数や状態を追えない（2026-11-25 の実機の確認の D33）。
+    """
+    errors, current = [], None
+    sections = []
+    for line in text.splitlines():
+        heading = HEADING.match(line)
+        if heading:
+            current = [heading.group(1), [], False]
+            sections.append(current)
+        elif line.startswith('#'):
+            current = None
+        elif current is not None:
+            current[1] += [c for c in re.findall(r'`([^`]+)`', line) if c.startswith(TRACKED) and c in known]
+            current[2] = current[2] or bool(TARGET.search(line))
+    for number, names, has_target in sections:
+        if names and not has_target:
+            errors.append('%s：%s を書いた案には、「- 対象の型：`%s`」の行も書いてください。採否と、その後の追跡に使います。'
+                          % (number, '、'.join('`%s`' % n for n in dict.fromkeys(names)), names[0]))
+    return errors
+
+
 def validate(text, expected, numbers=True, extra=()):
     """numbers は、案の番号の重複を不一致にするか。版2までのレポートは、そのころの規則どおり見ない
     （台帳は、どの版のレポートでも、重複した番号への判断を記録しない）。

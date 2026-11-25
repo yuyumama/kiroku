@@ -352,6 +352,20 @@ class SkeletonTest(SkeletonBase):
         moment = aggregate.datetime.datetime.now(aggregate.datetime.timezone.utc)
         return (moment + aggregate.datetime.timedelta(minutes=minutes)).isoformat().replace("+00:00", "Z")
 
+    def test_a_carried_over_proposal_keeps_its_target_even_if_the_type_is_gone(self):
+        """2026-11-25 の報告：今回出なかった前回の型で引き継いだ案を、検査が「集約にない対象の型」と拒否した。"""
+        self.report("2026-11-01-0900", "## ハーネスへの改善案（プロジェクト内）\n\n### P1. デプロイ手順をまとめる\n"
+                                       "- 対象の型：`topic:デプロイ手順`\n")
+        path, text = self.new_report()
+        carried = PROPOSAL.replace("`tool:make test`", "`topic:デプロイ手順`").replace(
+            "- 変更の内容：…", "- 変更の内容：前回の `2026-11-01-0900#P1` を引き継ぎ")
+        done = self.check(path, skeleton.SLOT.sub("なし", self.propose(text, carried)))
+        self.assertEqual(done.returncode, 0, done.stdout)
+        unknown = carried.replace("`topic:デプロイ手順`", "`topic:前回にも無い型`")
+        done = self.check(path, skeleton.SLOT.sub("なし", self.propose(text, unknown)))
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("集約にない対象の型：topic:前回にも無い型", done.stdout)
+
     def test_kiroku_files_added_by_an_update_do_not_change_the_lines_the_script_wrote(self):
         """kiroku の更新でファイルが増えても、以前のレポートを不一致にしない（2026-11-25 の実機の確認）。
 

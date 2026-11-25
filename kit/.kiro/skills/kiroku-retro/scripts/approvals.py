@@ -201,6 +201,23 @@ def _parts(command):
     return parts
 
 
+def deciding_part(command, config):
+    """(区分を決めた部分のコマンド, その区分, つないだコマンドか)。
+
+    いちばん危ない部分を選ぶ。同じ区分なら、作業場所を変えるだけのもの（cd など）より、ほかのものを選ぶ。
+    """
+    parts = _parts(command)
+    if len(parts) <= 1:
+        return command, classify(command, config), False
+    scored = []
+    for index, words in enumerate(parts):
+        kind = classify_argv(words, config)
+        program = os.path.basename(words[0].replace("\\", "/")) if words else ""
+        scored.append((ORDER.index(kind), program in NEUTRAL, index, words, kind))
+    _, _, _, words, kind = min(scored)
+    return shlex.join(words), kind, True
+
+
 def classify(command, config):
     """コマンド全体の危険の区分。つないだコマンドは、いちばん危ないもの。"""
     found = [classify_argv(part, config) for part in _parts(command)] or ["other"]
@@ -346,8 +363,12 @@ def collect(root, session_ids, config):
                 command = args.get("command")
                 if not isinstance(command, str) or commands.own_script(command):
                     continue
-                row.update(command=mask(command), key=commands.key(mask(command)), heading=heading(command),
-                           **{"class": classify(command, config)})
+                # つないだコマンドは、いちばん危ない部分で区分と見出しを決める（Kiro も部分ごとに判定する）。
+                # 見出しを最初の部分から作ると、`git add -A && git push --force` が「git add」になり、
+                # ふつうの `git add` まで「取り返しがつかない」に巻き込んでいた（2026-11-25 の報告）。
+                part, kind, compound = deciding_part(command, config)
+                row.update(command=mask(command), key=commands.key(mask(part)), heading=heading(part),
+                           part=mask(part) if compound else None, **{"class": kind})
             elif tool in WEB_TOOLS:
                 row.update(heading="%s %s" % (tool, _domain(args) or "不明"), **{"class": "other"})
             else:
@@ -404,7 +425,8 @@ def summarize(answers, read, hashes, since, until, pairing, min_sessions):
                  "unknown": sum(1 for r in period if r["decision"] == UNKNOWN),
                  "last_approved": max((r["ts"] for r in approved), default=None),
                  "candidate": False, "deny": False, "why": None, "rule": None, "rule_note": None,
-                 "rules_changed": False}
+                 "rules_changed": False,
+                 "part_of": next((r["command"] for r in reversed(rows) if r.get("part")), None)}
         if kind == "irreversible":
             entry["deny"] = bool(approved)
             entry["why"] = "取り返しがつかない操作。許可の候補にせず、deny の案の候補にする"
@@ -479,11 +501,11 @@ def lines(found, cap=None):
             text += "。最後の承認の後に、ワークスペースの規則のファイルが変わった（もう規則にしてあるかもしれない）"
         out.append(text)
     out += ["", "### 取り返しがつかない操作の承認（deny の案の候補。%d 件）" % len(denies), ""]
-    out += ["- `%s`：%s。%s" % (g["target"], _counts(g), g["why"]) for g in denies] or ["なし"]
+    out += ["- `%s`：%s%s。%s" % (g["target"], _counts(g), _part(g), g["why"]) for g in denies] or ["なし"]
     out += ["", "### 候補にしない承認（%d 件）" % len(others), ""]
     shown = others if cap is None else others[:cap * 2]
-    out += ["- `%s`：%s、区分：%s。%s" % (g["heading"], _counts(g), CLASSES[g["class"]], g["why"]) for g in shown] \
-        or ["なし"]
+    out += ["- `%s`：%s、区分：%s%s。%s" % (g["heading"], _counts(g), CLASSES[g["class"]], _part(g), g["why"])
+            for g in shown] or ["なし"]
     if len(shown) < len(others):
         out.append("- ほか %d 件。全件は `--section approvals` で出します。" % (len(others) - len(shown)))
     if found["unknown_values"]:
@@ -491,6 +513,11 @@ def lines(found, cap=None):
         out += ["- %s：%d 回（kiroku が知らない値。承認に数えない）" % (raw, count)
                 for raw, count in found["unknown_values"]]
     return out
+
+
+def _part(g):
+    """つないだコマンドから取った見出しなら、元のコマンドの例を添える。"""
+    return "（つないだコマンドの一部。例：`%s`）" % g["part_of"][:80] if g.get("part_of") else ""
 
 
 def _counts(g):

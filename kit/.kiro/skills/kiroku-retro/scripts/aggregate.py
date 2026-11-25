@@ -1626,6 +1626,11 @@ def main(argv=None):
             compared = kept_practices(state, name) if form >= 7 else None
             judged = compared or (practices.snapshot(data["practices"]) if form >= 7 else None)
             practice_targets = set(judged.get("targets") or judged["candidates"]) if judged else set()
+            # 以前のレポートの案の対象の型も認める。型が今回出なくても、利用者が引き継ぐと答えた案は、
+            # 元の対象の型のまま引き継ぎ、採用した後も追えるようにする（2026-11-25 の報告）。
+            carried = {p["target"] for p in ledger.proposals(root)
+                       if p.get("target") and str(p.get("report") or "") < name}
+            practice_targets |= carried
             errors = reportcheck.validate(body, data['report_facts'], numbers=form >= 4, extra=practice_targets)
             if form >= 9:   # 版9から。以前のレポートは、作ったときの規則のまま
                 errors += reportcheck.untracked(body, set(data['report_facts']['targets']) | practice_targets)

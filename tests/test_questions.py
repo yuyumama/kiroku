@@ -119,6 +119,18 @@ class QuestionTest(test_skeleton.SkeletonBase):
         code, out = self.result(rows, hinted)
         self.assertEqual(code, 0, out)
 
+    def test_numbered_short_answers_can_be_quoted_from_one_message(self):
+        """1通でまとめて答えたとき、「Q1 a」のような番号つきの答えは、質問ごとに引用できる（2026-11-25 の報告）。"""
+        rows = self.answered("Q1 a、Q2 c")
+        code, out = self.result(rows, QUESTION.replace("「はい」", "「Q1 a」"))
+        self.assertEqual(code, 0, out)
+        code, out = self.result(rows, QUESTION.replace("「はい」", "「Q3 b」"))   # 発話に無い
+        self.assertEqual(code, 1, out)
+        code, out = self.result(self.answered("Q12 a"), QUESTION.replace("「はい」", "「Q1 a」"))   # 別の番号の一部
+        self.assertEqual(code, 1, out)
+        code, out = self.result(rows, QUESTION.replace("「はい」", "「a」"))   # 番号の無い短い答えは、これまでどおり
+        self.assertEqual(code, 1, out)
+
     def test_unanswered_needs_no_quote_but_an_answer_does(self):
         unanswered = QUESTION.replace("- 回答：a（見立てのとおり）", "- 回答：未回答").replace(
             "- 引用（回答）：「はい」\n", "").replace("- 反映：P1 を出した", "- 反映：見立てのまま、様子見に書いた")

@@ -131,6 +131,19 @@ class ApprovalTest(test_review.ReviewSandbox):
         self.assertEqual(data["approvals"]["pairing"], {"order": 4})
         self.assertIn("答えと呼び出しの結び方（ログ全体）：ログの順で 4 件", aggregate.render(data, section="approvals"))
 
+    def test_a_compound_command_is_headed_by_its_most_dangerous_part(self):
+        """2026-11-25 の報告：つないだコマンドの見出しを最初の部分から作り、ふつうの `git add` まで
+        「取り返しがつかない」に巻き込んでいた。いちばん危ない部分で、見出しと区分を決める。"""
+        self.approve("sess_a", [("git add -A", "accept"), ("git add -A && git commit -m x && git push --force", "accept")])
+        self.approve("sess_b", [("git add -A", "accept"), ("cd /tmp/work && grep -rn TODO .", "accept")])
+        data = aggregate.aggregate(self.root)
+        add, push = group(data, "git add"), group(data, "git push")
+        self.assertEqual((add["class"], add["approved"], add["candidate"]), ("write", 2, True))
+        self.assertEqual((push["class"], push["deny"]), ("irreversible", True))
+        self.assertEqual(group(data, "grep")["class"], "read")   # cd は作業場所を変えるだけ
+        self.assertIn("つないだコマンドの一部。例：`git add -A && git commit -m x && git push --force`",
+                      aggregate.render(data, section="approvals"))
+
     def test_answers_that_cannot_be_paired_are_shown_not_dropped(self):
         self.approve("sess_a", [("git diff", "accept"), (None, "accept")], same_ids=False)
         data = aggregate.aggregate(self.root)
